@@ -107,6 +107,21 @@ CREATE FUNCTION public.sp_bodega_list(p_empresa_id bigint) RETURNS TABLE(id bigi
 
 
 --
+-- Name: sp_bodega_producto_ajustar_stock(bigint, bigint, numeric); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_bodega_producto_ajustar_stock(p_bodega_id bigint, p_producto_id bigint, p_delta numeric) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    AS $$
+BEGIN
+    UPDATE bodega_productos
+       SET stock = GREATEST(stock + p_delta, 0), updated_at = NOW()
+     WHERE bodega_id = p_bodega_id AND producto_id = p_producto_id;
+END;
+$$;
+
+
+--
 -- Name: sp_bodega_producto_stock(bigint, bigint, numeric, numeric); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -601,6 +616,44 @@ CREATE FUNCTION public.sp_consecutivo_next(p_empresa_id bigint, p_sucursal_id bi
                 RETURN QUERY SELECT v_next, v_num_consec;
             END;
             $$;
+
+
+--
+-- Name: sp_documento_ajustar_inventario(bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_documento_ajustar_inventario(p_documento_id bigint) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    AS $$
+DECLARE
+    v_tipo   varchar(2);
+    v_factor numeric;
+    r        record;
+BEGIN
+    SELECT tipo_documento INTO v_tipo
+      FROM documentos_electronicos WHERE id = p_documento_id;
+
+    IF v_tipo IN ('01','04') THEN
+        v_factor := -1;
+    ELSIF v_tipo = '03' THEN
+        v_factor := 1;
+    ELSE
+        RETURN;
+    END IF;
+
+    FOR r IN
+        SELECT dl.bodega_id, dl.producto_id, dl.cantidad
+          FROM documento_lineas dl
+          JOIN productos p ON p.id = dl.producto_id
+         WHERE dl.documento_id = p_documento_id
+           AND dl.bodega_id IS NOT NULL
+           AND dl.producto_id IS NOT NULL
+           AND p.type = 'product'
+    LOOP
+        PERFORM sp_bodega_producto_ajustar_stock(r.bodega_id, r.producto_id, v_factor * r.cantidad);
+    END LOOP;
+END;
+$$;
 
 
 --
