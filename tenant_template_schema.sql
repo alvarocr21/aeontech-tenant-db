@@ -88,22 +88,47 @@ CREATE FUNCTION public.sp_bodega_create(p_empresa_id bigint, p_name character va
 
 
 --
+-- Name: sp_bodega_create(bigint, character varying, text, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_bodega_create(p_empresa_id bigint, p_name character varying, p_description text DEFAULT NULL::text, p_permite_stock_negativo boolean DEFAULT false) RETURNS TABLE(id bigint, name character varying, is_default boolean)
+    LANGUAGE plpgsql SECURITY DEFINER
+    AS $$
+DECLARE
+    v_is_default BOOLEAN; v_bodega_id BIGINT; v_bodega_name VARCHAR;
+BEGIN
+    SELECT NOT EXISTS (SELECT 1 FROM bodegas WHERE empresa_id = p_empresa_id AND deleted_at IS NULL) INTO v_is_default;
+    INSERT INTO bodegas (empresa_id, name, description, is_default, permite_stock_negativo)
+    VALUES (p_empresa_id, p_name, p_description, v_is_default, p_permite_stock_negativo)
+    RETURNING bodegas.id, bodegas.name INTO v_bodega_id, v_bodega_name;
+    INSERT INTO bodega_productos (bodega_id, producto_id, stock, stock_min)
+    SELECT v_bodega_id, p.id, 0, 0 FROM productos p
+    WHERE p.empresa_id = p_empresa_id AND p.deleted_at IS NULL
+    ON CONFLICT (bodega_id, producto_id) DO NOTHING;
+    RETURN QUERY SELECT v_bodega_id, v_bodega_name, v_is_default;
+END;
+$$;
+
+
+--
 -- Name: sp_bodega_list(bigint); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_bodega_list(p_empresa_id bigint) RETURNS TABLE(id bigint, empresa_id bigint, name character varying, description text, is_default boolean, is_active boolean, total_productos bigint)
+CREATE FUNCTION public.sp_bodega_list(p_empresa_id bigint) RETURNS TABLE(id bigint, empresa_id bigint, name character varying, description text, is_default boolean, is_active boolean, total_productos bigint, permite_stock_negativo boolean)
     LANGUAGE plpgsql SECURITY DEFINER
     AS $$
-            BEGIN
-                RETURN QUERY
-                SELECT b.id, b.empresa_id, b.name, b.description, b.is_default, b.is_active,
-                       COUNT(bp.id) FILTER (WHERE bp.is_active)
-                FROM bodegas b
-                LEFT JOIN bodega_productos bp ON bp.bodega_id = b.id
-                WHERE b.empresa_id = p_empresa_id AND b.deleted_at IS NULL
-                GROUP BY b.id
-                ORDER BY b.is_default DESC, b.name;
-            END; $$;
+BEGIN
+    RETURN QUERY
+    SELECT b.id, b.empresa_id, b.name, b.description, b.is_default, b.is_active,
+           COUNT(bp.id) FILTER (WHERE bp.is_active),
+           b.permite_stock_negativo
+    FROM bodegas b
+    LEFT JOIN bodega_productos bp ON bp.bodega_id = b.id
+    WHERE b.empresa_id = p_empresa_id AND b.deleted_at IS NULL
+    GROUP BY b.id
+    ORDER BY b.is_default DESC, b.name;
+END;
+$$;
 
 
 --
@@ -113,10 +138,13 @@ CREATE FUNCTION public.sp_bodega_list(p_empresa_id bigint) RETURNS TABLE(id bigi
 CREATE FUNCTION public.sp_bodega_producto_ajustar_stock(p_bodega_id bigint, p_producto_id bigint, p_delta numeric) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER
     AS $$
+DECLARE v_permite_negativo boolean;
 BEGIN
+    SELECT permite_stock_negativo INTO v_permite_negativo FROM bodegas WHERE id = p_bodega_id;
     UPDATE bodega_productos
-       SET stock = GREATEST(stock + p_delta, 0), updated_at = NOW()
-     WHERE bodega_id = p_bodega_id AND producto_id = p_producto_id;
+       SET stock = CASE WHEN v_permite_negativo THEN stock + p_delta ELSE GREATEST(stock + p_delta, 0) END,
+           updated_at = NOW()
+    WHERE bodega_id = p_bodega_id AND producto_id = p_producto_id;
 END;
 $$;
 
@@ -200,6 +228,23 @@ CREATE FUNCTION public.sp_bodega_update(p_id bigint, p_name character varying, p
                 WHERE id=p_id AND deleted_at IS NULL;
                 GET DIAGNOSTICS v_rows = ROW_COUNT; RETURN v_rows > 0;
             END; $$;
+
+
+--
+-- Name: sp_bodega_update(bigint, character varying, text, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_bodega_update(p_id bigint, p_name character varying, p_description text DEFAULT NULL::text, p_permite_stock_negativo boolean DEFAULT false) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    AS $$
+DECLARE v_rows INTEGER;
+BEGIN
+    UPDATE bodegas SET name=p_name, description=p_description,
+           permite_stock_negativo=p_permite_stock_negativo, updated_at=NOW()
+    WHERE id=p_id AND deleted_at IS NULL;
+    GET DIAGNOSTICS v_rows = ROW_COUNT; RETURN v_rows > 0;
+END;
+$$;
 
 
 --
@@ -1820,7 +1865,8 @@ CREATE TABLE public.bodegas (
     is_active boolean DEFAULT true NOT NULL,
     deleted_at timestamp without time zone,
     created_at timestamp without time zone DEFAULT now() NOT NULL,
-    updated_at timestamp without time zone DEFAULT now() NOT NULL
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    permite_stock_negativo boolean DEFAULT false NOT NULL
 );
 
 
