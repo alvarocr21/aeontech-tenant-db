@@ -3361,11 +3361,11 @@ CREATE TABLE public.documento_referencias (
     id bigint NOT NULL,
     documento_id bigint NOT NULL,
     tipo_doc_ir character varying(2) NOT NULL,
-    tipo_doc_ref_otro character varying(2),
+    tipo_doc_ref_otro character varying(100),
     numero character varying(50) NOT NULL,
     fecha_emision_ir timestamp without time zone NOT NULL,
     codigo character varying(2) NOT NULL,
-    codigo_referencia_otro character varying(2),
+    codigo_referencia_otro character varying(100),
     razon text
 );
 
