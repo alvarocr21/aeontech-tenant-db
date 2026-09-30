@@ -1256,6 +1256,37 @@ CREATE FUNCTION public.sp_client_list(p_empresa_id bigint) RETURNS TABLE(id bigi
 
 
 --
+-- Name: sp_client_list_eliminados(bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_client_list_eliminados(p_empresa_id bigint) RETURNS TABLE(id bigint, name character varying, legal_name character varying, tax_id character varying, email character varying, phone character varying, deleted_at timestamp without time zone)
+    LANGUAGE sql STABLE
+    AS $$
+                SELECT c.id, c.name, c.legal_name, c.tax_id, c.email, c.phone, c.deleted_at
+                FROM clients c
+                WHERE c.deleted_at IS NOT NULL
+                ORDER BY c.deleted_at DESC;
+            $$;
+
+
+--
+-- Name: sp_client_restore(bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_client_restore(p_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    AS $$
+            DECLARE v_rows INTEGER;
+            BEGIN
+                UPDATE clients SET is_active = TRUE, deleted_at = NULL, updated_at = NOW()
+                WHERE id = p_id AND deleted_at IS NOT NULL;
+                GET DIAGNOSTICS v_rows = ROW_COUNT;
+                RETURN v_rows > 0;
+            END;
+            $$;
+
+
+--
 -- Name: sp_client_search(bigint, character varying); Type: FUNCTION; Schema: public; Owner: -
 --
 
