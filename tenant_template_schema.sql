@@ -36,36 +36,36 @@ COMMENT ON EXTENSION unaccent IS 'text search dictionary that removes accents';
 
 CREATE FUNCTION public.fn_auditoria_generica() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
-    AS $_$
-            DECLARE
-                v_datos_antes JSONB := NULL;
-                v_datos_despues JSONB := NULL;
-                v_tabla_auditoria TEXT;
-            BEGIN
-                v_tabla_auditoria := TG_TABLE_NAME || '_auditoria';
-
-                IF TG_OP = 'DELETE' THEN
-                    v_datos_antes := to_jsonb(OLD);
-                ELSIF TG_OP = 'UPDATE' THEN
-                    v_datos_antes   := to_jsonb(OLD);
-                    v_datos_despues := to_jsonb(NEW);
-                ELSE
-                    v_datos_despues := to_jsonb(NEW);
-                END IF;
-
-                EXECUTE format(
-                    'INSERT INTO %I (operacion, registro_id, datos_antes, datos_despues, app_user_id, ip_address)
-                     VALUES ($1, $2, $3, $4,
-                             NULLIF(current_setting(''app.current_user_id'', true), '''')::BIGINT,
-                             NULLIF(current_setting(''app.current_ip'', true), ''''))',
-                    v_tabla_auditoria
-                ) USING TG_OP,
-                    CASE TG_OP WHEN 'DELETE' THEN OLD.id ELSE NEW.id END,
-                    v_datos_antes,
-                    v_datos_despues;
-
-                RETURN CASE TG_OP WHEN 'DELETE' THEN OLD ELSE NEW END;
-            END;
+    AS $_$
+            DECLARE
+                v_datos_antes JSONB := NULL;
+                v_datos_despues JSONB := NULL;
+                v_tabla_auditoria TEXT;
+            BEGIN
+                v_tabla_auditoria := TG_TABLE_NAME || '_auditoria';
+
+                IF TG_OP = 'DELETE' THEN
+                    v_datos_antes := to_jsonb(OLD);
+                ELSIF TG_OP = 'UPDATE' THEN
+                    v_datos_antes   := to_jsonb(OLD);
+                    v_datos_despues := to_jsonb(NEW);
+                ELSE
+                    v_datos_despues := to_jsonb(NEW);
+                END IF;
+
+                EXECUTE format(
+                    'INSERT INTO %I (operacion, registro_id, datos_antes, datos_despues, app_user_id, ip_address)
+                     VALUES ($1, $2, $3, $4,
+                             NULLIF(current_setting(''app.current_user_id'', true), '''')::BIGINT,
+                             NULLIF(current_setting(''app.current_ip'', true), ''''))',
+                    v_tabla_auditoria
+                ) USING TG_OP,
+                    CASE TG_OP WHEN 'DELETE' THEN OLD.id ELSE NEW.id END,
+                    v_datos_antes,
+                    v_datos_despues;
+
+                RETURN CASE TG_OP WHEN 'DELETE' THEN OLD ELSE NEW END;
+            END;
             $_$;
 
 
@@ -75,17 +75,17 @@ CREATE FUNCTION public.fn_auditoria_generica() RETURNS trigger
 
 CREATE FUNCTION public.fn_empresa_condicion_ventas_get(p_empresa_id integer) RETURNS TABLE(codigo character varying, activo boolean, es_default boolean)
     LANGUAGE plpgsql STABLE
-    AS $$
-BEGIN
-  RETURN QUERY
-  SELECT
-    ecv.codigo,
-    ecv.activo,
-    ecv.es_default
-  FROM empresa_condicion_ventas ecv
-  WHERE ecv.empresa_id = p_empresa_id
-  ORDER BY ecv.codigo;
-END;
+    AS $$
+BEGIN
+  RETURN QUERY
+  SELECT
+    ecv.codigo,
+    ecv.activo,
+    ecv.es_default
+  FROM empresa_condicion_ventas ecv
+  WHERE ecv.empresa_id = p_empresa_id
+  ORDER BY ecv.codigo;
+END;
 $$;
 
 
@@ -773,29 +773,29 @@ END; $$;
 
 CREATE FUNCTION public.sp_bodega_create(p_empresa_id bigint, p_name character varying, p_description text DEFAULT NULL::text) RETURNS TABLE(id bigint, name character varying, is_default boolean)
     LANGUAGE plpgsql SECURITY DEFINER
-    AS $$
-            DECLARE
-                v_is_default BOOLEAN;
-                v_bodega_id  BIGINT;
-                v_bodega_name VARCHAR;
-            BEGIN
-                -- Primera bodega → es la principal
-                SELECT NOT EXISTS (
-                    SELECT 1 FROM bodegas WHERE empresa_id = p_empresa_id AND deleted_at IS NULL
-                ) INTO v_is_default;
-
-                INSERT INTO bodegas (empresa_id, name, description, is_default)
-                VALUES (p_empresa_id, p_name, p_description, v_is_default)
-                RETURNING bodegas.id, bodegas.name INTO v_bodega_id, v_bodega_name;
-
-                -- Heredar todos los productos existentes de la empresa con stock 0
-                INSERT INTO bodega_productos (bodega_id, producto_id, stock, stock_min)
-                SELECT v_bodega_id, p.id, 0, 0
-                FROM productos p
-                WHERE p.empresa_id = p_empresa_id AND p.deleted_at IS NULL
-                ON CONFLICT (bodega_id, producto_id) DO NOTHING;
-
-                RETURN QUERY SELECT v_bodega_id, v_bodega_name, v_is_default;
+    AS $$
+            DECLARE
+                v_is_default BOOLEAN;
+                v_bodega_id  BIGINT;
+                v_bodega_name VARCHAR;
+            BEGIN
+                -- Primera bodega → es la principal
+                SELECT NOT EXISTS (
+                    SELECT 1 FROM bodegas WHERE empresa_id = p_empresa_id AND deleted_at IS NULL
+                ) INTO v_is_default;
+
+                INSERT INTO bodegas (empresa_id, name, description, is_default)
+                VALUES (p_empresa_id, p_name, p_description, v_is_default)
+                RETURNING bodegas.id, bodegas.name INTO v_bodega_id, v_bodega_name;
+
+                -- Heredar todos los productos existentes de la empresa con stock 0
+                INSERT INTO bodega_productos (bodega_id, producto_id, stock, stock_min)
+                SELECT v_bodega_id, p.id, 0, 0
+                FROM productos p
+                WHERE p.empresa_id = p_empresa_id AND p.deleted_at IS NULL
+                ON CONFLICT (bodega_id, producto_id) DO NOTHING;
+
+                RETURN QUERY SELECT v_bodega_id, v_bodega_name, v_is_default;
             END; $$;
 
 
@@ -805,28 +805,28 @@ CREATE FUNCTION public.sp_bodega_create(p_empresa_id bigint, p_name character va
 
 CREATE FUNCTION public.sp_bodega_create(p_empresa_id bigint, p_name character varying, p_description text DEFAULT NULL::text, p_permite_stock_negativo boolean DEFAULT false) RETURNS TABLE(id bigint, name character varying, is_default boolean)
     LANGUAGE plpgsql SECURITY DEFINER
-    AS $$
-DECLARE
-    v_is_default BOOLEAN;
-    v_bodega_id  BIGINT;
-    v_bodega_name VARCHAR;
-BEGIN
-    SELECT NOT EXISTS (
-        SELECT 1 FROM bodegas WHERE empresa_id = p_empresa_id AND deleted_at IS NULL
-    ) INTO v_is_default;
-
-    INSERT INTO bodegas (empresa_id, name, description, is_default, permite_stock_negativo)
-    VALUES (p_empresa_id, p_name, p_description, v_is_default, p_permite_stock_negativo)
-    RETURNING bodegas.id, bodegas.name INTO v_bodega_id, v_bodega_name;
-
-    INSERT INTO bodega_productos (bodega_id, producto_id, stock, stock_min)
-    SELECT v_bodega_id, p.id, 0, 0
-    FROM productos p
-    WHERE p.empresa_id = p_empresa_id AND p.deleted_at IS NULL
-    ON CONFLICT (bodega_id, producto_id) DO NOTHING;
-
-    RETURN QUERY SELECT v_bodega_id, v_bodega_name, v_is_default;
-END;
+    AS $$
+DECLARE
+    v_is_default BOOLEAN;
+    v_bodega_id  BIGINT;
+    v_bodega_name VARCHAR;
+BEGIN
+    SELECT NOT EXISTS (
+        SELECT 1 FROM bodegas WHERE empresa_id = p_empresa_id AND deleted_at IS NULL
+    ) INTO v_is_default;
+
+    INSERT INTO bodegas (empresa_id, name, description, is_default, permite_stock_negativo)
+    VALUES (p_empresa_id, p_name, p_description, v_is_default, p_permite_stock_negativo)
+    RETURNING bodegas.id, bodegas.name INTO v_bodega_id, v_bodega_name;
+
+    INSERT INTO bodega_productos (bodega_id, producto_id, stock, stock_min)
+    SELECT v_bodega_id, p.id, 0, 0
+    FROM productos p
+    WHERE p.empresa_id = p_empresa_id AND p.deleted_at IS NULL
+    ON CONFLICT (bodega_id, producto_id) DO NOTHING;
+
+    RETURN QUERY SELECT v_bodega_id, v_bodega_name, v_is_default;
+END;
 $$;
 
 
@@ -906,12 +906,12 @@ CREATE FUNCTION public.sp_bodega_producto_ajustar_stock(p_bodega_id bigint, p_pr
 
 CREATE FUNCTION public.sp_bodega_producto_stock(p_bodega_id bigint, p_producto_id bigint, p_stock numeric, p_stock_min numeric) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
-    AS $$
-            DECLARE v_rows INTEGER;
-            BEGIN
-                UPDATE bodega_productos SET stock=p_stock, stock_min=p_stock_min, updated_at=NOW()
-                WHERE bodega_id=p_bodega_id AND producto_id=p_producto_id;
-                GET DIAGNOSTICS v_rows = ROW_COUNT; RETURN v_rows > 0;
+    AS $$
+            DECLARE v_rows INTEGER;
+            BEGIN
+                UPDATE bodega_productos SET stock=p_stock, stock_min=p_stock_min, updated_at=NOW()
+                WHERE bodega_id=p_bodega_id AND producto_id=p_producto_id;
+                GET DIAGNOSTICS v_rows = ROW_COUNT; RETURN v_rows > 0;
             END; $$;
 
 
@@ -939,14 +939,14 @@ $$;
 
 CREATE FUNCTION public.sp_bodega_set_default(p_id bigint, p_empresa_id bigint) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
-    AS $$
-            DECLARE v_rows INTEGER;
-            BEGIN
-                UPDATE bodegas SET is_default=FALSE, updated_at=NOW()
-                WHERE empresa_id=p_empresa_id AND is_default=TRUE;
-                UPDATE bodegas SET is_default=TRUE, updated_at=NOW()
-                WHERE id=p_id AND deleted_at IS NULL;
-                GET DIAGNOSTICS v_rows = ROW_COUNT; RETURN v_rows > 0;
+    AS $$
+            DECLARE v_rows INTEGER;
+            BEGIN
+                UPDATE bodegas SET is_default=FALSE, updated_at=NOW()
+                WHERE empresa_id=p_empresa_id AND is_default=TRUE;
+                UPDATE bodegas SET is_default=TRUE, updated_at=NOW()
+                WHERE id=p_id AND deleted_at IS NULL;
+                GET DIAGNOSTICS v_rows = ROW_COUNT; RETURN v_rows > 0;
             END; $$;
 
 
@@ -956,16 +956,16 @@ CREATE FUNCTION public.sp_bodega_set_default(p_id bigint, p_empresa_id bigint) R
 
 CREATE FUNCTION public.sp_bodega_soft_delete(p_id bigint) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
-    AS $$
-            DECLARE v_rows INTEGER;
-            BEGIN
-                -- No se puede eliminar la bodega principal
-                IF EXISTS (SELECT 1 FROM bodegas WHERE id=p_id AND is_default=TRUE) THEN
-                    RAISE EXCEPTION 'No se puede eliminar la bodega principal.';
-                END IF;
-                UPDATE bodegas SET is_active=FALSE, deleted_at=NOW(), updated_at=NOW()
-                WHERE id=p_id AND deleted_at IS NULL;
-                GET DIAGNOSTICS v_rows = ROW_COUNT; RETURN v_rows > 0;
+    AS $$
+            DECLARE v_rows INTEGER;
+            BEGIN
+                -- No se puede eliminar la bodega principal
+                IF EXISTS (SELECT 1 FROM bodegas WHERE id=p_id AND is_default=TRUE) THEN
+                    RAISE EXCEPTION 'No se puede eliminar la bodega principal.';
+                END IF;
+                UPDATE bodegas SET is_active=FALSE, deleted_at=NOW(), updated_at=NOW()
+                WHERE id=p_id AND deleted_at IS NULL;
+                GET DIAGNOSTICS v_rows = ROW_COUNT; RETURN v_rows > 0;
             END; $$;
 
 
@@ -975,12 +975,12 @@ CREATE FUNCTION public.sp_bodega_soft_delete(p_id bigint) RETURNS boolean
 
 CREATE FUNCTION public.sp_bodega_update(p_id bigint, p_name character varying, p_description text DEFAULT NULL::text) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
-    AS $$
-            DECLARE v_rows INTEGER;
-            BEGIN
-                UPDATE bodegas SET name=p_name, description=p_description, updated_at=NOW()
-                WHERE id=p_id AND deleted_at IS NULL;
-                GET DIAGNOSTICS v_rows = ROW_COUNT; RETURN v_rows > 0;
+    AS $$
+            DECLARE v_rows INTEGER;
+            BEGIN
+                UPDATE bodegas SET name=p_name, description=p_description, updated_at=NOW()
+                WHERE id=p_id AND deleted_at IS NULL;
+                GET DIAGNOSTICS v_rows = ROW_COUNT; RETURN v_rows > 0;
             END; $$;
 
 
@@ -990,17 +990,17 @@ CREATE FUNCTION public.sp_bodega_update(p_id bigint, p_name character varying, p
 
 CREATE FUNCTION public.sp_bodega_update(p_id bigint, p_name character varying, p_description text DEFAULT NULL::text, p_permite_stock_negativo boolean DEFAULT false) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
-    AS $$
-DECLARE v_rows INTEGER;
-BEGIN
-    UPDATE bodegas
-       SET name = p_name, description = p_description,
-           permite_stock_negativo = p_permite_stock_negativo,
-           updated_at = NOW()
-    WHERE id = p_id AND deleted_at IS NULL;
-    GET DIAGNOSTICS v_rows = ROW_COUNT;
-    RETURN v_rows > 0;
-END;
+    AS $$
+DECLARE v_rows INTEGER;
+BEGIN
+    UPDATE bodegas
+       SET name = p_name, description = p_description,
+           permite_stock_negativo = p_permite_stock_negativo,
+           updated_at = NOW()
+    WHERE id = p_id AND deleted_at IS NULL;
+    GET DIAGNOSTICS v_rows = ROW_COUNT;
+    RETURN v_rows > 0;
+END;
 $$;
 
 
@@ -1587,60 +1587,60 @@ CREATE FUNCTION public.sp_company_settings_get(p_empresa_id bigint) RETURNS TABL
 
 CREATE FUNCTION public.sp_company_settings_save(p_empresa_id bigint, p_legal_name character varying, p_commercial_name character varying, p_tax_id character varying, p_tax_id_type character varying, p_province_code character varying, p_canton_code character varying, p_district_code character varying, p_other_signs text, p_phone character varying, p_email character varying, p_hacienda_environment character varying, p_hacienda_username_encrypted text, p_hacienda_password_encrypted text, p_certificate_p12_encrypted text, p_certificate_password_encrypted text, p_certificate_subject text, p_certificate_issuer text, p_certificate_serial character varying, p_certificate_valid_from timestamp without time zone, p_certificate_valid_to timestamp without time zone, p_certificate_tax_id character varying, p_certificate_validated_at timestamp without time zone, p_hacienda_token_tested_at timestamp without time zone, p_hacienda_token_expires_at timestamp without time zone, p_validation_status character varying, p_validation_errors jsonb) RETURNS TABLE(id bigint, validation_status character varying)
     LANGUAGE plpgsql SECURITY DEFINER
-    AS $$
-            BEGIN
-                RETURN QUERY
-                INSERT INTO company_settings (
-                    empresa_id, legal_name, commercial_name, tax_id, tax_id_type,
-                    province_code, canton_code, district_code, other_signs, phone, email,
-                    hacienda_environment, hacienda_username_encrypted, hacienda_password_encrypted,
-                    certificate_p12_encrypted, certificate_password_encrypted,
-                    certificate_subject, certificate_issuer, certificate_serial,
-                    certificate_valid_from, certificate_valid_to, certificate_tax_id,
-                    certificate_validated_at, hacienda_token_tested_at, hacienda_token_expires_at,
-                    validation_status, validation_errors
-                )
-                VALUES (
-                    p_empresa_id, p_legal_name, p_commercial_name, p_tax_id, p_tax_id_type,
-                    p_province_code, p_canton_code, p_district_code, p_other_signs, p_phone, p_email,
-                    p_hacienda_environment, p_hacienda_username_encrypted, p_hacienda_password_encrypted,
-                    p_certificate_p12_encrypted, p_certificate_password_encrypted,
-                    p_certificate_subject, p_certificate_issuer, p_certificate_serial,
-                    p_certificate_valid_from, p_certificate_valid_to, p_certificate_tax_id,
-                    p_certificate_validated_at, p_hacienda_token_tested_at, p_hacienda_token_expires_at,
-                    p_validation_status, COALESCE(p_validation_errors, '[]'::jsonb)
-                )
-                ON CONFLICT (empresa_id) DO UPDATE SET
-                    legal_name = EXCLUDED.legal_name,
-                    commercial_name = EXCLUDED.commercial_name,
-                    tax_id = EXCLUDED.tax_id,
-                    tax_id_type = EXCLUDED.tax_id_type,
-                    province_code = EXCLUDED.province_code,
-                    canton_code = EXCLUDED.canton_code,
-                    district_code = EXCLUDED.district_code,
-                    other_signs = EXCLUDED.other_signs,
-                    phone = EXCLUDED.phone,
-                    email = EXCLUDED.email,
-                    hacienda_environment = EXCLUDED.hacienda_environment,
-                    hacienda_username_encrypted = COALESCE(EXCLUDED.hacienda_username_encrypted, company_settings.hacienda_username_encrypted),
-                    hacienda_password_encrypted = COALESCE(EXCLUDED.hacienda_password_encrypted, company_settings.hacienda_password_encrypted),
-                    certificate_p12_encrypted = COALESCE(EXCLUDED.certificate_p12_encrypted, company_settings.certificate_p12_encrypted),
-                    certificate_password_encrypted = COALESCE(EXCLUDED.certificate_password_encrypted, company_settings.certificate_password_encrypted),
-                    certificate_subject = COALESCE(EXCLUDED.certificate_subject, company_settings.certificate_subject),
-                    certificate_issuer = COALESCE(EXCLUDED.certificate_issuer, company_settings.certificate_issuer),
-                    certificate_serial = COALESCE(EXCLUDED.certificate_serial, company_settings.certificate_serial),
-                    certificate_valid_from = COALESCE(EXCLUDED.certificate_valid_from, company_settings.certificate_valid_from),
-                    certificate_valid_to = COALESCE(EXCLUDED.certificate_valid_to, company_settings.certificate_valid_to),
-                    certificate_tax_id = COALESCE(EXCLUDED.certificate_tax_id, company_settings.certificate_tax_id),
-                    certificate_validated_at = COALESCE(EXCLUDED.certificate_validated_at, company_settings.certificate_validated_at),
-                    hacienda_token_tested_at = COALESCE(EXCLUDED.hacienda_token_tested_at, company_settings.hacienda_token_tested_at),
-                    hacienda_token_expires_at = COALESCE(EXCLUDED.hacienda_token_expires_at, company_settings.hacienda_token_expires_at),
-                    validation_status = EXCLUDED.validation_status,
-                    validation_errors = COALESCE(EXCLUDED.validation_errors, '[]'::jsonb),
-                    is_active = TRUE,
-                    deleted_at = NULL,
-                    updated_at = NOW()
-                RETURNING company_settings.id, company_settings.validation_status;
+    AS $$
+            BEGIN
+                RETURN QUERY
+                INSERT INTO company_settings (
+                    empresa_id, legal_name, commercial_name, tax_id, tax_id_type,
+                    province_code, canton_code, district_code, other_signs, phone, email,
+                    hacienda_environment, hacienda_username_encrypted, hacienda_password_encrypted,
+                    certificate_p12_encrypted, certificate_password_encrypted,
+                    certificate_subject, certificate_issuer, certificate_serial,
+                    certificate_valid_from, certificate_valid_to, certificate_tax_id,
+                    certificate_validated_at, hacienda_token_tested_at, hacienda_token_expires_at,
+                    validation_status, validation_errors
+                )
+                VALUES (
+                    p_empresa_id, p_legal_name, p_commercial_name, p_tax_id, p_tax_id_type,
+                    p_province_code, p_canton_code, p_district_code, p_other_signs, p_phone, p_email,
+                    p_hacienda_environment, p_hacienda_username_encrypted, p_hacienda_password_encrypted,
+                    p_certificate_p12_encrypted, p_certificate_password_encrypted,
+                    p_certificate_subject, p_certificate_issuer, p_certificate_serial,
+                    p_certificate_valid_from, p_certificate_valid_to, p_certificate_tax_id,
+                    p_certificate_validated_at, p_hacienda_token_tested_at, p_hacienda_token_expires_at,
+                    p_validation_status, COALESCE(p_validation_errors, '[]'::jsonb)
+                )
+                ON CONFLICT (empresa_id) DO UPDATE SET
+                    legal_name = EXCLUDED.legal_name,
+                    commercial_name = EXCLUDED.commercial_name,
+                    tax_id = EXCLUDED.tax_id,
+                    tax_id_type = EXCLUDED.tax_id_type,
+                    province_code = EXCLUDED.province_code,
+                    canton_code = EXCLUDED.canton_code,
+                    district_code = EXCLUDED.district_code,
+                    other_signs = EXCLUDED.other_signs,
+                    phone = EXCLUDED.phone,
+                    email = EXCLUDED.email,
+                    hacienda_environment = EXCLUDED.hacienda_environment,
+                    hacienda_username_encrypted = COALESCE(EXCLUDED.hacienda_username_encrypted, company_settings.hacienda_username_encrypted),
+                    hacienda_password_encrypted = COALESCE(EXCLUDED.hacienda_password_encrypted, company_settings.hacienda_password_encrypted),
+                    certificate_p12_encrypted = COALESCE(EXCLUDED.certificate_p12_encrypted, company_settings.certificate_p12_encrypted),
+                    certificate_password_encrypted = COALESCE(EXCLUDED.certificate_password_encrypted, company_settings.certificate_password_encrypted),
+                    certificate_subject = COALESCE(EXCLUDED.certificate_subject, company_settings.certificate_subject),
+                    certificate_issuer = COALESCE(EXCLUDED.certificate_issuer, company_settings.certificate_issuer),
+                    certificate_serial = COALESCE(EXCLUDED.certificate_serial, company_settings.certificate_serial),
+                    certificate_valid_from = COALESCE(EXCLUDED.certificate_valid_from, company_settings.certificate_valid_from),
+                    certificate_valid_to = COALESCE(EXCLUDED.certificate_valid_to, company_settings.certificate_valid_to),
+                    certificate_tax_id = COALESCE(EXCLUDED.certificate_tax_id, company_settings.certificate_tax_id),
+                    certificate_validated_at = COALESCE(EXCLUDED.certificate_validated_at, company_settings.certificate_validated_at),
+                    hacienda_token_tested_at = COALESCE(EXCLUDED.hacienda_token_tested_at, company_settings.hacienda_token_tested_at),
+                    hacienda_token_expires_at = COALESCE(EXCLUDED.hacienda_token_expires_at, company_settings.hacienda_token_expires_at),
+                    validation_status = EXCLUDED.validation_status,
+                    validation_errors = COALESCE(EXCLUDED.validation_errors, '[]'::jsonb),
+                    is_active = TRUE,
+                    deleted_at = NULL,
+                    updated_at = NOW()
+                RETURNING company_settings.id, company_settings.validation_status;
             END; $$;
 
 
@@ -1650,64 +1650,64 @@ CREATE FUNCTION public.sp_company_settings_save(p_empresa_id bigint, p_legal_nam
 
 CREATE FUNCTION public.sp_company_settings_save(p_empresa_id bigint, p_legal_name character varying, p_commercial_name character varying, p_tax_id character varying, p_tax_id_type character varying, p_province_code character varying, p_canton_code character varying, p_district_code character varying, p_other_signs text, p_phone character varying, p_email character varying, p_actividad_economica character varying, p_leyenda_tributaria text, p_hacienda_environment character varying, p_hacienda_username_encrypted text, p_hacienda_password_encrypted text, p_certificate_p12_encrypted text, p_certificate_password_encrypted text, p_certificate_subject text, p_certificate_issuer text, p_certificate_serial character varying, p_certificate_valid_from timestamp without time zone, p_certificate_valid_to timestamp without time zone, p_certificate_tax_id character varying, p_certificate_validated_at timestamp without time zone, p_hacienda_token_tested_at timestamp without time zone, p_hacienda_token_expires_at timestamp without time zone, p_validation_status character varying, p_validation_errors jsonb) RETURNS TABLE(id bigint, validation_status character varying)
     LANGUAGE plpgsql SECURITY DEFINER
-    AS $$
-            BEGIN
-                RETURN QUERY
-                INSERT INTO company_settings (
-                    empresa_id, legal_name, commercial_name, tax_id, tax_id_type,
-                    province_code, canton_code, district_code, other_signs, phone, email,
-                    actividad_economica, leyenda_tributaria,
-                    hacienda_environment, hacienda_username_encrypted, hacienda_password_encrypted,
-                    certificate_p12_encrypted, certificate_password_encrypted,
-                    certificate_subject, certificate_issuer, certificate_serial,
-                    certificate_valid_from, certificate_valid_to, certificate_tax_id,
-                    certificate_validated_at, hacienda_token_tested_at, hacienda_token_expires_at,
-                    validation_status, validation_errors
-                )
-                VALUES (
-                    p_empresa_id, p_legal_name, p_commercial_name, p_tax_id, p_tax_id_type,
-                    p_province_code, p_canton_code, p_district_code, p_other_signs, p_phone, p_email,
-                    p_actividad_economica, p_leyenda_tributaria,
-                    p_hacienda_environment, p_hacienda_username_encrypted, p_hacienda_password_encrypted,
-                    p_certificate_p12_encrypted, p_certificate_password_encrypted,
-                    p_certificate_subject, p_certificate_issuer, p_certificate_serial,
-                    p_certificate_valid_from, p_certificate_valid_to, p_certificate_tax_id,
-                    p_certificate_validated_at, p_hacienda_token_tested_at, p_hacienda_token_expires_at,
-                    p_validation_status, COALESCE(p_validation_errors, '[]'::jsonb)
-                )
-                ON CONFLICT (empresa_id) DO UPDATE SET
-                    legal_name                      = EXCLUDED.legal_name,
-                    commercial_name                 = EXCLUDED.commercial_name,
-                    tax_id                          = EXCLUDED.tax_id,
-                    tax_id_type                     = EXCLUDED.tax_id_type,
-                    province_code                   = EXCLUDED.province_code,
-                    canton_code                     = EXCLUDED.canton_code,
-                    district_code                   = EXCLUDED.district_code,
-                    other_signs                     = EXCLUDED.other_signs,
-                    phone                           = EXCLUDED.phone,
-                    email                           = EXCLUDED.email,
-                    actividad_economica             = EXCLUDED.actividad_economica,
-                    leyenda_tributaria              = EXCLUDED.leyenda_tributaria,
-                    hacienda_environment            = EXCLUDED.hacienda_environment,
-                    hacienda_username_encrypted     = COALESCE(EXCLUDED.hacienda_username_encrypted, company_settings.hacienda_username_encrypted),
-                    hacienda_password_encrypted     = COALESCE(EXCLUDED.hacienda_password_encrypted, company_settings.hacienda_password_encrypted),
-                    certificate_p12_encrypted       = COALESCE(EXCLUDED.certificate_p12_encrypted, company_settings.certificate_p12_encrypted),
-                    certificate_password_encrypted  = COALESCE(EXCLUDED.certificate_password_encrypted, company_settings.certificate_password_encrypted),
-                    certificate_subject             = COALESCE(EXCLUDED.certificate_subject, company_settings.certificate_subject),
-                    certificate_issuer              = COALESCE(EXCLUDED.certificate_issuer, company_settings.certificate_issuer),
-                    certificate_serial              = COALESCE(EXCLUDED.certificate_serial, company_settings.certificate_serial),
-                    certificate_valid_from          = COALESCE(EXCLUDED.certificate_valid_from, company_settings.certificate_valid_from),
-                    certificate_valid_to            = COALESCE(EXCLUDED.certificate_valid_to, company_settings.certificate_valid_to),
-                    certificate_tax_id              = COALESCE(EXCLUDED.certificate_tax_id, company_settings.certificate_tax_id),
-                    certificate_validated_at        = COALESCE(EXCLUDED.certificate_validated_at, company_settings.certificate_validated_at),
-                    hacienda_token_tested_at        = COALESCE(EXCLUDED.hacienda_token_tested_at, company_settings.hacienda_token_tested_at),
-                    hacienda_token_expires_at       = COALESCE(EXCLUDED.hacienda_token_expires_at, company_settings.hacienda_token_expires_at),
-                    validation_status               = EXCLUDED.validation_status,
-                    validation_errors               = COALESCE(EXCLUDED.validation_errors, '[]'::jsonb),
-                    is_active                       = TRUE,
-                    deleted_at                      = NULL,
-                    updated_at                      = NOW()
-                RETURNING company_settings.id, company_settings.validation_status;
+    AS $$
+            BEGIN
+                RETURN QUERY
+                INSERT INTO company_settings (
+                    empresa_id, legal_name, commercial_name, tax_id, tax_id_type,
+                    province_code, canton_code, district_code, other_signs, phone, email,
+                    actividad_economica, leyenda_tributaria,
+                    hacienda_environment, hacienda_username_encrypted, hacienda_password_encrypted,
+                    certificate_p12_encrypted, certificate_password_encrypted,
+                    certificate_subject, certificate_issuer, certificate_serial,
+                    certificate_valid_from, certificate_valid_to, certificate_tax_id,
+                    certificate_validated_at, hacienda_token_tested_at, hacienda_token_expires_at,
+                    validation_status, validation_errors
+                )
+                VALUES (
+                    p_empresa_id, p_legal_name, p_commercial_name, p_tax_id, p_tax_id_type,
+                    p_province_code, p_canton_code, p_district_code, p_other_signs, p_phone, p_email,
+                    p_actividad_economica, p_leyenda_tributaria,
+                    p_hacienda_environment, p_hacienda_username_encrypted, p_hacienda_password_encrypted,
+                    p_certificate_p12_encrypted, p_certificate_password_encrypted,
+                    p_certificate_subject, p_certificate_issuer, p_certificate_serial,
+                    p_certificate_valid_from, p_certificate_valid_to, p_certificate_tax_id,
+                    p_certificate_validated_at, p_hacienda_token_tested_at, p_hacienda_token_expires_at,
+                    p_validation_status, COALESCE(p_validation_errors, '[]'::jsonb)
+                )
+                ON CONFLICT (empresa_id) DO UPDATE SET
+                    legal_name                      = EXCLUDED.legal_name,
+                    commercial_name                 = EXCLUDED.commercial_name,
+                    tax_id                          = EXCLUDED.tax_id,
+                    tax_id_type                     = EXCLUDED.tax_id_type,
+                    province_code                   = EXCLUDED.province_code,
+                    canton_code                     = EXCLUDED.canton_code,
+                    district_code                   = EXCLUDED.district_code,
+                    other_signs                     = EXCLUDED.other_signs,
+                    phone                           = EXCLUDED.phone,
+                    email                           = EXCLUDED.email,
+                    actividad_economica             = EXCLUDED.actividad_economica,
+                    leyenda_tributaria              = EXCLUDED.leyenda_tributaria,
+                    hacienda_environment            = EXCLUDED.hacienda_environment,
+                    hacienda_username_encrypted     = COALESCE(EXCLUDED.hacienda_username_encrypted, company_settings.hacienda_username_encrypted),
+                    hacienda_password_encrypted     = COALESCE(EXCLUDED.hacienda_password_encrypted, company_settings.hacienda_password_encrypted),
+                    certificate_p12_encrypted       = COALESCE(EXCLUDED.certificate_p12_encrypted, company_settings.certificate_p12_encrypted),
+                    certificate_password_encrypted  = COALESCE(EXCLUDED.certificate_password_encrypted, company_settings.certificate_password_encrypted),
+                    certificate_subject             = COALESCE(EXCLUDED.certificate_subject, company_settings.certificate_subject),
+                    certificate_issuer              = COALESCE(EXCLUDED.certificate_issuer, company_settings.certificate_issuer),
+                    certificate_serial              = COALESCE(EXCLUDED.certificate_serial, company_settings.certificate_serial),
+                    certificate_valid_from          = COALESCE(EXCLUDED.certificate_valid_from, company_settings.certificate_valid_from),
+                    certificate_valid_to            = COALESCE(EXCLUDED.certificate_valid_to, company_settings.certificate_valid_to),
+                    certificate_tax_id              = COALESCE(EXCLUDED.certificate_tax_id, company_settings.certificate_tax_id),
+                    certificate_validated_at        = COALESCE(EXCLUDED.certificate_validated_at, company_settings.certificate_validated_at),
+                    hacienda_token_tested_at        = COALESCE(EXCLUDED.hacienda_token_tested_at, company_settings.hacienda_token_tested_at),
+                    hacienda_token_expires_at       = COALESCE(EXCLUDED.hacienda_token_expires_at, company_settings.hacienda_token_expires_at),
+                    validation_status               = EXCLUDED.validation_status,
+                    validation_errors               = COALESCE(EXCLUDED.validation_errors, '[]'::jsonb),
+                    is_active                       = TRUE,
+                    deleted_at                      = NULL,
+                    updated_at                      = NOW()
+                RETURNING company_settings.id, company_settings.validation_status;
             END; $$;
 
 
@@ -1717,67 +1717,67 @@ CREATE FUNCTION public.sp_company_settings_save(p_empresa_id bigint, p_legal_nam
 
 CREATE FUNCTION public.sp_company_settings_save(p_empresa_id bigint, p_legal_name character varying, p_commercial_name character varying, p_tax_id character varying, p_tax_id_type character varying, p_province_code character varying, p_canton_code character varying, p_district_code character varying, p_other_signs text, p_phone character varying, p_email character varying, p_actividad_economica character varying, p_leyenda_tributaria text, p_hacienda_environment character varying, p_hacienda_username_encrypted text, p_hacienda_password_encrypted text, p_certificate_p12_encrypted text, p_certificate_password_encrypted text, p_certificate_subject text, p_certificate_issuer text, p_certificate_serial character varying, p_certificate_valid_from timestamp without time zone, p_certificate_valid_to timestamp without time zone, p_certificate_tax_id character varying, p_certificate_validated_at timestamp without time zone, p_hacienda_token_tested_at timestamp without time zone, p_hacienda_token_expires_at timestamp without time zone, p_validation_status character varying, p_validation_errors jsonb, p_logo_url text DEFAULT NULL::text, p_logo_public_id text DEFAULT NULL::text) RETURNS TABLE(id bigint, validation_status character varying)
     LANGUAGE plpgsql SECURITY DEFINER
-    AS $$
-BEGIN
-  RETURN QUERY
-  INSERT INTO company_settings (
-    empresa_id, legal_name, commercial_name, tax_id, tax_id_type,
-    province_code, canton_code, district_code, other_signs, phone, email,
-    actividad_economica, leyenda_tributaria,
-    hacienda_environment, hacienda_username_encrypted, hacienda_password_encrypted,
-    certificate_p12_encrypted, certificate_password_encrypted,
-    certificate_subject, certificate_issuer, certificate_serial,
-    certificate_valid_from, certificate_valid_to, certificate_tax_id,
-    certificate_validated_at, hacienda_token_tested_at, hacienda_token_expires_at,
-    validation_status, validation_errors, logo_url, logo_public_id
-  )
-  VALUES (
-    p_empresa_id, p_legal_name, p_commercial_name, p_tax_id, p_tax_id_type,
-    p_province_code, p_canton_code, p_district_code, p_other_signs, p_phone, p_email,
-    p_actividad_economica, p_leyenda_tributaria,
-    p_hacienda_environment, p_hacienda_username_encrypted, p_hacienda_password_encrypted,
-    p_certificate_p12_encrypted, p_certificate_password_encrypted,
-    p_certificate_subject, p_certificate_issuer, p_certificate_serial,
-    p_certificate_valid_from, p_certificate_valid_to, p_certificate_tax_id,
-    p_certificate_validated_at, p_hacienda_token_tested_at, p_hacienda_token_expires_at,
-    p_validation_status, COALESCE(p_validation_errors, '[]'::jsonb),
-    p_logo_url, p_logo_public_id
-  )
-  ON CONFLICT (empresa_id) DO UPDATE SET
-    legal_name                      = EXCLUDED.legal_name,
-    commercial_name                 = EXCLUDED.commercial_name,
-    tax_id                          = EXCLUDED.tax_id,
-    tax_id_type                     = EXCLUDED.tax_id_type,
-    province_code                   = EXCLUDED.province_code,
-    canton_code                     = EXCLUDED.canton_code,
-    district_code                   = EXCLUDED.district_code,
-    other_signs                     = EXCLUDED.other_signs,
-    phone                           = EXCLUDED.phone,
-    email                           = EXCLUDED.email,
-    actividad_economica             = EXCLUDED.actividad_economica,
-    leyenda_tributaria              = EXCLUDED.leyenda_tributaria,
-    hacienda_environment            = EXCLUDED.hacienda_environment,
-    hacienda_username_encrypted     = COALESCE(EXCLUDED.hacienda_username_encrypted, company_settings.hacienda_username_encrypted),
-    hacienda_password_encrypted     = COALESCE(EXCLUDED.hacienda_password_encrypted, company_settings.hacienda_password_encrypted),
-    certificate_p12_encrypted       = COALESCE(EXCLUDED.certificate_p12_encrypted, company_settings.certificate_p12_encrypted),
-    certificate_password_encrypted  = COALESCE(EXCLUDED.certificate_password_encrypted, company_settings.certificate_password_encrypted),
-    certificate_subject             = COALESCE(EXCLUDED.certificate_subject, company_settings.certificate_subject),
-    certificate_issuer              = COALESCE(EXCLUDED.certificate_issuer, company_settings.certificate_issuer),
-    certificate_serial              = COALESCE(EXCLUDED.certificate_serial, company_settings.certificate_serial),
-    certificate_valid_from          = COALESCE(EXCLUDED.certificate_valid_from, company_settings.certificate_valid_from),
-    certificate_valid_to            = COALESCE(EXCLUDED.certificate_valid_to, company_settings.certificate_valid_to),
-    certificate_tax_id              = COALESCE(EXCLUDED.certificate_tax_id, company_settings.certificate_tax_id),
-    certificate_validated_at        = COALESCE(EXCLUDED.certificate_validated_at, company_settings.certificate_validated_at),
-    hacienda_token_tested_at        = COALESCE(EXCLUDED.hacienda_token_tested_at, company_settings.hacienda_token_tested_at),
-    hacienda_token_expires_at       = COALESCE(EXCLUDED.hacienda_token_expires_at, company_settings.hacienda_token_expires_at),
-    validation_status               = EXCLUDED.validation_status,
-    validation_errors               = COALESCE(EXCLUDED.validation_errors, '[]'::jsonb),
-    logo_url                        = COALESCE(EXCLUDED.logo_url, company_settings.logo_url),
-    logo_public_id                  = COALESCE(EXCLUDED.logo_public_id, company_settings.logo_public_id),
-    is_active                       = TRUE,
-    deleted_at                      = NULL,
-    updated_at                      = NOW()
-  RETURNING company_settings.id, company_settings.validation_status;
+    AS $$
+BEGIN
+  RETURN QUERY
+  INSERT INTO company_settings (
+    empresa_id, legal_name, commercial_name, tax_id, tax_id_type,
+    province_code, canton_code, district_code, other_signs, phone, email,
+    actividad_economica, leyenda_tributaria,
+    hacienda_environment, hacienda_username_encrypted, hacienda_password_encrypted,
+    certificate_p12_encrypted, certificate_password_encrypted,
+    certificate_subject, certificate_issuer, certificate_serial,
+    certificate_valid_from, certificate_valid_to, certificate_tax_id,
+    certificate_validated_at, hacienda_token_tested_at, hacienda_token_expires_at,
+    validation_status, validation_errors, logo_url, logo_public_id
+  )
+  VALUES (
+    p_empresa_id, p_legal_name, p_commercial_name, p_tax_id, p_tax_id_type,
+    p_province_code, p_canton_code, p_district_code, p_other_signs, p_phone, p_email,
+    p_actividad_economica, p_leyenda_tributaria,
+    p_hacienda_environment, p_hacienda_username_encrypted, p_hacienda_password_encrypted,
+    p_certificate_p12_encrypted, p_certificate_password_encrypted,
+    p_certificate_subject, p_certificate_issuer, p_certificate_serial,
+    p_certificate_valid_from, p_certificate_valid_to, p_certificate_tax_id,
+    p_certificate_validated_at, p_hacienda_token_tested_at, p_hacienda_token_expires_at,
+    p_validation_status, COALESCE(p_validation_errors, '[]'::jsonb),
+    p_logo_url, p_logo_public_id
+  )
+  ON CONFLICT (empresa_id) DO UPDATE SET
+    legal_name                      = EXCLUDED.legal_name,
+    commercial_name                 = EXCLUDED.commercial_name,
+    tax_id                          = EXCLUDED.tax_id,
+    tax_id_type                     = EXCLUDED.tax_id_type,
+    province_code                   = EXCLUDED.province_code,
+    canton_code                     = EXCLUDED.canton_code,
+    district_code                   = EXCLUDED.district_code,
+    other_signs                     = EXCLUDED.other_signs,
+    phone                           = EXCLUDED.phone,
+    email                           = EXCLUDED.email,
+    actividad_economica             = EXCLUDED.actividad_economica,
+    leyenda_tributaria              = EXCLUDED.leyenda_tributaria,
+    hacienda_environment            = EXCLUDED.hacienda_environment,
+    hacienda_username_encrypted     = COALESCE(EXCLUDED.hacienda_username_encrypted, company_settings.hacienda_username_encrypted),
+    hacienda_password_encrypted     = COALESCE(EXCLUDED.hacienda_password_encrypted, company_settings.hacienda_password_encrypted),
+    certificate_p12_encrypted       = COALESCE(EXCLUDED.certificate_p12_encrypted, company_settings.certificate_p12_encrypted),
+    certificate_password_encrypted  = COALESCE(EXCLUDED.certificate_password_encrypted, company_settings.certificate_password_encrypted),
+    certificate_subject             = COALESCE(EXCLUDED.certificate_subject, company_settings.certificate_subject),
+    certificate_issuer              = COALESCE(EXCLUDED.certificate_issuer, company_settings.certificate_issuer),
+    certificate_serial              = COALESCE(EXCLUDED.certificate_serial, company_settings.certificate_serial),
+    certificate_valid_from          = COALESCE(EXCLUDED.certificate_valid_from, company_settings.certificate_valid_from),
+    certificate_valid_to            = COALESCE(EXCLUDED.certificate_valid_to, company_settings.certificate_valid_to),
+    certificate_tax_id              = COALESCE(EXCLUDED.certificate_tax_id, company_settings.certificate_tax_id),
+    certificate_validated_at        = COALESCE(EXCLUDED.certificate_validated_at, company_settings.certificate_validated_at),
+    hacienda_token_tested_at        = COALESCE(EXCLUDED.hacienda_token_tested_at, company_settings.hacienda_token_tested_at),
+    hacienda_token_expires_at       = COALESCE(EXCLUDED.hacienda_token_expires_at, company_settings.hacienda_token_expires_at),
+    validation_status               = EXCLUDED.validation_status,
+    validation_errors               = COALESCE(EXCLUDED.validation_errors, '[]'::jsonb),
+    logo_url                        = COALESCE(EXCLUDED.logo_url, company_settings.logo_url),
+    logo_public_id                  = COALESCE(EXCLUDED.logo_public_id, company_settings.logo_public_id),
+    is_active                       = TRUE,
+    deleted_at                      = NULL,
+    updated_at                      = NOW()
+  RETURNING company_settings.id, company_settings.validation_status;
 END; $$;
 
 
@@ -1787,19 +1787,19 @@ END; $$;
 
 CREATE FUNCTION public.sp_company_settings_sensitive_get(p_empresa_id bigint) RETURNS TABLE(hacienda_environment character varying, hacienda_username_encrypted text, hacienda_password_encrypted text, certificate_p12_encrypted text, certificate_password_encrypted text, validation_status character varying)
     LANGUAGE plpgsql SECURITY DEFINER
-    AS $$
-    BEGIN
-        RETURN QUERY
-        SELECT cs.hacienda_environment,
-               cs.hacienda_username_encrypted,
-               cs.hacienda_password_encrypted,
-               cs.certificate_p12_encrypted,
-               cs.certificate_password_encrypted,
-               cs.validation_status
-        FROM company_settings cs
-        WHERE cs.empresa_id = p_empresa_id AND cs.deleted_at IS NULL
-        LIMIT 1;
-    END;
+    AS $$
+    BEGIN
+        RETURN QUERY
+        SELECT cs.hacienda_environment,
+               cs.hacienda_username_encrypted,
+               cs.hacienda_password_encrypted,
+               cs.certificate_p12_encrypted,
+               cs.certificate_password_encrypted,
+               cs.validation_status
+        FROM company_settings cs
+        WHERE cs.empresa_id = p_empresa_id AND cs.deleted_at IS NULL
+        LIMIT 1;
+    END;
     $$;
 
 
@@ -2414,21 +2414,21 @@ CREATE FUNCTION public.sp_documento_ajustar_inventario(p_documento_id bigint) RE
 
 CREATE FUNCTION public.sp_documento_asignar_clave(p_id bigint, p_empresa_id bigint, p_clave character varying, p_numero_consecutivo character varying, p_consecutivo_comercio bigint, p_numero_seguridad character varying) RETURNS boolean
     LANGUAGE plpgsql
-    AS $$
-            BEGIN
-                UPDATE documentos_electronicos SET
-                    clave                   = p_clave,
-                    numero_consecutivo      = p_numero_consecutivo,
-                    consecutivo_comercio    = p_consecutivo_comercio,
-                    numero_seguridad        = p_numero_seguridad,
-                    estado                  = 'procesando',
-                    updated_at              = NOW()
-                WHERE id = p_id
-                  AND empresa_id = p_empresa_id
-                  AND estado = 'borrador'
-                  AND deleted_at IS NULL;
-                RETURN FOUND;
-            END;
+    AS $$
+            BEGIN
+                UPDATE documentos_electronicos SET
+                    clave                   = p_clave,
+                    numero_consecutivo      = p_numero_consecutivo,
+                    consecutivo_comercio    = p_consecutivo_comercio,
+                    numero_seguridad        = p_numero_seguridad,
+                    estado                  = 'procesando',
+                    updated_at              = NOW()
+                WHERE id = p_id
+                  AND empresa_id = p_empresa_id
+                  AND estado = 'borrador'
+                  AND deleted_at IS NULL;
+                RETURN FOUND;
+            END;
             $$;
 
 
@@ -2565,68 +2565,68 @@ CREATE FUNCTION public.sp_documento_buscar_por_termino(p_empresa_id bigint, p_te
 
 CREATE FUNCTION public.sp_documento_create(p_empresa_id bigint, p_sucursal_id bigint, p_caja_id bigint, p_user_id bigint, p_tipo_documento character varying, p_fecha_emision timestamp without time zone, p_condicion_venta character varying, p_condicion_venta_otros text, p_plazo_credito character varying, p_codigo_actividad_emisor character varying, p_codigo_actividad_receptor character varying, p_leyenda_tributaria text, p_proveedor_sistemas character varying, p_situacion_comprobante smallint, p_sucursal_codigo character varying, p_terminal character varying, p_emisor_nombre character varying, p_emisor_tipo_id character varying, p_emisor_numero_id character varying, p_emisor_nombre_comercial character varying, p_emisor_registro_fiscal character varying, p_emisor_provincia character varying, p_emisor_canton character varying, p_emisor_distrito character varying, p_emisor_barrio character varying, p_emisor_otras_senas text, p_emisor_codigo_pais character varying, p_emisor_telefono character varying, p_emisor_correos jsonb, p_receptor_cliente_id bigint, p_receptor_nombre character varying, p_receptor_tipo_id character varying, p_receptor_numero_id character varying, p_receptor_nombre_comercial character varying, p_receptor_provincia character varying, p_receptor_canton character varying, p_receptor_distrito character varying, p_receptor_barrio character varying, p_receptor_otras_senas text, p_receptor_codigo_pais character varying, p_receptor_telefono character varying, p_receptor_correo character varying, p_moneda character varying, p_tipo_cambio numeric, p_total_serv_gravados numeric DEFAULT 0, p_total_serv_exentos numeric DEFAULT 0, p_total_serv_exonerado numeric DEFAULT 0, p_total_serv_no_sujeto numeric DEFAULT 0, p_total_merc_gravadas numeric DEFAULT 0, p_total_merc_exentas numeric DEFAULT 0, p_total_merc_exonerada numeric DEFAULT 0, p_total_merc_no_sujeta numeric DEFAULT 0, p_total_gravado numeric DEFAULT 0, p_total_exento numeric DEFAULT 0, p_total_exonerado numeric DEFAULT 0, p_total_no_sujeto numeric DEFAULT 0, p_total_venta numeric DEFAULT 0, p_total_descuentos numeric DEFAULT 0, p_total_venta_neta numeric DEFAULT 0, p_total_impuesto numeric DEFAULT 0, p_total_imp_asumido_emisor numeric DEFAULT 0, p_total_iva_devuelto numeric DEFAULT 0, p_total_otros_cargos numeric DEFAULT 0, p_total_comprobante numeric DEFAULT 0, p_otros_texto text DEFAULT NULL::text, p_otros_contenido text DEFAULT NULL::text, p_funcionario_id bigint DEFAULT NULL::bigint) RETURNS bigint
     LANGUAGE plpgsql
-    AS $$
-            DECLARE v_id BIGINT;
-            BEGIN
-                INSERT INTO documentos_electronicos (
-                    empresa_id, sucursal_id, caja_id, user_id,
-                    tipo_documento, fecha_emision,
-                    condicion_venta, condicion_venta_otros, plazo_credito,
-                    codigo_actividad_emisor, codigo_actividad_receptor,
-                    leyenda_tributaria, proveedor_sistemas, situacion_comprobante,
-                    sucursal_codigo, terminal,
-                    emisor_nombre, emisor_tipo_id, emisor_numero_id,
-                    emisor_nombre_comercial, emisor_registro_fiscal,
-                    emisor_provincia, emisor_canton, emisor_distrito,
-                    emisor_barrio, emisor_otras_senas,
-                    emisor_codigo_pais, emisor_telefono, emisor_correos,
-                    receptor_cliente_id, receptor_nombre,
-                    receptor_tipo_id, receptor_numero_id,
-                    receptor_nombre_comercial,
-                    receptor_provincia, receptor_canton, receptor_distrito,
-                    receptor_barrio, receptor_otras_senas,
-                    receptor_codigo_pais, receptor_telefono, receptor_correo,
-                    moneda, tipo_cambio,
-                    total_serv_gravados, total_serv_exentos, total_serv_exonerado, total_serv_no_sujeto,
-                    total_merc_gravadas, total_merc_exentas, total_merc_exonerada, total_merc_no_sujeta,
-                    total_gravado, total_exento, total_exonerado, total_no_sujeto,
-                    total_venta, total_descuentos, total_venta_neta, total_impuesto,
-                    total_imp_asumido_emisor, total_iva_devuelto, total_otros_cargos,
-                    total_comprobante,
-                    otros_texto, otros_contenido,
-                    funcionario_id,
-                    estado
-                ) VALUES (
-                    p_empresa_id, p_sucursal_id, p_caja_id, p_user_id,
-                    p_tipo_documento, p_fecha_emision,
-                    p_condicion_venta, p_condicion_venta_otros, p_plazo_credito,
-                    p_codigo_actividad_emisor, p_codigo_actividad_receptor,
-                    p_leyenda_tributaria, p_proveedor_sistemas, p_situacion_comprobante,
-                    p_sucursal_codigo, p_terminal,
-                    p_emisor_nombre, p_emisor_tipo_id, p_emisor_numero_id,
-                    p_emisor_nombre_comercial, p_emisor_registro_fiscal,
-                    p_emisor_provincia, p_emisor_canton, p_emisor_distrito,
-                    p_emisor_barrio, p_emisor_otras_senas,
-                    p_emisor_codigo_pais, p_emisor_telefono, p_emisor_correos,
-                    p_receptor_cliente_id, p_receptor_nombre,
-                    p_receptor_tipo_id, p_receptor_numero_id,
-                    p_receptor_nombre_comercial,
-                    p_receptor_provincia, p_receptor_canton, p_receptor_distrito,
-                    p_receptor_barrio, p_receptor_otras_senas,
-                    p_receptor_codigo_pais, p_receptor_telefono, p_receptor_correo,
-                    p_moneda, p_tipo_cambio,
-                    p_total_serv_gravados, p_total_serv_exentos, p_total_serv_exonerado, p_total_serv_no_sujeto,
-                    p_total_merc_gravadas, p_total_merc_exentas, p_total_merc_exonerada, p_total_merc_no_sujeta,
-                    p_total_gravado, p_total_exento, p_total_exonerado, p_total_no_sujeto,
-                    p_total_venta, p_total_descuentos, p_total_venta_neta, p_total_impuesto,
-                    p_total_imp_asumido_emisor, p_total_iva_devuelto, p_total_otros_cargos,
-                    p_total_comprobante,
-                    p_otros_texto, p_otros_contenido,
-                    p_funcionario_id,
-                    'borrador'
-                ) RETURNING id INTO v_id;
-                RETURN v_id;
-            END;
+    AS $$
+            DECLARE v_id BIGINT;
+            BEGIN
+                INSERT INTO documentos_electronicos (
+                    empresa_id, sucursal_id, caja_id, user_id,
+                    tipo_documento, fecha_emision,
+                    condicion_venta, condicion_venta_otros, plazo_credito,
+                    codigo_actividad_emisor, codigo_actividad_receptor,
+                    leyenda_tributaria, proveedor_sistemas, situacion_comprobante,
+                    sucursal_codigo, terminal,
+                    emisor_nombre, emisor_tipo_id, emisor_numero_id,
+                    emisor_nombre_comercial, emisor_registro_fiscal,
+                    emisor_provincia, emisor_canton, emisor_distrito,
+                    emisor_barrio, emisor_otras_senas,
+                    emisor_codigo_pais, emisor_telefono, emisor_correos,
+                    receptor_cliente_id, receptor_nombre,
+                    receptor_tipo_id, receptor_numero_id,
+                    receptor_nombre_comercial,
+                    receptor_provincia, receptor_canton, receptor_distrito,
+                    receptor_barrio, receptor_otras_senas,
+                    receptor_codigo_pais, receptor_telefono, receptor_correo,
+                    moneda, tipo_cambio,
+                    total_serv_gravados, total_serv_exentos, total_serv_exonerado, total_serv_no_sujeto,
+                    total_merc_gravadas, total_merc_exentas, total_merc_exonerada, total_merc_no_sujeta,
+                    total_gravado, total_exento, total_exonerado, total_no_sujeto,
+                    total_venta, total_descuentos, total_venta_neta, total_impuesto,
+                    total_imp_asumido_emisor, total_iva_devuelto, total_otros_cargos,
+                    total_comprobante,
+                    otros_texto, otros_contenido,
+                    funcionario_id,
+                    estado
+                ) VALUES (
+                    p_empresa_id, p_sucursal_id, p_caja_id, p_user_id,
+                    p_tipo_documento, p_fecha_emision,
+                    p_condicion_venta, p_condicion_venta_otros, p_plazo_credito,
+                    p_codigo_actividad_emisor, p_codigo_actividad_receptor,
+                    p_leyenda_tributaria, p_proveedor_sistemas, p_situacion_comprobante,
+                    p_sucursal_codigo, p_terminal,
+                    p_emisor_nombre, p_emisor_tipo_id, p_emisor_numero_id,
+                    p_emisor_nombre_comercial, p_emisor_registro_fiscal,
+                    p_emisor_provincia, p_emisor_canton, p_emisor_distrito,
+                    p_emisor_barrio, p_emisor_otras_senas,
+                    p_emisor_codigo_pais, p_emisor_telefono, p_emisor_correos,
+                    p_receptor_cliente_id, p_receptor_nombre,
+                    p_receptor_tipo_id, p_receptor_numero_id,
+                    p_receptor_nombre_comercial,
+                    p_receptor_provincia, p_receptor_canton, p_receptor_distrito,
+                    p_receptor_barrio, p_receptor_otras_senas,
+                    p_receptor_codigo_pais, p_receptor_telefono, p_receptor_correo,
+                    p_moneda, p_tipo_cambio,
+                    p_total_serv_gravados, p_total_serv_exentos, p_total_serv_exonerado, p_total_serv_no_sujeto,
+                    p_total_merc_gravadas, p_total_merc_exentas, p_total_merc_exonerada, p_total_merc_no_sujeta,
+                    p_total_gravado, p_total_exento, p_total_exonerado, p_total_no_sujeto,
+                    p_total_venta, p_total_descuentos, p_total_venta_neta, p_total_impuesto,
+                    p_total_imp_asumido_emisor, p_total_iva_devuelto, p_total_otros_cargos,
+                    p_total_comprobante,
+                    p_otros_texto, p_otros_contenido,
+                    p_funcionario_id,
+                    'borrador'
+                ) RETURNING id INTO v_id;
+                RETURN v_id;
+            END;
             $$;
 
 
@@ -2804,16 +2804,16 @@ CREATE FUNCTION public.sp_documento_reintentar(p_id bigint, p_empresa_id bigint)
 
 CREATE FUNCTION public.sp_documento_soft_delete(p_id bigint, p_empresa_id bigint) RETURNS boolean
     LANGUAGE plpgsql
-    AS $$
-            BEGIN
-                UPDATE documentos_electronicos
-                SET deleted_at = NOW(), updated_at = NOW()
-                WHERE id = p_id
-                  AND empresa_id = p_empresa_id
-                  AND estado = 'borrador'
-                  AND deleted_at IS NULL;
-                RETURN FOUND;
-            END;
+    AS $$
+            BEGIN
+                UPDATE documentos_electronicos
+                SET deleted_at = NOW(), updated_at = NOW()
+                WHERE id = p_id
+                  AND empresa_id = p_empresa_id
+                  AND estado = 'borrador'
+                  AND deleted_at IS NULL;
+                RETURN FOUND;
+            END;
             $$;
 
 
@@ -2823,58 +2823,58 @@ CREATE FUNCTION public.sp_documento_soft_delete(p_id bigint, p_empresa_id bigint
 
 CREATE FUNCTION public.sp_documento_update(p_id bigint, p_empresa_id bigint, p_fecha_emision timestamp without time zone, p_condicion_venta character varying, p_condicion_venta_otros text, p_plazo_credito character varying, p_codigo_actividad_emisor character varying, p_codigo_actividad_receptor character varying, p_leyenda_tributaria text, p_receptor_cliente_id bigint, p_receptor_nombre character varying, p_receptor_tipo_id character varying, p_receptor_numero_id character varying, p_receptor_nombre_comercial character varying, p_receptor_provincia character varying, p_receptor_canton character varying, p_receptor_distrito character varying, p_receptor_barrio character varying, p_receptor_otras_senas text, p_receptor_codigo_pais character varying, p_receptor_telefono character varying, p_receptor_correo character varying, p_moneda character varying, p_tipo_cambio numeric, p_total_serv_gravados numeric, p_total_serv_exentos numeric, p_total_serv_exonerado numeric, p_total_serv_no_sujeto numeric, p_total_merc_gravadas numeric, p_total_merc_exentas numeric, p_total_merc_exonerada numeric, p_total_merc_no_sujeta numeric, p_total_gravado numeric, p_total_exento numeric, p_total_exonerado numeric, p_total_no_sujeto numeric, p_total_venta numeric, p_total_descuentos numeric, p_total_venta_neta numeric, p_total_impuesto numeric, p_total_imp_asumido_emisor numeric, p_total_iva_devuelto numeric, p_total_otros_cargos numeric, p_total_comprobante numeric, p_otros_texto text, p_otros_contenido text, p_funcionario_id bigint DEFAULT NULL::bigint) RETURNS boolean
     LANGUAGE plpgsql
-    AS $$
-            BEGIN
-                UPDATE documentos_electronicos SET
-                    fecha_emision               = p_fecha_emision,
-                    condicion_venta             = p_condicion_venta,
-                    condicion_venta_otros       = p_condicion_venta_otros,
-                    plazo_credito               = p_plazo_credito,
-                    codigo_actividad_emisor     = p_codigo_actividad_emisor,
-                    codigo_actividad_receptor   = p_codigo_actividad_receptor,
-                    leyenda_tributaria          = p_leyenda_tributaria,
-                    receptor_cliente_id         = p_receptor_cliente_id,
-                    receptor_nombre             = p_receptor_nombre,
-                    receptor_tipo_id            = p_receptor_tipo_id,
-                    receptor_numero_id          = p_receptor_numero_id,
-                    receptor_nombre_comercial   = p_receptor_nombre_comercial,
-                    receptor_provincia          = p_receptor_provincia,
-                    receptor_canton             = p_receptor_canton,
-                    receptor_distrito           = p_receptor_distrito,
-                    receptor_barrio             = p_receptor_barrio,
-                    receptor_otras_senas        = p_receptor_otras_senas,
-                    receptor_codigo_pais        = p_receptor_codigo_pais,
-                    receptor_telefono           = p_receptor_telefono,
-                    receptor_correo             = p_receptor_correo,
-                    moneda                      = p_moneda,
-                    tipo_cambio                 = p_tipo_cambio,
-                    total_serv_gravados         = p_total_serv_gravados,
-                    total_serv_exentos          = p_total_serv_exentos,
-                    total_serv_exonerado        = p_total_serv_exonerado,
-                    total_serv_no_sujeto        = p_total_serv_no_sujeto,
-                    total_merc_gravadas         = p_total_merc_gravadas,
-                    total_merc_exentas          = p_total_merc_exentas,
-                    total_merc_exonerada        = p_total_merc_exonerada,
-                    total_merc_no_sujeta        = p_total_merc_no_sujeta,
-                    total_gravado               = p_total_gravado,
-                    total_exento                = p_total_exento,
-                    total_exonerado             = p_total_exonerado,
-                    total_no_sujeto             = p_total_no_sujeto,
-                    total_venta                 = p_total_venta,
-                    total_descuentos            = p_total_descuentos,
-                    total_venta_neta            = p_total_venta_neta,
-                    total_impuesto              = p_total_impuesto,
-                    total_imp_asumido_emisor    = p_total_imp_asumido_emisor,
-                    total_iva_devuelto          = p_total_iva_devuelto,
-                    total_otros_cargos          = p_total_otros_cargos,
-                    total_comprobante           = p_total_comprobante,
-                    otros_texto                 = p_otros_texto,
-                    otros_contenido             = p_otros_contenido,
-                    funcionario_id              = p_funcionario_id,
-                    updated_at                  = NOW()
-                WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
-                RETURN FOUND;
-            END;
+    AS $$
+            BEGIN
+                UPDATE documentos_electronicos SET
+                    fecha_emision               = p_fecha_emision,
+                    condicion_venta             = p_condicion_venta,
+                    condicion_venta_otros       = p_condicion_venta_otros,
+                    plazo_credito               = p_plazo_credito,
+                    codigo_actividad_emisor     = p_codigo_actividad_emisor,
+                    codigo_actividad_receptor   = p_codigo_actividad_receptor,
+                    leyenda_tributaria          = p_leyenda_tributaria,
+                    receptor_cliente_id         = p_receptor_cliente_id,
+                    receptor_nombre             = p_receptor_nombre,
+                    receptor_tipo_id            = p_receptor_tipo_id,
+                    receptor_numero_id          = p_receptor_numero_id,
+                    receptor_nombre_comercial   = p_receptor_nombre_comercial,
+                    receptor_provincia          = p_receptor_provincia,
+                    receptor_canton             = p_receptor_canton,
+                    receptor_distrito           = p_receptor_distrito,
+                    receptor_barrio             = p_receptor_barrio,
+                    receptor_otras_senas        = p_receptor_otras_senas,
+                    receptor_codigo_pais        = p_receptor_codigo_pais,
+                    receptor_telefono           = p_receptor_telefono,
+                    receptor_correo             = p_receptor_correo,
+                    moneda                      = p_moneda,
+                    tipo_cambio                 = p_tipo_cambio,
+                    total_serv_gravados         = p_total_serv_gravados,
+                    total_serv_exentos          = p_total_serv_exentos,
+                    total_serv_exonerado        = p_total_serv_exonerado,
+                    total_serv_no_sujeto        = p_total_serv_no_sujeto,
+                    total_merc_gravadas         = p_total_merc_gravadas,
+                    total_merc_exentas          = p_total_merc_exentas,
+                    total_merc_exonerada        = p_total_merc_exonerada,
+                    total_merc_no_sujeta        = p_total_merc_no_sujeta,
+                    total_gravado               = p_total_gravado,
+                    total_exento                = p_total_exento,
+                    total_exonerado             = p_total_exonerado,
+                    total_no_sujeto             = p_total_no_sujeto,
+                    total_venta                 = p_total_venta,
+                    total_descuentos            = p_total_descuentos,
+                    total_venta_neta            = p_total_venta_neta,
+                    total_impuesto              = p_total_impuesto,
+                    total_imp_asumido_emisor    = p_total_imp_asumido_emisor,
+                    total_iva_devuelto          = p_total_iva_devuelto,
+                    total_otros_cargos          = p_total_otros_cargos,
+                    total_comprobante           = p_total_comprobante,
+                    otros_texto                 = p_otros_texto,
+                    otros_contenido             = p_otros_contenido,
+                    funcionario_id              = p_funcionario_id,
+                    updated_at                  = NOW()
+                WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
+                RETURN FOUND;
+            END;
             $$;
 
 
@@ -2884,25 +2884,25 @@ CREATE FUNCTION public.sp_documento_update(p_id bigint, p_empresa_id bigint, p_f
 
 CREATE FUNCTION public.sp_documento_update_estado(p_id bigint, p_estado character varying, p_xml_firmado text DEFAULT NULL::text, p_xml_respuesta text DEFAULT NULL::text, p_qr_url text DEFAULT NULL::text, p_hacienda_mensaje text DEFAULT NULL::text, p_hacienda_detalle_mensaje text DEFAULT NULL::text, p_hacienda_attempts smallint DEFAULT NULL::smallint, p_enviado_at timestamp without time zone DEFAULT NULL::timestamp without time zone, p_aceptado_at timestamp without time zone DEFAULT NULL::timestamp without time zone, p_rechazado_at timestamp without time zone DEFAULT NULL::timestamp without time zone, p_hacienda_poll_attempts integer DEFAULT NULL::integer) RETURNS boolean
     LANGUAGE plpgsql
-    AS $$
-            BEGIN
-                UPDATE documentos_electronicos SET
-                    estado                      = p_estado,
-                    xml_firmado                 = COALESCE(p_xml_firmado, xml_firmado),
-                    xml_respuesta               = COALESCE(p_xml_respuesta, xml_respuesta),
-                    qr_url                      = COALESCE(p_qr_url, qr_url),
-                    hacienda_mensaje            = COALESCE(p_hacienda_mensaje, hacienda_mensaje),
-                    hacienda_detalle_mensaje    = COALESCE(p_hacienda_detalle_mensaje, hacienda_detalle_mensaje),
-                    hacienda_attempts           = COALESCE(p_hacienda_attempts, hacienda_attempts),
-                    hacienda_poll_attempts      = COALESCE(p_hacienda_poll_attempts, hacienda_poll_attempts),
-                    hacienda_last_attempt_at    = NOW(),
-                    enviado_at                  = COALESCE(p_enviado_at, enviado_at),
-                    aceptado_at                 = COALESCE(p_aceptado_at, aceptado_at),
-                    rechazado_at                = COALESCE(p_rechazado_at, rechazado_at),
-                    updated_at                  = NOW()
-                WHERE id = p_id;
-                RETURN FOUND;
-            END;
+    AS $$
+            BEGIN
+                UPDATE documentos_electronicos SET
+                    estado                      = p_estado,
+                    xml_firmado                 = COALESCE(p_xml_firmado, xml_firmado),
+                    xml_respuesta               = COALESCE(p_xml_respuesta, xml_respuesta),
+                    qr_url                      = COALESCE(p_qr_url, qr_url),
+                    hacienda_mensaje            = COALESCE(p_hacienda_mensaje, hacienda_mensaje),
+                    hacienda_detalle_mensaje    = COALESCE(p_hacienda_detalle_mensaje, hacienda_detalle_mensaje),
+                    hacienda_attempts           = COALESCE(p_hacienda_attempts, hacienda_attempts),
+                    hacienda_poll_attempts      = COALESCE(p_hacienda_poll_attempts, hacienda_poll_attempts),
+                    hacienda_last_attempt_at    = NOW(),
+                    enviado_at                  = COALESCE(p_enviado_at, enviado_at),
+                    aceptado_at                 = COALESCE(p_aceptado_at, aceptado_at),
+                    rechazado_at                = COALESCE(p_rechazado_at, rechazado_at),
+                    updated_at                  = NOW()
+                WHERE id = p_id;
+                RETURN FOUND;
+            END;
             $$;
 
 
@@ -2982,21 +2982,21 @@ $$;
 
 CREATE PROCEDURE public.sp_empresa_condicion_ventas_save(IN p_empresa_id integer, IN p_codigo character varying, IN p_activo boolean, IN p_es_default boolean)
     LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF p_es_default THEN
-    UPDATE empresa_condicion_ventas
-    SET es_default = false, updated_at = NOW()
-    WHERE empresa_id = p_empresa_id AND codigo <> p_codigo;
-  END IF;
-
-  INSERT INTO empresa_condicion_ventas (empresa_id, codigo, activo, es_default, updated_at)
-  VALUES (p_empresa_id, p_codigo, p_activo, p_es_default, NOW())
-  ON CONFLICT (empresa_id, codigo) DO UPDATE
-    SET activo     = EXCLUDED.activo,
-        es_default = EXCLUDED.es_default,
-        updated_at = NOW();
-END;
+    AS $$
+BEGIN
+  IF p_es_default THEN
+    UPDATE empresa_condicion_ventas
+    SET es_default = false, updated_at = NOW()
+    WHERE empresa_id = p_empresa_id AND codigo <> p_codigo;
+  END IF;
+
+  INSERT INTO empresa_condicion_ventas (empresa_id, codigo, activo, es_default, updated_at)
+  VALUES (p_empresa_id, p_codigo, p_activo, p_es_default, NOW())
+  ON CONFLICT (empresa_id, codigo) DO UPDATE
+    SET activo     = EXCLUDED.activo,
+        es_default = EXCLUDED.es_default,
+        updated_at = NOW();
+END;
 $$;
 
 
@@ -4002,24 +4002,24 @@ CREATE FUNCTION public.sp_funcionario_restore(p_id bigint) RETURNS boolean
 
 CREATE FUNCTION public.sp_funcionario_search(p_empresa_id bigint, p_query character varying) RETURNS TABLE(id bigint, empresa_id bigint, name character varying, tax_id character varying, email character varying, phone character varying, address text, birth_date date, commission_pct numeric, notes text, is_default boolean, is_active boolean, created_at timestamp without time zone, updated_at timestamp without time zone)
     LANGUAGE plpgsql SECURITY DEFINER
-    AS $$
-            BEGIN
-                RETURN QUERY
-                SELECT f.id, f.empresa_id,
-                       f.name, f.tax_id,
-                       f.email, f.phone, f.address,
-                       f.birth_date, f.commission_pct, f.notes,
-                       f.is_default, f.is_active,
-                       f.created_at, f.updated_at
-                FROM funcionarios f
-                WHERE f.empresa_id = p_empresa_id
-                  AND f.deleted_at IS NULL
-                  AND (
-                      f.name   ILIKE '%' || p_query || '%' OR
-                      f.tax_id ILIKE '%' || p_query || '%' OR
-                      f.email  ILIKE '%' || p_query || '%'
-                  )
-                ORDER BY f.is_default DESC, f.name;
+    AS $$
+            BEGIN
+                RETURN QUERY
+                SELECT f.id, f.empresa_id,
+                       f.name, f.tax_id,
+                       f.email, f.phone, f.address,
+                       f.birth_date, f.commission_pct, f.notes,
+                       f.is_default, f.is_active,
+                       f.created_at, f.updated_at
+                FROM funcionarios f
+                WHERE f.empresa_id = p_empresa_id
+                  AND f.deleted_at IS NULL
+                  AND (
+                      f.name   ILIKE '%' || p_query || '%' OR
+                      f.tax_id ILIKE '%' || p_query || '%' OR
+                      f.email  ILIKE '%' || p_query || '%'
+                  )
+                ORDER BY f.is_default DESC, f.name;
             END; $$;
 
 
@@ -4029,17 +4029,17 @@ CREATE FUNCTION public.sp_funcionario_search(p_empresa_id bigint, p_query charac
 
 CREATE FUNCTION public.sp_funcionario_set_default(p_id bigint, p_empresa_id bigint) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
-    AS $$
-            DECLARE v_rows INTEGER;
-            BEGIN
-                -- Quitar default a todos los de la empresa
-                UPDATE funcionarios SET is_default = FALSE, updated_at = NOW()
-                WHERE empresa_id = p_empresa_id AND deleted_at IS NULL;
-                -- Poner default al seleccionado
-                UPDATE funcionarios SET is_default = TRUE, updated_at = NOW()
-                WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
-                GET DIAGNOSTICS v_rows = ROW_COUNT;
-                RETURN v_rows > 0;
+    AS $$
+            DECLARE v_rows INTEGER;
+            BEGIN
+                -- Quitar default a todos los de la empresa
+                UPDATE funcionarios SET is_default = FALSE, updated_at = NOW()
+                WHERE empresa_id = p_empresa_id AND deleted_at IS NULL;
+                -- Poner default al seleccionado
+                UPDATE funcionarios SET is_default = TRUE, updated_at = NOW()
+                WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
+                GET DIAGNOSTICS v_rows = ROW_COUNT;
+                RETURN v_rows > 0;
             END; $$;
 
 
@@ -4049,13 +4049,13 @@ CREATE FUNCTION public.sp_funcionario_set_default(p_id bigint, p_empresa_id bigi
 
 CREATE FUNCTION public.sp_funcionario_soft_delete(p_id bigint) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
-    AS $$
-            DECLARE v_rows INTEGER;
-            BEGIN
-                UPDATE funcionarios SET is_active = FALSE, deleted_at = NOW(), updated_at = NOW()
-                WHERE id = p_id AND deleted_at IS NULL;
-                GET DIAGNOSTICS v_rows = ROW_COUNT;
-                RETURN v_rows > 0;
+    AS $$
+            DECLARE v_rows INTEGER;
+            BEGIN
+                UPDATE funcionarios SET is_active = FALSE, deleted_at = NOW(), updated_at = NOW()
+                WHERE id = p_id AND deleted_at IS NULL;
+                GET DIAGNOSTICS v_rows = ROW_COUNT;
+                RETURN v_rows > 0;
             END; $$;
 
 
@@ -4091,13 +4091,13 @@ CREATE FUNCTION public.sp_funcionario_sucursales_set(p_funcionario_id bigint, p_
 
 CREATE FUNCTION public.sp_funcionario_toggle_status(p_id bigint) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
-    AS $$
-            DECLARE v_rows INTEGER;
-            BEGIN
-                UPDATE funcionarios SET is_active = NOT is_active, updated_at = NOW()
-                WHERE id = p_id AND deleted_at IS NULL;
-                GET DIAGNOSTICS v_rows = ROW_COUNT;
-                RETURN v_rows > 0;
+    AS $$
+            DECLARE v_rows INTEGER;
+            BEGIN
+                UPDATE funcionarios SET is_active = NOT is_active, updated_at = NOW()
+                WHERE id = p_id AND deleted_at IS NULL;
+                GET DIAGNOSTICS v_rows = ROW_COUNT;
+                RETURN v_rows > 0;
             END; $$;
 
 
@@ -4235,51 +4235,51 @@ CREATE FUNCTION public.sp_inventario_movimientos(p_empresa_id bigint, p_bodega_i
 
 CREATE FUNCTION public.sp_inventario_registrar_desde_documento(p_documento_id bigint, p_user_id bigint) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER
-    AS $$
-DECLARE
-    v_tipo_doc  VARCHAR(2);
-    v_empresa   BIGINT;
-    v_tipo_mov  VARCHAR(20);
-    v_delta     NUMERIC;
-    r           RECORD;
-    v_stock_antes NUMERIC;
-BEGIN
-    SELECT tipo_documento, empresa_id INTO v_tipo_doc, v_empresa
-      FROM documentos_electronicos WHERE id = p_documento_id;
-
-    IF v_tipo_doc IN ('01','04') THEN
-        v_tipo_mov := 'venta';    v_delta := -1;
-    ELSIF v_tipo_doc = '03' THEN
-        v_tipo_mov := 'devolucion'; v_delta := 1;
-    ELSE RETURN;
-    END IF;
-
-    FOR r IN
-        SELECT dl.bodega_id, dl.producto_id, dl.cantidad
-          FROM documento_lineas dl
-          JOIN productos p ON p.id = dl.producto_id
-         WHERE dl.documento_id = p_documento_id
-           AND dl.bodega_id IS NOT NULL
-           AND dl.producto_id IS NOT NULL
-           AND p.type = 'product'
-    LOOP
-        SELECT COALESCE(stock, 0) INTO v_stock_antes
-          FROM bodega_productos
-         WHERE bodega_id = r.bodega_id AND producto_id = r.producto_id;
-
-        INSERT INTO movimientos_inventario (
-            empresa_id, tipo, bodega_origen_id, producto_id,
-            cantidad, stock_antes, stock_despues,
-            documento_id, referencia, user_id
-        ) VALUES (
-            v_empresa, v_tipo_mov, r.bodega_id, r.producto_id,
-            r.cantidad, v_stock_antes, v_stock_antes + (v_delta * r.cantidad),
-            p_documento_id,
-            'Doc #' || p_documento_id,
-            p_user_id
-        );
-    END LOOP;
-END;
+    AS $$
+DECLARE
+    v_tipo_doc  VARCHAR(2);
+    v_empresa   BIGINT;
+    v_tipo_mov  VARCHAR(20);
+    v_delta     NUMERIC;
+    r           RECORD;
+    v_stock_antes NUMERIC;
+BEGIN
+    SELECT tipo_documento, empresa_id INTO v_tipo_doc, v_empresa
+      FROM documentos_electronicos WHERE id = p_documento_id;
+
+    IF v_tipo_doc IN ('01','04') THEN
+        v_tipo_mov := 'venta';    v_delta := -1;
+    ELSIF v_tipo_doc = '03' THEN
+        v_tipo_mov := 'devolucion'; v_delta := 1;
+    ELSE RETURN;
+    END IF;
+
+    FOR r IN
+        SELECT dl.bodega_id, dl.producto_id, dl.cantidad
+          FROM documento_lineas dl
+          JOIN productos p ON p.id = dl.producto_id
+         WHERE dl.documento_id = p_documento_id
+           AND dl.bodega_id IS NOT NULL
+           AND dl.producto_id IS NOT NULL
+           AND p.type = 'product'
+    LOOP
+        SELECT COALESCE(stock, 0) INTO v_stock_antes
+          FROM bodega_productos
+         WHERE bodega_id = r.bodega_id AND producto_id = r.producto_id;
+
+        INSERT INTO movimientos_inventario (
+            empresa_id, tipo, bodega_origen_id, producto_id,
+            cantidad, stock_antes, stock_despues,
+            documento_id, referencia, user_id
+        ) VALUES (
+            v_empresa, v_tipo_mov, r.bodega_id, r.producto_id,
+            r.cantidad, v_stock_antes, v_stock_antes + (v_delta * r.cantidad),
+            p_documento_id,
+            'Doc #' || p_documento_id,
+            p_user_id
+        );
+    END LOOP;
+END;
 $$;
 
 
@@ -5086,35 +5086,35 @@ CREATE FUNCTION public.sp_orden_pedido_update(p_id bigint, p_empresa_id bigint, 
 
 CREATE FUNCTION public.sp_producto_create(p_empresa_id bigint, p_categoria_id bigint, p_code character varying, p_name character varying, p_description text, p_type character varying, p_unit_measure character varying, p_cabys_code character varying, p_price numeric, p_tax_type character varying, p_tax_code character varying, p_tax_rate numeric, p_image_url text DEFAULT NULL::text, p_image_public_id character varying DEFAULT NULL::character varying) RETURNS TABLE(id bigint, code character varying, name character varying)
     LANGUAGE plpgsql
-    AS $$
-DECLARE
-    v_producto_id BIGINT;
-    v_code        VARCHAR;
-    v_name        VARCHAR;
-BEGIN
-    INSERT INTO productos (
-        empresa_id, categoria_id, code, name, description, type,
-        unit_measure, cabys_code, price, tax_type, tax_code, tax_rate,
-        image_url, image_public_id
-    )
-    VALUES (
-        p_empresa_id, NULLIF(p_categoria_id, 0), p_code, p_name, p_description, p_type,
-        p_unit_measure, NULLIF(p_cabys_code, ''), p_price, p_tax_type, p_tax_code, p_tax_rate,
-        p_image_url, p_image_public_id
-    )
-    RETURNING productos.id, productos.code, productos.name
-    INTO v_producto_id, v_code, v_name;
-
-    IF p_type = 'product' THEN
-        INSERT INTO bodega_productos (bodega_id, producto_id, stock, stock_min)
-        SELECT b.id, v_producto_id, 0, 0
-        FROM bodegas b
-        WHERE b.empresa_id = p_empresa_id AND b.deleted_at IS NULL
-        ON CONFLICT (bodega_id, producto_id) DO NOTHING;
-    END IF;
-
-    RETURN QUERY SELECT v_producto_id, v_code, v_name;
-END;
+    AS $$
+DECLARE
+    v_producto_id BIGINT;
+    v_code        VARCHAR;
+    v_name        VARCHAR;
+BEGIN
+    INSERT INTO productos (
+        empresa_id, categoria_id, code, name, description, type,
+        unit_measure, cabys_code, price, tax_type, tax_code, tax_rate,
+        image_url, image_public_id
+    )
+    VALUES (
+        p_empresa_id, NULLIF(p_categoria_id, 0), p_code, p_name, p_description, p_type,
+        p_unit_measure, NULLIF(p_cabys_code, ''), p_price, p_tax_type, p_tax_code, p_tax_rate,
+        p_image_url, p_image_public_id
+    )
+    RETURNING productos.id, productos.code, productos.name
+    INTO v_producto_id, v_code, v_name;
+
+    IF p_type = 'product' THEN
+        INSERT INTO bodega_productos (bodega_id, producto_id, stock, stock_min)
+        SELECT b.id, v_producto_id, 0, 0
+        FROM bodegas b
+        WHERE b.empresa_id = p_empresa_id AND b.deleted_at IS NULL
+        ON CONFLICT (bodega_id, producto_id) DO NOTHING;
+    END IF;
+
+    RETURN QUERY SELECT v_producto_id, v_code, v_name;
+END;
 $$;
 
 
@@ -5317,12 +5317,12 @@ $$;
 
 CREATE FUNCTION public.sp_producto_soft_delete(p_id bigint) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
-    AS $$
-            DECLARE v_rows INTEGER;
-            BEGIN
-                UPDATE productos SET is_active=FALSE, deleted_at=NOW(), updated_at=NOW()
-                WHERE id=p_id AND deleted_at IS NULL;
-                GET DIAGNOSTICS v_rows = ROW_COUNT; RETURN v_rows > 0;
+    AS $$
+            DECLARE v_rows INTEGER;
+            BEGIN
+                UPDATE productos SET is_active=FALSE, deleted_at=NOW(), updated_at=NOW()
+                WHERE id=p_id AND deleted_at IS NULL;
+                GET DIAGNOSTICS v_rows = ROW_COUNT; RETURN v_rows > 0;
             END; $$;
 
 
@@ -5332,12 +5332,12 @@ CREATE FUNCTION public.sp_producto_soft_delete(p_id bigint) RETURNS boolean
 
 CREATE FUNCTION public.sp_producto_toggle(p_id bigint) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
-    AS $$
-            DECLARE v_rows INTEGER;
-            BEGIN
-                UPDATE productos SET is_active = NOT is_active, updated_at = NOW()
-                WHERE id = p_id AND deleted_at IS NULL;
-                GET DIAGNOSTICS v_rows = ROW_COUNT; RETURN v_rows > 0;
+    AS $$
+            DECLARE v_rows INTEGER;
+            BEGIN
+                UPDATE productos SET is_active = NOT is_active, updated_at = NOW()
+                WHERE id = p_id AND deleted_at IS NULL;
+                GET DIAGNOSTICS v_rows = ROW_COUNT; RETURN v_rows > 0;
             END; $$;
 
 
@@ -5469,14 +5469,16 @@ $$;
 -- Name: sp_proveedor_list(bigint, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_proveedor_list(p_empresa_id bigint, p_search text DEFAULT NULL::text) RETURNS TABLE(id bigint, empresa_id bigint, name character varying, legal_name character varying, tipo_id character varying, tax_id character varying, email character varying, phone character varying, address text, notes text, is_active boolean, created_at timestamp without time zone, updated_at timestamp without time zone)
+CREATE FUNCTION public.sp_proveedor_list(p_empresa_id bigint, p_search text DEFAULT NULL::text) RETURNS TABLE(id bigint, empresa_id bigint, name character varying, legal_name character varying, tipo_id character varying, tax_id character varying, email character varying, phone character varying, address text, notes text, is_active boolean, created_at timestamp without time zone, updated_at timestamp without time zone, actividad_economica_codigo character varying, actividad_economica_descripcion character varying, province_code character varying, canton_code character varying, district_code character varying)
     LANGUAGE plpgsql
     AS $$
             BEGIN
                 RETURN QUERY
                 SELECT p.id, p.empresa_id, p.name, p.legal_name, p.tipo_id, p.tax_id,
                        p.email, p.phone, p.address, p.notes, p.is_active,
-                       p.created_at, p.updated_at
+                       p.created_at, p.updated_at,
+                       p.actividad_economica_codigo, p.actividad_economica_descripcion,
+                       p.province_code, p.canton_code, p.district_code
                 FROM proveedores p
                 WHERE p.empresa_id = p_empresa_id
                   AND p.deleted_at IS NULL
@@ -5488,6 +5490,39 @@ CREATE FUNCTION public.sp_proveedor_list(p_empresa_id bigint, p_search text DEFA
                     OR p.email     ILIKE '%' || p_search || '%'
                   )
                 ORDER BY p.name;
+            END;
+            $$;
+
+
+--
+-- Name: sp_proveedor_list_eliminados(bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_proveedor_list_eliminados(p_empresa_id bigint) RETURNS TABLE(id bigint, name character varying, legal_name character varying, tax_id character varying, email character varying, phone character varying, deleted_at timestamp without time zone)
+    LANGUAGE plpgsql
+    AS $$
+            BEGIN
+                RETURN QUERY
+                SELECT p.id, p.name, p.legal_name, p.tax_id, p.email, p.phone, p.deleted_at
+                FROM proveedores p
+                WHERE p.empresa_id = p_empresa_id AND p.deleted_at IS NOT NULL
+                ORDER BY p.deleted_at DESC;
+            END;
+            $$;
+
+
+--
+-- Name: sp_proveedor_restore(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_proveedor_restore(p_id bigint, p_empresa_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    AS $$
+            BEGIN
+                UPDATE proveedores
+                SET deleted_at = NULL, is_active = TRUE, updated_at = NOW()
+                WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NOT NULL;
+                RETURN FOUND;
             END;
             $$;
 
@@ -8886,6 +8921,43 @@ CREATE TABLE public.proveedores (
 
 
 --
+-- Name: proveedores_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.proveedores_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'proveedores'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: proveedores_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.proveedores_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: proveedores_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.proveedores_auditoria_id_seq OWNED BY public.proveedores_auditoria.id;
+
+
+--
 -- Name: proveedores_id_seq; Type: SEQUENCE; Schema: public; Owner: -
 --
 
@@ -9645,6 +9717,13 @@ ALTER TABLE ONLY public.proveedores ALTER COLUMN id SET DEFAULT nextval('public.
 
 
 --
+-- Name: proveedores_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.proveedores_auditoria ALTER COLUMN id SET DEFAULT nextval('public.proveedores_auditoria_id_seq'::regclass);
+
+
+--
 -- Name: recibos_adelanto id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -10261,6 +10340,14 @@ ALTER TABLE ONLY public.productos
 
 
 --
+-- Name: proveedores_auditoria proveedores_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.proveedores_auditoria
+    ADD CONSTRAINT proveedores_auditoria_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: proveedores proveedores_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -10751,6 +10838,13 @@ CREATE INDEX idx_productos_codigo_barras ON public.productos USING btree (empres
 
 
 --
+-- Name: idx_proveedores_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_proveedores_auditoria_registro ON public.proveedores_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
 -- Name: idx_proveedores_empresa; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -10874,6 +10968,13 @@ CREATE TRIGGER trg_ordenes_pedido_auditoria AFTER INSERT OR DELETE OR UPDATE ON 
 --
 
 CREATE TRIGGER trg_productos_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.productos FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: proveedores trg_proveedores_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_proveedores_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.proveedores FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
 
 
 --
