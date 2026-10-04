@@ -876,6 +876,23 @@ $$;
 
 
 --
+-- Name: sp_bodega_list_eliminadas(bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_bodega_list_eliminadas(p_empresa_id bigint) RETURNS TABLE(id bigint, name character varying, description text, deleted_at timestamp without time zone)
+    LANGUAGE plpgsql
+    AS $$
+            BEGIN
+                RETURN QUERY
+                SELECT b.id, b.name, b.description, b.deleted_at
+                FROM bodegas b
+                WHERE b.empresa_id = p_empresa_id AND b.deleted_at IS NOT NULL
+                ORDER BY b.deleted_at DESC;
+            END;
+            $$;
+
+
+--
 -- Name: sp_bodega_producto_ajustar_stock(bigint, bigint, numeric); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -931,6 +948,22 @@ BEGIN
     RETURN true;
 END;
 $$;
+
+
+--
+-- Name: sp_bodega_restore(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_bodega_restore(p_id bigint, p_empresa_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    AS $$
+            BEGIN
+                UPDATE bodegas
+                SET deleted_at = NULL, is_active = TRUE, updated_at = NOW()
+                WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NOT NULL;
+                RETURN FOUND;
+            END;
+            $$;
 
 
 --
