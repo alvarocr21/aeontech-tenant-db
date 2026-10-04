@@ -3966,6 +3966,37 @@ CREATE FUNCTION public.sp_funcionario_list(p_empresa_id bigint) RETURNS TABLE(id
 
 
 --
+-- Name: sp_funcionario_list_eliminados(bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_funcionario_list_eliminados(p_empresa_id bigint) RETURNS TABLE(id bigint, name character varying, tax_id character varying, email character varying, phone character varying, deleted_at timestamp without time zone)
+    LANGUAGE sql STABLE
+    AS $$
+                SELECT f.id, f.name, f.tax_id, f.email, f.phone, f.deleted_at
+                FROM funcionarios f
+                WHERE f.deleted_at IS NOT NULL AND f.empresa_id = p_empresa_id
+                ORDER BY f.deleted_at DESC;
+            $$;
+
+
+--
+-- Name: sp_funcionario_restore(bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_funcionario_restore(p_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    AS $$
+            DECLARE v_rows INTEGER;
+            BEGIN
+                UPDATE funcionarios SET is_active = TRUE, is_default = FALSE, deleted_at = NULL, updated_at = NOW()
+                WHERE id = p_id AND deleted_at IS NOT NULL;
+                GET DIAGNOSTICS v_rows = ROW_COUNT;
+                RETURN v_rows > 0;
+            END;
+            $$;
+
+
+--
 -- Name: sp_funcionario_search(bigint, character varying); Type: FUNCTION; Schema: public; Owner: -
 --
 
