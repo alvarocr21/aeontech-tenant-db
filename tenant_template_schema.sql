@@ -4428,12 +4428,18 @@ CREATE FUNCTION public.sp_inventario_registrar_movimiento_lote(p_empresa_id bigi
 --
 
 CREATE FUNCTION public.sp_medio_pago_create(p_empresa_id bigint, p_nombre character varying, p_tipo_hacienda_codigo character varying, p_tipo_hacienda_nombre character varying) RETURNS bigint
-    LANGUAGE plpgsql SECURITY DEFINER
+    LANGUAGE plpgsql
     AS $$
             DECLARE v_id BIGINT;
             BEGIN
-                INSERT INTO empresa_medios_pago(empresa_id, nombre, tipo_hacienda_codigo, tipo_hacienda_nombre)
-                VALUES (p_empresa_id, p_nombre, p_tipo_hacienda_codigo, p_tipo_hacienda_nombre)
+                INSERT INTO empresa_medios_pago(empresa_id, nombre, tipo_hacienda_codigo, tipo_hacienda_nombre, orden)
+                VALUES (
+                    p_empresa_id, p_nombre, p_tipo_hacienda_codigo, p_tipo_hacienda_nombre,
+                    COALESCE((SELECT MAX(orden) FROM empresa_medios_pago
+                              WHERE empresa_id = p_empresa_id
+                                AND tipo_hacienda_codigo = p_tipo_hacienda_codigo
+                                AND deleted_at IS NULL), 0) + 1
+                )
                 RETURNING id INTO v_id;
                 RETURN v_id;
             END;
@@ -4462,38 +4468,50 @@ CREATE FUNCTION public.sp_medio_pago_delete(p_id bigint, p_empresa_id bigint) RE
 CREATE FUNCTION public.sp_medio_pago_reordenar(p_id bigint, p_empresa_id bigint, p_direccion text) RETURNS boolean
     LANGUAGE plpgsql
     AS $$
-DECLARE
-  v_orden_actual integer;
-  v_tipo         character varying(2);
-  v_id_swap      bigint;
-  v_orden_swap   integer;
-BEGIN
-  SELECT orden, tipo_hacienda_codigo INTO v_orden_actual, v_tipo
-  FROM empresa_medios_pago WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
+            DECLARE
+              v_orden_actual integer;
+              v_tipo         character varying(2);
+              v_id_swap      bigint;
+              v_orden_swap   integer;
+            BEGIN
+              SELECT tipo_hacienda_codigo INTO v_tipo
+              FROM empresa_medios_pago
+              WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
 
-  IF NOT FOUND THEN RETURN false; END IF;
+              IF NOT FOUND THEN RETURN false; END IF;
 
-  IF p_direccion = 'up' THEN
-    SELECT id, orden INTO v_id_swap, v_orden_swap
-    FROM empresa_medios_pago
-    WHERE empresa_id = p_empresa_id AND tipo_hacienda_codigo = v_tipo
-      AND deleted_at IS NULL AND orden < v_orden_actual
-    ORDER BY orden DESC LIMIT 1;
-  ELSE
-    SELECT id, orden INTO v_id_swap, v_orden_swap
-    FROM empresa_medios_pago
-    WHERE empresa_id = p_empresa_id AND tipo_hacienda_codigo = v_tipo
-      AND deleted_at IS NULL AND orden > v_orden_actual
-    ORDER BY orden ASC LIMIT 1;
-  END IF;
+              -- Normalizar el orden del grupo (evita duplicados)
+              UPDATE empresa_medios_pago m SET orden = n.rn
+              FROM (
+                SELECT id, ROW_NUMBER() OVER (ORDER BY orden, id) AS rn
+                FROM empresa_medios_pago
+                WHERE empresa_id = p_empresa_id AND tipo_hacienda_codigo = v_tipo AND deleted_at IS NULL
+              ) n
+              WHERE m.id = n.id AND m.orden IS DISTINCT FROM n.rn;
 
-  IF v_id_swap IS NULL THEN RETURN false; END IF;
+              SELECT orden INTO v_orden_actual FROM empresa_medios_pago WHERE id = p_id;
 
-  UPDATE empresa_medios_pago SET orden = v_orden_swap WHERE id = p_id;
-  UPDATE empresa_medios_pago SET orden = v_orden_actual WHERE id = v_id_swap;
-  RETURN true;
-END;
-$$;
+              IF p_direccion = 'up' THEN
+                SELECT id, orden INTO v_id_swap, v_orden_swap
+                FROM empresa_medios_pago
+                WHERE empresa_id = p_empresa_id AND tipo_hacienda_codigo = v_tipo
+                  AND deleted_at IS NULL AND orden < v_orden_actual
+                ORDER BY orden DESC LIMIT 1;
+              ELSE
+                SELECT id, orden INTO v_id_swap, v_orden_swap
+                FROM empresa_medios_pago
+                WHERE empresa_id = p_empresa_id AND tipo_hacienda_codigo = v_tipo
+                  AND deleted_at IS NULL AND orden > v_orden_actual
+                ORDER BY orden ASC LIMIT 1;
+              END IF;
+
+              IF v_id_swap IS NULL THEN RETURN false; END IF;
+
+              UPDATE empresa_medios_pago SET orden = v_orden_swap WHERE id = p_id;
+              UPDATE empresa_medios_pago SET orden = v_orden_actual WHERE id = v_id_swap;
+              RETURN true;
+            END;
+            $$;
 
 
 --
