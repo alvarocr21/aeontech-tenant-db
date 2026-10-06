@@ -3010,6 +3010,21 @@ $$;
 
 
 --
+-- Name: sp_empresa_condicion_venta_delete(integer, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_empresa_condicion_venta_delete(p_empresa_id integer, p_codigo character varying) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+            BEGIN
+                DELETE FROM empresa_condicion_ventas
+                WHERE empresa_id = p_empresa_id AND codigo = p_codigo AND es_default = false;
+                RETURN FOUND;
+            END;
+            $$;
+
+
+--
 -- Name: sp_empresa_condicion_ventas_save(integer, character varying, boolean, boolean); Type: PROCEDURE; Schema: public; Owner: -
 --
 
