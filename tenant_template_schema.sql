@@ -5569,6 +5569,79 @@ $$;
 
 
 --
+-- Name: sp_proveedor_historial(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_proveedor_historial(p_proveedor_id bigint, p_empresa_id bigint) RETURNS TABLE(origen character varying, id bigint, fecha timestamp without time zone, tipo_documento character varying, estado character varying, titulo character varying, descripcion text, monto numeric, moneda character varying, clave character varying, numero_consecutivo character varying)
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_tax_id character varying;
+BEGIN
+    SELECT p.tax_id INTO v_tax_id
+    FROM proveedores p
+    WHERE p.id = p_proveedor_id AND p.empresa_id = p_empresa_id;
+
+    RETURN QUERY
+    SELECT * FROM (
+        SELECT
+            'factura_recibida'::VARCHAR                       AS origen,
+            fr.id::BIGINT                                     AS id,
+            COALESCE(fr.fecha_emision, fr.created_at)         AS fecha,
+            fr.tipo_documento::VARCHAR                        AS tipo_documento,
+            fr.estado_recepcion::VARCHAR                      AS estado,
+            (CASE fr.tipo_documento
+                WHEN '01' THEN 'Factura Electrónica'
+                WHEN '02' THEN 'Nota de Débito'
+                WHEN '03' THEN 'Nota de Crédito'
+                WHEN '04' THEN 'Tiquete Electrónico'
+                WHEN '08' THEN 'Factura de Compra'
+                WHEN '09' THEN 'Factura de Exportación'
+                WHEN '10' THEN 'Recibo de Pago'
+                ELSE 'Comprobante recibido'
+             END)::VARCHAR                                    AS titulo,
+            (CASE WHEN fr.condicion_pago = 'credito'
+                  THEN 'Crédito' || CASE WHEN fr.monto_pagado >= fr.total_comprobante
+                                         THEN ' · pagada' ELSE ' · con saldo pendiente' END
+                  ELSE 'Contado'
+             END)::TEXT                                       AS descripcion,
+            fr.total_comprobante::NUMERIC                     AS monto,
+            COALESCE(fr.moneda, 'CRC')::VARCHAR               AS moneda,
+            fr.clave::VARCHAR                                 AS clave,
+            fr.numero_consecutivo_emisor::VARCHAR             AS numero_consecutivo
+        FROM facturas_recibidas fr
+        WHERE fr.empresa_id = p_empresa_id
+          AND (fr.proveedor_id = p_proveedor_id
+               OR (v_tax_id IS NOT NULL AND fr.emisor_numero_id = v_tax_id))
+
+        UNION ALL
+
+        SELECT
+            'orden_pedido'::VARCHAR,
+            o.id::BIGINT,
+            o.fecha,
+            NULL::VARCHAR,
+            o.estado::VARCHAR,
+            ('Orden de pedido ' || o.numero)::VARCHAR,
+            o.notas::TEXT,
+            (SELECT COALESCE(SUM(COALESCE(NULLIF(l->>'subtotal','')::NUMERIC,
+                                          COALESCE(NULLIF(l->>'cantidad','')::NUMERIC, 0)
+                                        * COALESCE(NULLIF(l->>'precio_unitario','')::NUMERIC, 0))), 0)
+               FROM jsonb_array_elements(o.lineas) l)::NUMERIC,
+            COALESCE(o.moneda, 'CRC')::VARCHAR,
+            NULL::VARCHAR,
+            o.numero::VARCHAR
+        FROM ordenes_pedido o
+        WHERE o.empresa_id = p_empresa_id
+          AND o.proveedor_id = p_proveedor_id
+          AND o.deleted_at IS NULL
+    ) h
+    ORDER BY h.fecha DESC NULLS LAST;
+END;
+$$;
+
+
+--
 -- Name: sp_proveedor_list(bigint, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5628,6 +5701,74 @@ CREATE FUNCTION public.sp_proveedor_restore(p_id bigint, p_empresa_id bigint) RE
                 RETURN FOUND;
             END;
             $$;
+
+
+--
+-- Name: sp_proveedor_resumen(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_proveedor_resumen(p_proveedor_id bigint, p_empresa_id bigint) RETURNS TABLE(total_facturas bigint, total_notas_credito bigint, total_ordenes bigint, ordenes_abiertas bigint, primera_compra timestamp without time zone, ultima_compra timestamp without time zone, totales_moneda json, top_productos json)
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_tax_id character varying;
+BEGIN
+    SELECT p.tax_id INTO v_tax_id
+    FROM proveedores p
+    WHERE p.id = p_proveedor_id AND p.empresa_id = p_empresa_id;
+
+    RETURN QUERY
+    WITH fr AS (
+        SELECT f.*
+        FROM facturas_recibidas f
+        WHERE f.empresa_id = p_empresa_id
+          AND (f.proveedor_id = p_proveedor_id
+               OR (v_tax_id IS NOT NULL AND f.emisor_numero_id = v_tax_id))
+          AND COALESCE(f.estado_recepcion, 'pendiente') <> 'rechazado'
+    ),
+    compras AS (
+        -- Compras reales: sin notas de crédito ni recibos de pago
+        SELECT * FROM fr WHERE COALESCE(fr.tipo_documento, '01') NOT IN ('03', '10')
+    )
+    SELECT
+        (SELECT COUNT(*) FROM compras),
+        (SELECT COUNT(*) FROM fr WHERE fr.tipo_documento = '03'),
+        (SELECT COUNT(*) FROM ordenes_pedido o
+          WHERE o.empresa_id = p_empresa_id AND o.proveedor_id = p_proveedor_id
+            AND o.deleted_at IS NULL AND o.estado <> 'cancelada'),
+        (SELECT COUNT(*) FROM ordenes_pedido o
+          WHERE o.empresa_id = p_empresa_id AND o.proveedor_id = p_proveedor_id
+            AND o.deleted_at IS NULL AND o.estado IN ('enviada', 'recibida_parcial')),
+        (SELECT MIN(COALESCE(c.fecha_emision, c.created_at)) FROM compras c),
+        (SELECT MAX(COALESCE(c.fecha_emision, c.created_at)) FROM compras c),
+        (SELECT COALESCE(json_agg(t ORDER BY t.moneda), '[]'::json) FROM (
+            SELECT
+                COALESCE(c.moneda, 'CRC')                                   AS moneda,
+                COUNT(*)                                                    AS cantidad,
+                COALESCE(SUM(c.total_comprobante), 0)                       AS total_comprado,
+                COALESCE(SUM(c.total_impuesto), 0)                          AS total_impuesto,
+                COALESCE(SUM(CASE WHEN c.condicion_pago = 'credito'
+                                   AND c.estado_recepcion IN ('aceptado', 'aceptado_parcial')
+                                  THEN GREATEST(c.total_comprobante - c.monto_pagado, 0)
+                                  ELSE 0 END), 0)                           AS saldo_pendiente
+            FROM compras c
+            GROUP BY COALESCE(c.moneda, 'CRC')
+        ) t),
+        (SELECT COALESCE(json_agg(t), '[]'::json) FROM (
+            SELECT
+                MIN(NULLIF(trim(l->>'detalle'), ''))                        AS nombre,
+                COALESCE(c.moneda, 'CRC')                                   AS moneda,
+                SUM(COALESCE(NULLIF(l->>'cantidad', '')::NUMERIC, 0))       AS cantidad,
+                SUM(COALESCE(NULLIF(l->>'monto_total', '')::NUMERIC, 0))    AS monto_total
+            FROM compras c
+            CROSS JOIN LATERAL jsonb_array_elements(c.lineas) l
+            WHERE NULLIF(trim(l->>'detalle'), '') IS NOT NULL
+            GROUP BY lower(trim(l->>'detalle')), COALESCE(c.moneda, 'CRC')
+            ORDER BY SUM(COALESCE(NULLIF(l->>'monto_total', '')::NUMERIC, 0)) DESC
+            LIMIT 5
+        ) t);
+END;
+$$;
 
 
 --
