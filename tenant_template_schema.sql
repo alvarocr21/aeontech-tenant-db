@@ -5858,29 +5858,33 @@ END; $$;
 -- Name: sp_reporte_cxc_mora(bigint, date); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_reporte_cxc_mora(p_empresa_id bigint, p_fecha_corte date DEFAULT CURRENT_DATE) RETURNS TABLE(id bigint, cliente_id bigint, cliente_nombre character varying, cliente_cedula character varying, documento_id bigint, monto_total numeric, saldo_pendiente numeric, fecha_emision timestamp without time zone, fecha_vencimiento timestamp without time zone, dias_atraso integer, estado character varying)
+CREATE FUNCTION public.sp_reporte_cxc_mora(p_empresa_id bigint, p_fecha_corte date DEFAULT CURRENT_DATE) RETURNS TABLE(id bigint, cliente_id bigint, cliente_nombre character varying, cliente_cedula character varying, documento_id bigint, moneda character varying, monto_total numeric, saldo_pendiente numeric, fecha_emision timestamp without time zone, fecha_vencimiento timestamp without time zone, dias_atraso integer, estado character varying)
     LANGUAGE plpgsql SECURITY DEFINER
     AS $$
-            BEGIN
-                RETURN QUERY
-                SELECT
-                    cxc.id,
-                    cxc.cliente_id,
-                    c.name::VARCHAR,
-                    c.tax_id::VARCHAR,
-                    cxc.documento_id,
-                    cxc.monto_total,
-                    cxc.saldo_pendiente,
-                    cxc.fecha_emision,
-                    cxc.fecha_vencimiento,
-                    GREATEST(0, (p_fecha_corte - cxc.fecha_vencimiento::date))::INTEGER AS dias_atraso,
-                    cxc.estado
-                FROM cuentas_por_cobrar cxc
-                JOIN clients c ON c.id = cxc.cliente_id
-                WHERE cxc.empresa_id = p_empresa_id
-                  AND cxc.estado IN ('vigente','mora')
-                ORDER BY dias_atraso DESC, cxc.saldo_pendiente DESC;
-            END; $$;
+BEGIN
+    RETURN QUERY
+    SELECT
+        cxc.id,
+        cxc.cliente_id,
+        c.name::VARCHAR,
+        c.tax_id::VARCHAR,
+        cxc.documento_id,
+        COALESCE(d.moneda, 'CRC')::VARCHAR AS moneda,
+        cxc.monto_total,
+        cxc.saldo_pendiente,
+        cxc.fecha_emision,
+        cxc.fecha_vencimiento,
+        GREATEST(0, (p_fecha_corte - cxc.fecha_vencimiento::date))::INTEGER AS dias_atraso,
+        cxc.estado
+    FROM cuentas_por_cobrar cxc
+    JOIN clients c ON c.id = cxc.cliente_id
+    LEFT JOIN documentos_electronicos d ON d.id = cxc.documento_id
+    WHERE cxc.empresa_id = p_empresa_id
+      AND cxc.estado IN ('vigente','mora')
+      AND cxc.saldo_pendiente > 0
+    ORDER BY COALESCE(d.moneda, 'CRC'), c.name, dias_atraso DESC, cxc.saldo_pendiente DESC;
+END;
+$$;
 
 
 --
@@ -6004,7 +6008,8 @@ BEGIN
         COALESCE(p.price, 0) AS precio,
         COALESCE(bp.stock, 0) AS stock,
         COALESCE(bp.stock_min, 0) AS stock_min,
-        (COALESCE(bp.stock, 0) < COALESCE(bp.stock_min, 0) AND bp.stock_min > 0) AS bajo_minimo
+        (COALESCE(bp.stock, 0) < 0
+         OR (COALESCE(bp.stock_min, 0) > 0 AND COALESCE(bp.stock, 0) < bp.stock_min)) AS bajo_minimo
     FROM bodegas b
     JOIN bodega_productos bp ON bp.bodega_id = b.id
     JOIN productos p         ON p.id = bp.producto_id
@@ -6015,7 +6020,7 @@ BEGIN
       AND (
         NOT p_bajo_minimo
         OR COALESCE(bp.stock, 0) <= 0
-        OR (bp.stock < bp.stock_min AND bp.stock_min > 0)
+        OR (COALESCE(bp.stock_min, 0) > 0 AND COALESCE(bp.stock, 0) < bp.stock_min)
       )
       AND (
         p_search IS NULL OR p_search = ''
@@ -6034,24 +6039,25 @@ $$;
 CREATE FUNCTION public.sp_reporte_inventario_summary(p_empresa_id bigint) RETURNS TABLE(bodega_id bigint, bodega_nombre character varying, total_items bigint, bajo_minimo bigint, sin_stock bigint)
     LANGUAGE plpgsql
     AS $$
-            BEGIN
-                RETURN QUERY
-                SELECT
-                    b.id          AS bodega_id,
-                    b.name        AS bodega_nombre,
-                    COUNT(bp.id)  AS total_items,
-                    COUNT(*) FILTER (WHERE bp.stock < bp.stock_min AND bp.stock_min > 0) AS bajo_minimo,
-                    COUNT(*) FILTER (WHERE bp.stock <= 0) AS sin_stock
-                FROM bodegas b
-                JOIN bodega_productos bp ON bp.bodega_id = b.id
-                JOIN productos p         ON p.id = bp.producto_id
-                                       AND p.empresa_id = p_empresa_id
-                                       AND p.type = 'product'
-                WHERE b.empresa_id = p_empresa_id
-                GROUP BY b.id, b.name
-                ORDER BY b.name;
-            END;
-            $$;
+BEGIN
+    RETURN QUERY
+    SELECT
+        b.id          AS bodega_id,
+        b.name        AS bodega_nombre,
+        COUNT(bp.id)  AS total_items,
+        COUNT(*) FILTER (WHERE COALESCE(bp.stock, 0) < 0
+                            OR (COALESCE(bp.stock_min, 0) > 0 AND COALESCE(bp.stock, 0) < bp.stock_min)) AS bajo_minimo,
+        COUNT(*) FILTER (WHERE COALESCE(bp.stock, 0) = 0) AS sin_stock
+    FROM bodegas b
+    JOIN bodega_productos bp ON bp.bodega_id = b.id
+    JOIN productos p         ON p.id = bp.producto_id
+                           AND p.empresa_id = p_empresa_id
+                           AND p.type = 'product'
+    WHERE b.empresa_id = p_empresa_id
+    GROUP BY b.id, b.name
+    ORDER BY b.name;
+END;
+$$;
 
 
 --
