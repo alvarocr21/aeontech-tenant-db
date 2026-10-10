@@ -5867,6 +5867,44 @@ CREATE FUNCTION public.sp_reporte_cxc_mora(p_empresa_id bigint, p_fecha_corte da
 
 
 --
+-- Name: sp_reporte_cxp(bigint, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_reporte_cxp(p_empresa_id bigint, p_fecha_corte date DEFAULT CURRENT_DATE) RETURNS TABLE(id bigint, proveedor_nombre character varying, proveedor_cedula character varying, numero_consecutivo_emisor character varying, clave character varying, moneda character varying, total_comprobante numeric, monto_pagado numeric, saldo_pendiente numeric, fecha_emision timestamp without time zone, fecha_vencimiento date, dias_atraso integer, estado character varying)
+    LANGUAGE plpgsql SECURITY DEFINER
+    AS $$
+            BEGIN
+                RETURN QUERY
+                SELECT
+                    fr.id,
+                    fr.emisor_nombre::VARCHAR,
+                    fr.emisor_numero_id::VARCHAR,
+                    fr.numero_consecutivo_emisor::VARCHAR,
+                    fr.clave::VARCHAR,
+                    fr.moneda::VARCHAR,
+                    fr.total_comprobante::NUMERIC,
+                    fr.monto_pagado::NUMERIC,
+                    GREATEST(fr.total_comprobante - fr.monto_pagado, 0)::NUMERIC AS saldo_pendiente,
+                    fr.fecha_emision,
+                    fr.fecha_vencimiento,
+                    CASE WHEN fr.fecha_vencimiento IS NULL THEN 0
+                         ELSE GREATEST(0, (p_fecha_corte - fr.fecha_vencimiento))::INTEGER
+                    END AS dias_atraso,
+                    (CASE WHEN fr.fecha_vencimiento IS NOT NULL AND fr.fecha_vencimiento < p_fecha_corte
+                          THEN 'vencida' ELSE 'vigente'
+                     END)::VARCHAR AS estado
+                FROM facturas_recibidas fr
+                WHERE fr.empresa_id = p_empresa_id
+                  AND fr.condicion_pago = 'credito'
+                  AND fr.tipo_documento <> '10'
+                  AND fr.estado_recepcion IN ('aceptado', 'aceptado_parcial')
+                  AND fr.fecha_emision::date <= p_fecha_corte
+                  AND fr.monto_pagado < fr.total_comprobante
+                ORDER BY dias_atraso DESC, saldo_pendiente DESC;
+            END; $$;
+
+
+--
 -- Name: sp_reporte_documentos_estado(bigint, date, date); Type: FUNCTION; Schema: public; Owner: -
 --
 
