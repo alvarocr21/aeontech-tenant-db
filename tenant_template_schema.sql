@@ -1467,71 +1467,150 @@ CREATE FUNCTION public.sp_client_update(p_id bigint, p_name character varying, p
 
 
 --
--- Name: sp_cliente_historial(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+-- Name: sp_cliente_historial(bigint, bigint, integer, timestamp without time zone, character varying, bigint, character varying); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_cliente_historial(p_cliente_id bigint, p_empresa_id bigint) RETURNS TABLE(origen character varying, id bigint, fecha timestamp without time zone, tipo_documento character varying, estado character varying, titulo character varying, descripcion text, monto numeric, clave character varying, numero_consecutivo character varying)
+CREATE FUNCTION public.sp_cliente_historial(p_cliente_id bigint, p_empresa_id bigint, p_limite integer DEFAULT 30, p_cursor_fecha timestamp without time zone DEFAULT NULL::timestamp without time zone, p_cursor_origen character varying DEFAULT NULL::character varying, p_cursor_id bigint DEFAULT NULL::bigint, p_tipo character varying DEFAULT NULL::character varying) RETURNS TABLE(origen character varying, id bigint, fecha timestamp without time zone, tipo_documento character varying, estado character varying, titulo character varying, descripcion text, monto numeric, clave character varying, numero_consecutivo character varying)
     LANGUAGE plpgsql
     AS $$
-            BEGIN
-                RETURN QUERY
-                SELECT
-                    'documento'::VARCHAR                AS origen,
-                    d.id,
-                    d.fecha_emision                      AS fecha,
-                    d.tipo_documento,
-                    d.estado,
-                    d.numero_consecutivo::VARCHAR         AS titulo,
-                    NULL::TEXT                            AS descripcion,
-                    d.total_comprobante                   AS monto,
-                    d.clave,
-                    d.numero_consecutivo
-                FROM documentos_electronicos d
-                WHERE d.receptor_cliente_id = p_cliente_id
-                  AND d.empresa_id = p_empresa_id
-                  AND d.deleted_at IS NULL
+#variable_conflict use_column
+DECLARE
+    v_limite integer := LEAST(GREATEST(COALESCE(p_limite, 30), 1), 200);
+BEGIN
+    RETURN QUERY
+    SELECT h.origen, h.id, h.fecha, h.tipo_documento, h.estado, h.titulo,
+           h.descripcion, h.monto, h.clave, h.numero_consecutivo
+    FROM (
+        (SELECT
+            'documento'::VARCHAR          AS origen,
+            d.id::BIGINT                  AS id,
+            d.fecha_emision               AS fecha,
+            d.tipo_documento::VARCHAR     AS tipo_documento,
+            d.estado::VARCHAR             AS estado,
+            d.numero_consecutivo::VARCHAR AS titulo,
+            NULL::TEXT                    AS descripcion,
+            d.total_comprobante::NUMERIC  AS monto,
+            d.clave::VARCHAR              AS clave,
+            d.numero_consecutivo::VARCHAR AS numero_consecutivo
+         FROM documentos_electronicos d
+         WHERE (p_tipo IS NULL OR p_tipo = 'documento')
+           AND d.receptor_cliente_id = p_cliente_id
+           AND d.empresa_id = p_empresa_id
+           AND d.deleted_at IS NULL
+           AND (p_cursor_fecha IS NULL
+                OR (d.fecha_emision <= p_cursor_fecha
+                    AND (d.fecha_emision, 'documento'::VARCHAR, d.id) < (p_cursor_fecha, p_cursor_origen, p_cursor_id)))
+         ORDER BY d.fecha_emision DESC, d.id DESC
+         LIMIT v_limite + 1)
 
-                UNION ALL
+        UNION ALL
 
-                SELECT
-                    'agenda'::VARCHAR                     AS origen,
-                    e.id,
-                    e.fecha_inicio                        AS fecha,
-                    NULL::VARCHAR                          AS tipo_documento,
-                    e.estado,
-                    e.titulo,
-                    NULL::TEXT                             AS descripcion,
-                    NULL::NUMERIC                          AS monto,
-                    NULL::VARCHAR                           AS clave,
-                    NULL::VARCHAR                           AS numero_consecutivo
-                FROM agenda_eventos e
-                WHERE e.cliente_id = p_cliente_id
-                  AND e.empresa_id = p_empresa_id
-                  AND e.deleted_at IS NULL
-                
-                UNION ALL
+        (SELECT
+            'agenda'::VARCHAR,
+            e.id::BIGINT,
+            e.fecha_inicio,
+            NULL::VARCHAR,
+            e.estado::VARCHAR,
+            e.titulo::VARCHAR,
+            NULL::TEXT,
+            NULL::NUMERIC,
+            NULL::VARCHAR,
+            NULL::VARCHAR
+         FROM agenda_eventos e
+         WHERE (p_tipo IS NULL OR p_tipo = 'agenda')
+           AND e.cliente_id = p_cliente_id
+           AND e.empresa_id = p_empresa_id
+           AND e.deleted_at IS NULL
+           AND (p_cursor_fecha IS NULL
+                OR (e.fecha_inicio <= p_cursor_fecha
+                    AND (e.fecha_inicio, 'agenda'::VARCHAR, e.id) < (p_cursor_fecha, p_cursor_origen, p_cursor_id)))
+         ORDER BY e.fecha_inicio DESC, e.id DESC
+         LIMIT v_limite + 1)
 
-                SELECT
-                    'cotizacion'::VARCHAR                 AS origen,
-                    c.id,
-                    COALESCE(c.aprobado_at, c.fecha_emision) AS fecha,
-                    NULL::VARCHAR                          AS tipo_documento,
-                    c.estado,
-                    c.numero::VARCHAR                      AS titulo,
-                    NULL::TEXT                             AS descripcion,
-                    c.total_comprobante                    AS monto,
-                    NULL::VARCHAR                           AS clave,
-                    c.numero::VARCHAR                       AS numero_consecutivo
-                FROM cotizaciones c
-                WHERE c.receptor_cliente_id = p_cliente_id
-                  AND c.empresa_id = p_empresa_id
-                  AND c.deleted_at IS NULL
-                  AND c.aprobado_at IS NOT NULL
-                  AND c.estado IN ('aprobada','convertida','convertida_parcial')
-        
-                ORDER BY fecha DESC;
-            END;
-            $$;
+        UNION ALL
+
+        (SELECT
+            'cotizacion'::VARCHAR,
+            c.id::BIGINT,
+            c.aprobado_at,
+            NULL::VARCHAR,
+            c.estado::VARCHAR,
+            c.numero::VARCHAR,
+            NULL::TEXT,
+            c.total_comprobante::NUMERIC,
+            NULL::VARCHAR,
+            c.numero::VARCHAR
+         FROM cotizaciones c
+         WHERE (p_tipo IS NULL OR p_tipo = 'cotizacion')
+           AND c.receptor_cliente_id = p_cliente_id
+           AND c.empresa_id = p_empresa_id
+           AND c.deleted_at IS NULL
+           AND c.aprobado_at IS NOT NULL
+           AND c.estado IN ('aprobada','convertida','convertida_parcial')
+           AND (p_cursor_fecha IS NULL
+                OR (c.aprobado_at <= p_cursor_fecha
+                    AND (c.aprobado_at, 'cotizacion'::VARCHAR, c.id) < (p_cursor_fecha, p_cursor_origen, p_cursor_id)))
+         ORDER BY c.aprobado_at DESC, c.id DESC
+         LIMIT v_limite + 1)
+
+        UNION ALL
+
+        -- Citas modificadas / eliminadas (desde la auditoría)
+        (SELECT
+            o.origen,
+            a.id::BIGINT,
+            a.created_at,
+            NULL::VARCHAR,
+            COALESCE(a.datos_despues->>'estado', a.datos_antes->>'estado')::VARCHAR,
+            COALESCE(a.datos_despues->>'titulo', a.datos_antes->>'titulo')::VARCHAR,
+            (CASE
+                WHEN o.origen = 'agenda_eliminada'
+                THEN 'Fecha de la cita: ' || to_char((a.datos_antes->>'fecha_inicio')::timestamp, 'DD/MM/YYYY HH24:MI')
+                ELSE COALESCE(
+                    NULLIF(array_to_string(ARRAY[
+                        CASE WHEN a.datos_antes->>'titulo' IS DISTINCT FROM a.datos_despues->>'titulo'
+                             THEN 'Título: ' || (a.datos_antes->>'titulo') || ' → ' || (a.datos_despues->>'titulo') END,
+                        CASE WHEN a.datos_antes->>'fecha_inicio' IS DISTINCT FROM a.datos_despues->>'fecha_inicio'
+                               OR a.datos_antes->>'fecha_fin' IS DISTINCT FROM a.datos_despues->>'fecha_fin'
+                             THEN 'Fecha: '
+                                  || to_char((a.datos_antes->>'fecha_inicio')::timestamp, 'DD/MM/YYYY HH24:MI')
+                                  || ' → '
+                                  || to_char((a.datos_despues->>'fecha_inicio')::timestamp, 'DD/MM/YYYY HH24:MI') END,
+                        CASE WHEN a.datos_antes->>'estado' IS DISTINCT FROM a.datos_despues->>'estado'
+                             THEN 'Estado: ' || (a.datos_antes->>'estado') || ' → ' || (a.datos_despues->>'estado') END,
+                        CASE WHEN a.datos_antes->>'cliente_id' IS DISTINCT FROM a.datos_despues->>'cliente_id'
+                             THEN 'Cliente reasignado' END,
+                        CASE WHEN a.datos_antes->>'documento_id' IS DISTINCT FROM a.datos_despues->>'documento_id'
+                             THEN 'Cita facturada' END
+                    ], '; '), ''),
+                    'Se modificaron los servicios o detalles de la cita'
+                )
+             END)::TEXT,
+            NULL::NUMERIC,
+            NULL::VARCHAR,
+            NULL::VARCHAR
+         FROM agenda_eventos_auditoria a
+         CROSS JOIN LATERAL (
+             SELECT (CASE WHEN a.operacion = 'DELETE' OR (a.datos_despues->>'deleted_at') IS NOT NULL
+                          THEN 'agenda_eliminada' ELSE 'agenda_modificada' END)::VARCHAR AS origen
+         ) o
+         WHERE (p_tipo IS NULL OR p_tipo = 'agenda')
+           AND a.operacion IN ('UPDATE', 'DELETE')
+           AND ((a.datos_despues->>'cliente_id')::BIGINT = p_cliente_id
+                OR (a.datos_antes->>'cliente_id')::BIGINT = p_cliente_id)
+           AND COALESCE(a.datos_despues->>'empresa_id', a.datos_antes->>'empresa_id')::BIGINT = p_empresa_id
+           -- una cita ya eliminada que se vuelve a tocar no es un cambio nuevo
+           AND (a.datos_antes->>'deleted_at') IS NULL
+           AND (p_cursor_fecha IS NULL
+                OR (a.created_at <= p_cursor_fecha
+                    AND (a.created_at, o.origen, a.id) < (p_cursor_fecha, p_cursor_origen, p_cursor_id)))
+         ORDER BY a.created_at DESC, o.origen DESC, a.id DESC
+         LIMIT v_limite + 1)
+    ) h
+    ORDER BY h.fecha DESC, h.origen DESC, h.id DESC
+    LIMIT v_limite + 1;
+END;
+$$;
 
 
 --
@@ -5576,22 +5655,26 @@ $$;
 
 
 --
--- Name: sp_proveedor_historial(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+-- Name: sp_proveedor_historial(bigint, bigint, integer, timestamp without time zone, character varying, bigint, character varying); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_proveedor_historial(p_proveedor_id bigint, p_empresa_id bigint) RETURNS TABLE(origen character varying, id bigint, fecha timestamp without time zone, tipo_documento character varying, estado character varying, titulo character varying, descripcion text, monto numeric, moneda character varying, clave character varying, numero_consecutivo character varying)
+CREATE FUNCTION public.sp_proveedor_historial(p_proveedor_id bigint, p_empresa_id bigint, p_limite integer DEFAULT 30, p_cursor_fecha timestamp without time zone DEFAULT NULL::timestamp without time zone, p_cursor_origen character varying DEFAULT NULL::character varying, p_cursor_id bigint DEFAULT NULL::bigint, p_tipo character varying DEFAULT NULL::character varying) RETURNS TABLE(origen character varying, id bigint, fecha timestamp without time zone, tipo_documento character varying, estado character varying, titulo character varying, descripcion text, monto numeric, moneda character varying, clave character varying, numero_consecutivo character varying)
     LANGUAGE plpgsql
     AS $$
+#variable_conflict use_column
 DECLARE
     v_tax_id character varying;
+    v_limite integer := LEAST(GREATEST(COALESCE(p_limite, 30), 1), 200);
 BEGIN
     SELECT p.tax_id INTO v_tax_id
     FROM proveedores p
     WHERE p.id = p_proveedor_id AND p.empresa_id = p_empresa_id;
 
     RETURN QUERY
-    SELECT * FROM (
-        SELECT
+    SELECT h.origen, h.id, h.fecha, h.tipo_documento, h.estado, h.titulo,
+           h.descripcion, h.monto, h.moneda, h.clave, h.numero_consecutivo
+    FROM (
+        (SELECT
             'factura_recibida'::VARCHAR                       AS origen,
             fr.id::BIGINT                                     AS id,
             COALESCE(fr.fecha_emision, fr.created_at)         AS fecha,
@@ -5616,14 +5699,21 @@ BEGIN
             COALESCE(fr.moneda, 'CRC')::VARCHAR               AS moneda,
             fr.clave::VARCHAR                                 AS clave,
             fr.numero_consecutivo_emisor::VARCHAR             AS numero_consecutivo
-        FROM facturas_recibidas fr
-        WHERE fr.empresa_id = p_empresa_id
-          AND (fr.proveedor_id = p_proveedor_id
-               OR (v_tax_id IS NOT NULL AND fr.emisor_numero_id = v_tax_id))
+         FROM facturas_recibidas fr
+         WHERE (p_tipo IS NULL OR p_tipo = 'factura_recibida')
+           AND fr.empresa_id = p_empresa_id
+           AND (fr.proveedor_id = p_proveedor_id
+                OR (v_tax_id IS NOT NULL AND fr.emisor_numero_id = v_tax_id))
+           AND (p_cursor_fecha IS NULL
+                OR (COALESCE(fr.fecha_emision, fr.created_at) <= p_cursor_fecha
+                    AND (COALESCE(fr.fecha_emision, fr.created_at), 'factura_recibida'::VARCHAR, fr.id::BIGINT)
+                        < (p_cursor_fecha, p_cursor_origen, p_cursor_id)))
+         ORDER BY COALESCE(fr.fecha_emision, fr.created_at) DESC, fr.id DESC
+         LIMIT v_limite + 1)
 
         UNION ALL
 
-        SELECT
+        (SELECT
             'orden_pedido'::VARCHAR,
             o.id::BIGINT,
             o.fecha,
@@ -5638,12 +5728,19 @@ BEGIN
             COALESCE(o.moneda, 'CRC')::VARCHAR,
             NULL::VARCHAR,
             o.numero::VARCHAR
-        FROM ordenes_pedido o
-        WHERE o.empresa_id = p_empresa_id
-          AND o.proveedor_id = p_proveedor_id
-          AND o.deleted_at IS NULL
+         FROM ordenes_pedido o
+         WHERE (p_tipo IS NULL OR p_tipo = 'orden_pedido')
+           AND o.empresa_id = p_empresa_id
+           AND o.proveedor_id = p_proveedor_id
+           AND o.deleted_at IS NULL
+           AND (p_cursor_fecha IS NULL
+                OR (o.fecha <= p_cursor_fecha
+                    AND (o.fecha, 'orden_pedido'::VARCHAR, o.id::BIGINT) < (p_cursor_fecha, p_cursor_origen, p_cursor_id)))
+         ORDER BY o.fecha DESC, o.id DESC
+         LIMIT v_limite + 1)
     ) h
-    ORDER BY h.fecha DESC NULLS LAST;
+    ORDER BY h.fecha DESC, h.origen DESC, h.id DESC
+    LIMIT v_limite + 1;
 END;
 $$;
 
@@ -10883,6 +10980,20 @@ CREATE UNIQUE INDEX idx_adelanto_documento ON public.recibos_adelanto USING btre
 
 
 --
+-- Name: idx_agenda_aud_cliente_antes; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_agenda_aud_cliente_antes ON public.agenda_eventos_auditoria USING btree ((((datos_antes ->> 'cliente_id'::text))::bigint), created_at DESC) WHERE ((operacion)::text = ANY ((ARRAY['UPDATE'::character varying, 'DELETE'::character varying])::text[]));
+
+
+--
+-- Name: idx_agenda_aud_cliente_despues; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_agenda_aud_cliente_despues ON public.agenda_eventos_auditoria USING btree ((((datos_despues ->> 'cliente_id'::text))::bigint), created_at DESC) WHERE ((operacion)::text = ANY ((ARRAY['UPDATE'::character varying, 'DELETE'::character varying])::text[]));
+
+
+--
 -- Name: idx_agenda_avisos_envios_evento; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -10922,6 +11033,13 @@ CREATE INDEX idx_agenda_evento_lineas_fechas ON public.agenda_evento_lineas USIN
 --
 
 CREATE INDEX idx_agenda_evento_lineas_funcionario ON public.agenda_evento_lineas USING btree (funcionario_id);
+
+
+--
+-- Name: idx_agenda_eventos_cliente_fecha; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_agenda_eventos_cliente_fecha ON public.agenda_eventos USING btree (cliente_id, fecha_inicio DESC, id DESC) WHERE (deleted_at IS NULL);
 
 
 --
@@ -11023,6 +11141,13 @@ CREATE INDEX idx_cotizaciones_fecha ON public.cotizaciones USING btree (empresa_
 
 
 --
+-- Name: idx_cotizaciones_receptor_aprobado; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cotizaciones_receptor_aprobado ON public.cotizaciones USING btree (receptor_cliente_id, aprobado_at DESC, id DESC) WHERE ((deleted_at IS NULL) AND (aprobado_at IS NOT NULL));
+
+
+--
 -- Name: idx_cxc_aplic_cxc; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -11058,6 +11183,13 @@ CREATE UNIQUE INDEX idx_cxc_documento ON public.cuentas_por_cobrar USING btree (
 
 
 --
+-- Name: idx_docs_receptor_fecha; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_docs_receptor_fecha ON public.documentos_electronicos USING btree (receptor_cliente_id, fecha_emision DESC, id DESC) WHERE (deleted_at IS NULL);
+
+
+--
 -- Name: idx_documentos_clave; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -11086,6 +11218,13 @@ CREATE INDEX idx_emp_medios_pago_empresa ON public.empresa_medios_pago USING btr
 
 
 --
+-- Name: idx_fr_emisor_fecha; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_fr_emisor_fecha ON public.facturas_recibidas USING btree (emisor_numero_id, COALESCE(fecha_emision, created_at) DESC, id DESC);
+
+
+--
 -- Name: idx_fr_empresa; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -11097,6 +11236,13 @@ CREATE INDEX idx_fr_empresa ON public.facturas_recibidas USING btree (empresa_id
 --
 
 CREATE INDEX idx_fr_estado ON public.facturas_recibidas USING btree (estado_recepcion);
+
+
+--
+-- Name: idx_fr_proveedor_fecha; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_fr_proveedor_fecha ON public.facturas_recibidas USING btree (proveedor_id, COALESCE(fecha_emision, created_at) DESC, id DESC);
 
 
 --
@@ -11160,6 +11306,13 @@ CREATE INDEX idx_ordenes_pedido_empresa_estado ON public.ordenes_pedido USING bt
 --
 
 CREATE INDEX idx_ordenes_pedido_fecha ON public.ordenes_pedido USING btree (empresa_id, fecha DESC);
+
+
+--
+-- Name: idx_ordenes_pedido_proveedor_fecha; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_ordenes_pedido_proveedor_fecha ON public.ordenes_pedido USING btree (proveedor_id, fecha DESC, id DESC) WHERE (deleted_at IS NULL);
 
 
 --
