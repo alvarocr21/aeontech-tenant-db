@@ -918,6 +918,23 @@ CREATE FUNCTION public.sp_bodega_producto_ajustar_stock(p_bodega_id bigint, p_pr
 
 
 --
+-- Name: sp_bodega_producto_set_stock_min(bigint, bigint, numeric); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_bodega_producto_set_stock_min(p_bodega_id bigint, p_producto_id bigint, p_stock_min numeric) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    AS $$
+DECLARE v_rows INTEGER;
+BEGIN
+    UPDATE bodega_productos
+       SET stock_min = GREATEST(COALESCE(p_stock_min, 0), 0), updated_at = NOW()
+     WHERE bodega_id = p_bodega_id AND producto_id = p_producto_id;
+    GET DIAGNOSTICS v_rows = ROW_COUNT;
+    RETURN v_rows > 0;
+END; $$;
+
+
+--
 -- Name: sp_bodega_producto_stock(bigint, bigint, numeric, numeric); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5908,60 +5925,64 @@ CREATE FUNCTION public.sp_reporte_cxp(p_empresa_id bigint, p_fecha_corte date DE
 -- Name: sp_reporte_documentos_estado(bigint, date, date); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_reporte_documentos_estado(p_empresa_id bigint, p_fecha_desde date DEFAULT NULL::date, p_fecha_hasta date DEFAULT NULL::date) RETURNS TABLE(estado character varying, tipo_documento character varying, tipo_label character varying, cantidad bigint, total_comprobante numeric)
+CREATE FUNCTION public.sp_reporte_documentos_estado(p_empresa_id bigint, p_fecha_desde date DEFAULT NULL::date, p_fecha_hasta date DEFAULT NULL::date) RETURNS TABLE(estado character varying, tipo_documento character varying, tipo_label character varying, moneda character varying, cantidad bigint, total_comprobante numeric)
     LANGUAGE plpgsql
     AS $$
-            BEGIN
-                RETURN QUERY
-                SELECT
-                    d.estado,
-                    d.tipo_documento,
-                    CASE d.tipo_documento
-                        WHEN '01' THEN 'Factura Electrónica'
-                        WHEN '02' THEN 'Nota de Débito'
-                        WHEN '03' THEN 'Nota de Crédito'
-                        WHEN '04' THEN 'Tiquete Electrónico'
-                        WHEN '08' THEN 'Factura de Compra'
-                        WHEN '09' THEN 'Factura de Exportación'
-                        WHEN '10' THEN 'Recibo Electrónico de Pago'
-                        ELSE 'Otro (' || d.tipo_documento || ')'
-                    END::VARCHAR                 AS tipo_label,
-                    COUNT(*)::BIGINT             AS cantidad,
-                    SUM(d.total_comprobante)     AS total_comprobante
-                FROM documentos_electronicos d
-                WHERE d.empresa_id  = p_empresa_id
-                  AND d.deleted_at  IS NULL
-                  AND (p_fecha_desde IS NULL OR d.fecha_emision::DATE >= p_fecha_desde)
-                  AND (p_fecha_hasta IS NULL OR d.fecha_emision::DATE <= p_fecha_hasta)
-                GROUP BY d.estado, d.tipo_documento
-                ORDER BY d.estado, d.tipo_documento;
-            END;
-            $$;
+BEGIN
+    RETURN QUERY
+    SELECT
+        d.estado,
+        d.tipo_documento,
+        CASE d.tipo_documento
+            WHEN '01' THEN 'Factura Electrónica'
+            WHEN '02' THEN 'Nota de Débito'
+            WHEN '03' THEN 'Nota de Crédito'
+            WHEN '04' THEN 'Tiquete Electrónico'
+            WHEN '08' THEN 'Factura de Compra'
+            WHEN '09' THEN 'Factura de Exportación'
+            WHEN '10' THEN 'Recibo Electrónico de Pago'
+            ELSE 'Otro (' || d.tipo_documento || ')'
+        END::VARCHAR                       AS tipo_label,
+        COALESCE(d.moneda, 'CRC')::VARCHAR AS moneda,
+        COUNT(*)::BIGINT                   AS cantidad,
+        SUM(d.total_comprobante)           AS total_comprobante
+    FROM documentos_electronicos d
+    WHERE d.empresa_id  = p_empresa_id
+      AND d.deleted_at  IS NULL
+      AND (p_fecha_desde IS NULL OR d.fecha_emision::DATE >= p_fecha_desde)
+      AND (p_fecha_hasta IS NULL OR d.fecha_emision::DATE <= p_fecha_hasta)
+    GROUP BY d.estado, d.tipo_documento, COALESCE(d.moneda, 'CRC')
+    ORDER BY d.estado, d.tipo_documento, COALESCE(d.moneda, 'CRC');
+END;
+$$;
 
 
 --
 -- Name: sp_reporte_facturas_recibidas_resumen(bigint, date, date); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_reporte_facturas_recibidas_resumen(p_empresa_id bigint, p_fecha_desde date DEFAULT NULL::date, p_fecha_hasta date DEFAULT NULL::date) RETURNS TABLE(estado_recepcion character varying, estado_hacienda character varying, cantidad bigint, total_comprobante numeric, total_impuesto numeric)
+CREATE FUNCTION public.sp_reporte_facturas_recibidas_resumen(p_empresa_id bigint, p_fecha_desde date DEFAULT NULL::date, p_fecha_hasta date DEFAULT NULL::date) RETURNS TABLE(emisor_numero_id character varying, emisor_nombre character varying, estado_recepcion character varying, estado_hacienda character varying, moneda character varying, cantidad bigint, total_comprobante numeric, total_impuesto numeric)
     LANGUAGE plpgsql
     AS $$
-            BEGIN
-                RETURN QUERY
-                SELECT
-                    f.estado_recepcion,
-                    f.estado_hacienda,
-                    COUNT(*)::BIGINT         AS cantidad,
-                    SUM(f.total_comprobante) AS total_comprobante,
-                    SUM(f.total_impuesto)    AS total_impuesto
-                FROM facturas_recibidas f
-                WHERE f.empresa_id = p_empresa_id
-                  AND (p_fecha_desde IS NULL OR f.created_at::DATE >= p_fecha_desde)
-                  AND (p_fecha_hasta IS NULL OR f.created_at::DATE <= p_fecha_hasta)
-                GROUP BY f.estado_recepcion, f.estado_hacienda
-                ORDER BY f.estado_recepcion;
-            END;
-            $$;
+BEGIN
+    RETURN QUERY
+    SELECT
+        COALESCE(f.emisor_numero_id, '')::VARCHAR          AS emisor_numero_id,
+        COALESCE(MAX(f.emisor_nombre), 'Sin nombre')::VARCHAR AS emisor_nombre,
+        f.estado_recepcion,
+        f.estado_hacienda,
+        COALESCE(f.moneda, 'CRC')::VARCHAR                 AS moneda,
+        COUNT(*)::BIGINT                                   AS cantidad,
+        SUM(f.total_comprobante)                           AS total_comprobante,
+        SUM(f.total_impuesto)                              AS total_impuesto
+    FROM facturas_recibidas f
+    WHERE f.empresa_id = p_empresa_id
+      AND (p_fecha_desde IS NULL OR f.created_at::DATE >= p_fecha_desde)
+      AND (p_fecha_hasta IS NULL OR f.created_at::DATE <= p_fecha_hasta)
+    GROUP BY COALESCE(f.emisor_numero_id, ''), f.estado_recepcion, f.estado_hacienda, COALESCE(f.moneda, 'CRC')
+    ORDER BY MAX(f.emisor_nombre), f.estado_recepcion, COALESCE(f.moneda, 'CRC');
+END;
+$$;
 
 
 --
@@ -5971,35 +5992,39 @@ CREATE FUNCTION public.sp_reporte_facturas_recibidas_resumen(p_empresa_id bigint
 CREATE FUNCTION public.sp_reporte_inventario(p_empresa_id bigint, p_bodega_id bigint DEFAULT NULL::bigint, p_bajo_minimo boolean DEFAULT false, p_search text DEFAULT NULL::text) RETURNS TABLE(bodega_id bigint, bodega_nombre character varying, producto_id bigint, codigo character varying, nombre character varying, unidad_medida character varying, precio numeric, stock numeric, stock_min numeric, bajo_minimo boolean)
     LANGUAGE plpgsql
     AS $$
-            BEGIN
-                RETURN QUERY
-                SELECT
-                    b.id                 AS bodega_id,
-                    b.name               AS bodega_nombre,
-                    p.id                 AS producto_id,
-                    p.code               AS codigo,
-                    p.name               AS nombre,
-                    COALESCE(p.unit_measure, '') AS unidad_medida,
-                    COALESCE(p.price, 0) AS precio,
-                    COALESCE(bp.stock, 0) AS stock,
-                    COALESCE(bp.stock_min, 0) AS stock_min,
-                    (COALESCE(bp.stock, 0) < COALESCE(bp.stock_min, 0) AND bp.stock_min > 0) AS bajo_minimo
-                FROM bodegas b
-                JOIN bodega_productos bp ON bp.bodega_id = b.id
-                JOIN productos p         ON p.id = bp.producto_id
-                WHERE b.empresa_id  = p_empresa_id
-                  AND p.empresa_id  = p_empresa_id
-                  AND p.type        = 'product'
-                  AND (p_bodega_id IS NULL OR b.id = p_bodega_id)
-                  AND (NOT p_bajo_minimo OR (bp.stock < bp.stock_min AND bp.stock_min > 0))
-                  AND (
-                    p_search IS NULL OR p_search = ''
-                    OR p.name ILIKE '%' || p_search || '%'
-                    OR p.code ILIKE '%' || p_search || '%'
-                  )
-                ORDER BY b.name, p.name;
-            END;
-            $$;
+BEGIN
+    RETURN QUERY
+    SELECT
+        b.id                 AS bodega_id,
+        b.name               AS bodega_nombre,
+        p.id                 AS producto_id,
+        p.code               AS codigo,
+        p.name               AS nombre,
+        COALESCE(p.unit_measure, '') AS unidad_medida,
+        COALESCE(p.price, 0) AS precio,
+        COALESCE(bp.stock, 0) AS stock,
+        COALESCE(bp.stock_min, 0) AS stock_min,
+        (COALESCE(bp.stock, 0) < COALESCE(bp.stock_min, 0) AND bp.stock_min > 0) AS bajo_minimo
+    FROM bodegas b
+    JOIN bodega_productos bp ON bp.bodega_id = b.id
+    JOIN productos p         ON p.id = bp.producto_id
+    WHERE b.empresa_id  = p_empresa_id
+      AND p.empresa_id  = p_empresa_id
+      AND p.type        = 'product'
+      AND (p_bodega_id IS NULL OR b.id = p_bodega_id)
+      AND (
+        NOT p_bajo_minimo
+        OR COALESCE(bp.stock, 0) <= 0
+        OR (bp.stock < bp.stock_min AND bp.stock_min > 0)
+      )
+      AND (
+        p_search IS NULL OR p_search = ''
+        OR p.name ILIKE '%' || p_search || '%'
+        OR p.code ILIKE '%' || p_search || '%'
+      )
+    ORDER BY b.name, p.name;
+END;
+$$;
 
 
 --
@@ -6103,68 +6128,70 @@ CREATE FUNCTION public.sp_reporte_libro_ventas(p_empresa_id bigint, p_fecha_desd
 
 
 --
--- Name: sp_reporte_ranking_clientes(bigint, date, date, integer); Type: FUNCTION; Schema: public; Owner: -
+-- Name: sp_reporte_ranking_clientes(bigint, date, date, integer, character varying); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_reporte_ranking_clientes(p_empresa_id bigint, p_fecha_desde date, p_fecha_hasta date, p_limit integer DEFAULT 20) RETURNS TABLE(posicion bigint, receptor_nombre character varying, receptor_numero_id character varying, cantidad_docs bigint, total_venta_neta numeric, total_impuesto numeric, total_comprobante numeric)
+CREATE FUNCTION public.sp_reporte_ranking_clientes(p_empresa_id bigint, p_fecha_desde date, p_fecha_hasta date, p_limit integer DEFAULT 20, p_moneda character varying DEFAULT 'CRC'::character varying) RETURNS TABLE(posicion bigint, receptor_nombre character varying, receptor_numero_id character varying, cantidad_docs bigint, total_venta_neta numeric, total_impuesto numeric, total_comprobante numeric)
     LANGUAGE plpgsql
     AS $$
-            BEGIN
-                RETURN QUERY
-                SELECT
-                    ROW_NUMBER() OVER (ORDER BY SUM(d.total_comprobante) DESC)::BIGINT AS posicion,
-                    COALESCE(d.receptor_nombre,    'Consumidor Final')::VARCHAR AS receptor_nombre,
-                    COALESCE(d.receptor_numero_id, '—')::VARCHAR                AS receptor_numero_id,
-                    COUNT(*)::BIGINT              AS cantidad_docs,
-                    SUM(d.total_venta_neta)       AS total_venta_neta,
-                    SUM(d.total_impuesto)         AS total_impuesto,
-                    SUM(d.total_comprobante)      AS total_comprobante
-                FROM documentos_electronicos d
-                WHERE d.empresa_id  = p_empresa_id
-                  AND d.estado      = 'aceptado'
-                  AND d.deleted_at  IS NULL
-                  AND d.fecha_emision::DATE BETWEEN p_fecha_desde AND p_fecha_hasta
-                GROUP BY d.receptor_nombre, d.receptor_numero_id
-                ORDER BY SUM(d.total_comprobante) DESC
-                LIMIT p_limit;
-            END;
-            $$;
+BEGIN
+    RETURN QUERY
+    SELECT
+        ROW_NUMBER() OVER (ORDER BY SUM(d.total_comprobante) DESC)::BIGINT AS posicion,
+        COALESCE(d.receptor_nombre,    'Consumidor Final')::VARCHAR AS receptor_nombre,
+        COALESCE(d.receptor_numero_id, '—')::VARCHAR                AS receptor_numero_id,
+        COUNT(*)::BIGINT              AS cantidad_docs,
+        SUM(d.total_venta_neta)       AS total_venta_neta,
+        SUM(d.total_impuesto)         AS total_impuesto,
+        SUM(d.total_comprobante)      AS total_comprobante
+    FROM documentos_electronicos d
+    WHERE d.empresa_id  = p_empresa_id
+      AND d.estado      = 'aceptado'
+      AND d.deleted_at  IS NULL
+      AND COALESCE(d.moneda, 'CRC') = COALESCE(p_moneda, 'CRC')
+      AND d.fecha_emision::DATE BETWEEN p_fecha_desde AND p_fecha_hasta
+    GROUP BY d.receptor_nombre, d.receptor_numero_id
+    ORDER BY SUM(d.total_comprobante) DESC
+    LIMIT p_limit;
+END;
+$$;
 
 
 --
 -- Name: sp_reporte_ventas_periodo(bigint, date, date); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_reporte_ventas_periodo(p_empresa_id bigint, p_fecha_desde date, p_fecha_hasta date) RETURNS TABLE(tipo_documento character varying, tipo_label character varying, cantidad bigint, total_venta_neta numeric, total_impuesto numeric, total_comprobante numeric)
+CREATE FUNCTION public.sp_reporte_ventas_periodo(p_empresa_id bigint, p_fecha_desde date, p_fecha_hasta date) RETURNS TABLE(tipo_documento character varying, tipo_label character varying, moneda character varying, cantidad bigint, total_venta_neta numeric, total_impuesto numeric, total_comprobante numeric)
     LANGUAGE plpgsql
     AS $$
-            BEGIN
-                RETURN QUERY
-                SELECT
-                    d.tipo_documento,
-                    CASE d.tipo_documento
-                        WHEN '01' THEN 'Factura Electrónica'
-                        WHEN '02' THEN 'Nota de Débito'
-                        WHEN '03' THEN 'Nota de Crédito'
-                        WHEN '04' THEN 'Tiquete Electrónico'
-                        WHEN '08' THEN 'Factura de Compra'
-                        WHEN '09' THEN 'Factura de Exportación'
-                        WHEN '10' THEN 'Recibo Electrónico de Pago'
-                        ELSE 'Otro (' || d.tipo_documento || ')'
-                    END::VARCHAR                  AS tipo_label,
-                    COUNT(*)::BIGINT              AS cantidad,
-                    SUM(d.total_venta_neta)       AS total_venta_neta,
-                    SUM(d.total_impuesto)         AS total_impuesto,
-                    SUM(d.total_comprobante)      AS total_comprobante
-                FROM documentos_electronicos d
-                WHERE d.empresa_id  = p_empresa_id
-                  AND d.estado      = 'aceptado'
-                  AND d.deleted_at  IS NULL
-                  AND d.fecha_emision::DATE BETWEEN p_fecha_desde AND p_fecha_hasta
-                GROUP BY d.tipo_documento
-                ORDER BY SUM(d.total_comprobante) DESC;
-            END;
-            $$;
+BEGIN
+    RETURN QUERY
+    SELECT
+        d.tipo_documento,
+        CASE d.tipo_documento
+            WHEN '01' THEN 'Factura Electrónica'
+            WHEN '02' THEN 'Nota de Débito'
+            WHEN '03' THEN 'Nota de Crédito'
+            WHEN '04' THEN 'Tiquete Electrónico'
+            WHEN '08' THEN 'Factura de Compra'
+            WHEN '09' THEN 'Factura de Exportación'
+            WHEN '10' THEN 'Recibo Electrónico de Pago'
+            ELSE 'Otro (' || d.tipo_documento || ')'
+        END::VARCHAR                       AS tipo_label,
+        COALESCE(d.moneda, 'CRC')::VARCHAR AS moneda,
+        COUNT(*)::BIGINT                   AS cantidad,
+        SUM(d.total_venta_neta)            AS total_venta_neta,
+        SUM(d.total_impuesto)              AS total_impuesto,
+        SUM(d.total_comprobante)           AS total_comprobante
+    FROM documentos_electronicos d
+    WHERE d.empresa_id  = p_empresa_id
+      AND d.estado      = 'aceptado'
+      AND d.deleted_at  IS NULL
+      AND d.fecha_emision::DATE BETWEEN p_fecha_desde AND p_fecha_hasta
+    GROUP BY d.tipo_documento, COALESCE(d.moneda, 'CRC')
+    ORDER BY COALESCE(d.moneda, 'CRC'), SUM(d.total_comprobante) DESC;
+END;
+$$;
 
 
 --
@@ -6528,27 +6555,46 @@ $$;
 
 
 --
--- Name: sp_validar_credito_cliente(bigint, bigint, numeric); Type: FUNCTION; Schema: public; Owner: -
+-- Name: sp_validar_credito_cliente(bigint, bigint, numeric, character varying, numeric); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_validar_credito_cliente(p_empresa_id bigint, p_cliente_id bigint, p_monto_nuevo numeric) RETURNS TABLE(permitido boolean, motivo character varying)
+CREATE FUNCTION public.sp_validar_credito_cliente(p_empresa_id bigint, p_cliente_id bigint, p_monto_nuevo numeric, p_moneda character varying DEFAULT 'CRC'::character varying, p_tipo_cambio numeric DEFAULT 1) RETURNS TABLE(permitido boolean, motivo character varying)
     LANGUAGE plpgsql SECURITY DEFINER
     AS $$
 DECLARE
-    v_limite    NUMERIC;
-    v_saldo     NUMERIC;
-    v_estado    VARCHAR;
-    v_gracia    INTEGER;
-    v_bloqueo   INTEGER;
+    v_limite     NUMERIC;
+    v_saldo      NUMERIC;
+    v_estado     VARCHAR;
+    v_gracia     INTEGER;
+    v_bloqueo    INTEGER;
     v_max_atraso INTEGER;
+    v_tc_doc     NUMERIC := COALESCE(NULLIF(p_tipo_cambio, 0), 1);
+    v_tc_vigente NUMERIC;
+    v_nuevo_crc  NUMERIC;
 BEGIN
     SELECT c.limite_credito, c.estado_credito
     INTO v_limite, v_estado
     FROM clients c WHERE c.id = p_cliente_id;
 
-    SELECT COALESCE(SUM(cxc.saldo_pendiente), 0)
+    SELECT tc.venta INTO v_tc_vigente
+    FROM empresa_tipo_cambios tc
+    WHERE tc.empresa_id = p_empresa_id AND tc.fecha <= CURRENT_DATE
+    ORDER BY tc.fecha DESC
+    LIMIT 1;
+
+    v_nuevo_crc := p_monto_nuevo * CASE WHEN COALESCE(p_moneda, 'CRC') = 'CRC' THEN 1 ELSE v_tc_doc END;
+
+    SELECT COALESCE(SUM(
+               cxc.saldo_pendiente * CASE
+                   WHEN COALESCE(d.moneda, 'CRC') = 'CRC'      THEN 1
+                   WHEN d.moneda = COALESCE(p_moneda, 'CRC')    THEN v_tc_doc
+                   WHEN d.moneda = 'USD' AND v_tc_vigente > 0   THEN v_tc_vigente
+                   ELSE COALESCE(NULLIF(d.tipo_cambio, 0), 1)
+               END
+           ), 0)
     INTO v_saldo
     FROM cuentas_por_cobrar cxc
+    JOIN documentos_electronicos d ON d.id = cxc.documento_id
     WHERE cxc.cliente_id = p_cliente_id AND cxc.estado IN ('vigente','mora')
       AND cxc.origen_venta = 'credito';
 
@@ -6568,8 +6614,16 @@ BEGIN
         RETURN;
     END IF;
 
-    IF v_saldo + p_monto_nuevo > v_limite THEN
-        RETURN QUERY SELECT FALSE, 'Excede el límite de crédito autorizado'::VARCHAR;
+    IF v_saldo + v_nuevo_crc > v_limite THEN
+        RETURN QUERY SELECT FALSE, (
+            'Excede el límite de crédito autorizado (₡' || to_char(v_limite, 'FM999G999G999G990D00') ||
+            '): saldo ₡' || to_char(v_saldo, 'FM999G999G999G990D00') ||
+            ' + esta venta ₡' || to_char(v_nuevo_crc, 'FM999G999G999G990D00') ||
+            CASE WHEN COALESCE(p_moneda, 'CRC') <> 'CRC'
+                 THEN ' (' || p_moneda || ' ' || to_char(p_monto_nuevo, 'FM999G999G999G990D00') ||
+                      ' a tipo de cambio ' || to_char(v_tc_doc, 'FM999990D00') || ')'
+                 ELSE '' END
+        )::VARCHAR;
         RETURN;
     END IF;
 
