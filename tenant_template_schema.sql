@@ -433,16 +433,23 @@ CREATE FUNCTION public.sp_agenda_avisos_token_create(p_evento_id bigint, p_empre
 CREATE FUNCTION public.sp_agenda_avisos_token_resolver(p_token character varying) RETURNS TABLE(evento_id bigint, empresa_id bigint, expira_at timestamp without time zone, usado_at timestamp without time zone, titulo character varying, descripcion text, ubicacion character varying, fecha_inicio timestamp without time zone, estado character varying)
     LANGUAGE plpgsql
     AS $$
-            BEGIN
-                RETURN QUERY
-                SELECT
-                    t.evento_id, t.empresa_id, t.expira_at, t.usado_at,
-                    e.titulo, e.descripcion, e.ubicacion, e.fecha_inicio, e.estado
-                FROM agenda_avisos_tokens t
-                JOIN agenda_eventos e ON e.id = t.evento_id
-                WHERE t.token = p_token;
-            END;
-            $$;
+BEGIN
+    RETURN QUERY
+    SELECT
+        t.evento_id, t.empresa_id, t.expira_at, t.usado_at,
+        e.titulo,
+        (SELECT string_agg(DISTINCT s.name, ', ')
+           FROM agenda_evento_lineas l
+           JOIN servicios s ON s.id = l.servicio_id
+          WHERE l.evento_id = e.id)::TEXT,
+        (SELECT l.ubicacion FROM agenda_evento_lineas l
+          WHERE l.evento_id = e.id ORDER BY l.orden, l.id LIMIT 1)::VARCHAR,
+        e.fecha_inicio, e.estado
+    FROM agenda_avisos_tokens t
+    JOIN agenda_eventos e ON e.id = t.evento_id
+    WHERE t.token = p_token;
+END;
+$$;
 
 
 --
