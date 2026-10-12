@@ -1755,7 +1755,7 @@ CREATE FUNCTION public.sp_cliente_resumen(p_cliente_id bigint, p_empresa_id bigi
 -- Name: sp_clientes_con_adelantos(bigint); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_clientes_con_adelantos(p_empresa_id bigint) RETURNS TABLE(cliente_id bigint, nombre character varying, tax_id character varying, tax_id_type character varying, correo character varying, cantidad_recibos bigint, saldo_disponible numeric)
+CREATE FUNCTION public.sp_clientes_con_adelantos(p_empresa_id bigint) RETURNS TABLE(cliente_id bigint, nombre character varying, tax_id character varying, tax_id_type character varying, correo character varying, cantidad_recibos bigint, saldo_disponible numeric, moneda character varying)
     LANGUAGE plpgsql SECURITY DEFINER
     AS $$
             BEGIN
@@ -1766,14 +1766,15 @@ CREATE FUNCTION public.sp_clientes_con_adelantos(p_empresa_id bigint) RETURNS TA
                        c.tax_id_type,
                        c.email,
                        COUNT(ra.id),
-                       COALESCE(SUM(ra.saldo_disponible), 0)
+                       COALESCE(SUM(ra.saldo_disponible), 0),
+                       ra.moneda::VARCHAR
                 FROM recibos_adelanto ra
                 JOIN clients c ON c.id = ra.cliente_id
                 WHERE ra.empresa_id = p_empresa_id
                   AND ra.estado = 'disponible'
                   AND ra.saldo_disponible > 0
-                GROUP BY c.id, c.name, c.tax_id, c.tax_id_type, c.email
-                ORDER BY c.name;
+                GROUP BY c.id, c.name, c.tax_id, c.tax_id_type, c.email, ra.moneda
+                ORDER BY c.name, ra.moneda;
             END; $$;
 
 
@@ -3615,6 +3616,7 @@ CREATE FUNCTION public.sp_factura_aplicar_adelantos(p_documento_id bigint, p_mon
             DECLARE
                 v_cxc            RECORD;
                 v_ad             RECORD;
+                v_moneda         VARCHAR;
                 v_restante       NUMERIC := ROUND(COALESCE(p_monto, 0), 2);
                 v_aplicado_total NUMERIC := 0;
                 v_aplicar        NUMERIC;
@@ -3632,6 +3634,10 @@ CREATE FUNCTION public.sp_factura_aplicar_adelantos(p_documento_id bigint, p_mon
                     RAISE EXCEPTION 'No existe cuenta por cobrar para el documento %', p_documento_id;
                 END IF;
 
+                SELECT COALESCE(NULLIF(moneda, ''), 'CRC') INTO v_moneda
+                FROM documentos_electronicos WHERE id = p_documento_id;
+                v_moneda := COALESCE(v_moneda, 'CRC');
+
                 IF v_restante > v_cxc.saldo_pendiente THEN
                     v_restante := v_cxc.saldo_pendiente;
                 END IF;
@@ -3643,6 +3649,7 @@ CREATE FUNCTION public.sp_factura_aplicar_adelantos(p_documento_id bigint, p_mon
                       AND empresa_id = v_cxc.empresa_id
                       AND estado = 'disponible'
                       AND saldo_disponible > 0
+                      AND moneda = v_moneda
                     ORDER BY created_at ASC
                     FOR UPDATE
                 LOOP
@@ -6064,16 +6071,16 @@ CREATE FUNCTION public.sp_recibo_adelanto_aplicar(p_recibo_adelanto_id bigint, p
 
 
 --
--- Name: sp_recibo_adelanto_create(bigint, bigint, bigint, numeric); Type: FUNCTION; Schema: public; Owner: -
+-- Name: sp_recibo_adelanto_create(bigint, bigint, bigint, numeric, character varying); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_recibo_adelanto_create(p_documento_id bigint, p_empresa_id bigint, p_cliente_id bigint, p_monto numeric) RETURNS bigint
+CREATE FUNCTION public.sp_recibo_adelanto_create(p_documento_id bigint, p_empresa_id bigint, p_cliente_id bigint, p_monto numeric, p_moneda character varying DEFAULT 'CRC'::character varying) RETURNS bigint
     LANGUAGE plpgsql SECURITY DEFINER
     AS $$
             DECLARE v_id BIGINT;
             BEGIN
-                INSERT INTO recibos_adelanto (empresa_id, documento_id, cliente_id, monto_original, saldo_disponible, estado)
-                VALUES (p_empresa_id, p_documento_id, p_cliente_id, p_monto, p_monto, 'disponible')
+                INSERT INTO recibos_adelanto (empresa_id, documento_id, cliente_id, monto_original, saldo_disponible, estado, moneda)
+                VALUES (p_empresa_id, p_documento_id, p_cliente_id, p_monto, p_monto, 'disponible', COALESCE(NULLIF(p_moneda, ''), 'CRC'))
                 RETURNING id INTO v_id;
                 RETURN v_id;
             END; $$;
@@ -9568,6 +9575,7 @@ CREATE TABLE public.recibos_adelanto (
     estado character varying(20) DEFAULT 'disponible'::character varying NOT NULL,
     created_at timestamp without time zone DEFAULT now() NOT NULL,
     updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    moneda character varying(3) DEFAULT 'CRC'::character varying NOT NULL,
     CONSTRAINT chk_adelanto_estado CHECK (((estado)::text = ANY ((ARRAY['disponible'::character varying, 'agotado'::character varying, 'anulado'::character varying])::text[])))
 );
 
