@@ -1467,6 +1467,77 @@ CREATE FUNCTION public.sp_client_update(p_id bigint, p_name character varying, p
 
 
 --
+-- Name: sp_cliente_exoneracion_delete(bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cliente_exoneracion_delete(p_client_id bigint) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+            DECLARE v_count INTEGER;
+            BEGIN
+              DELETE FROM cliente_exoneraciones WHERE client_id = p_client_id;
+              GET DIAGNOSTICS v_count = ROW_COUNT;
+              RETURN v_count > 0;
+            END;
+            $$;
+
+
+--
+-- Name: sp_cliente_exoneracion_get(bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cliente_exoneracion_get(p_client_id bigint) RETURNS TABLE(id bigint, client_id bigint, tipo_documento character varying, tipo_documento_otro character varying, numero_documento character varying, articulo character varying, inciso character varying, nombre_institucion character varying, nombre_institucion_otros character varying, fecha_emision date, fecha_vencimiento date, tarifa_exonerada numeric)
+    LANGUAGE plpgsql
+    AS $$
+            BEGIN
+              RETURN QUERY
+              SELECT e.id, e.client_id, e.tipo_documento, e.tipo_documento_otro,
+                     e.numero_documento, e.articulo, e.inciso,
+                     e.nombre_institucion, e.nombre_institucion_otros,
+                     e.fecha_emision, e.fecha_vencimiento, e.tarifa_exonerada
+              FROM cliente_exoneraciones e
+              WHERE e.client_id = p_client_id;
+            END;
+            $$;
+
+
+--
+-- Name: sp_cliente_exoneracion_save(bigint, character varying, character varying, character varying, character varying, character varying, character varying, character varying, date, date, numeric); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cliente_exoneracion_save(p_client_id bigint, p_tipo_documento character varying, p_tipo_documento_otro character varying, p_numero_documento character varying, p_articulo character varying, p_inciso character varying, p_nombre_institucion character varying, p_nombre_institucion_otros character varying, p_fecha_emision date, p_fecha_vencimiento date, p_tarifa_exonerada numeric) RETURNS bigint
+    LANGUAGE plpgsql
+    AS $$
+            DECLARE v_id BIGINT;
+            BEGIN
+              INSERT INTO cliente_exoneraciones(
+                  client_id, tipo_documento, tipo_documento_otro, numero_documento,
+                  articulo, inciso, nombre_institucion, nombre_institucion_otros,
+                  fecha_emision, fecha_vencimiento, tarifa_exonerada)
+              VALUES (
+                  p_client_id, p_tipo_documento, NULLIF(p_tipo_documento_otro, ''), p_numero_documento,
+                  NULLIF(p_articulo, ''), NULLIF(p_inciso, ''), p_nombre_institucion,
+                  NULLIF(p_nombre_institucion_otros, ''),
+                  p_fecha_emision, p_fecha_vencimiento, p_tarifa_exonerada)
+              ON CONFLICT (client_id) DO UPDATE SET
+                  tipo_documento           = EXCLUDED.tipo_documento,
+                  tipo_documento_otro      = EXCLUDED.tipo_documento_otro,
+                  numero_documento         = EXCLUDED.numero_documento,
+                  articulo                 = EXCLUDED.articulo,
+                  inciso                   = EXCLUDED.inciso,
+                  nombre_institucion       = EXCLUDED.nombre_institucion,
+                  nombre_institucion_otros = EXCLUDED.nombre_institucion_otros,
+                  fecha_emision            = EXCLUDED.fecha_emision,
+                  fecha_vencimiento        = EXCLUDED.fecha_vencimiento,
+                  tarifa_exonerada         = EXCLUDED.tarifa_exonerada,
+                  updated_at               = NOW()
+              RETURNING cliente_exoneraciones.id INTO v_id;
+              RETURN v_id;
+            END;
+            $$;
+
+
+--
 -- Name: sp_cliente_historial(bigint, bigint, integer, timestamp without time zone, character varying, bigint, character varying); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -7482,6 +7553,84 @@ ALTER SEQUENCE public.categorias_producto_id_seq OWNED BY public.categorias_prod
 
 
 --
+-- Name: cliente_exoneraciones; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cliente_exoneraciones (
+    id bigint NOT NULL,
+    client_id bigint NOT NULL,
+    tipo_documento character varying(2) NOT NULL,
+    tipo_documento_otro character varying(100),
+    numero_documento character varying(40) NOT NULL,
+    articulo character varying(10),
+    inciso character varying(5),
+    nombre_institucion character varying(5) NOT NULL,
+    nombre_institucion_otros character varying(100),
+    fecha_emision date NOT NULL,
+    fecha_vencimiento date,
+    tarifa_exonerada numeric(6,2) NOT NULL,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: cliente_exoneraciones_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cliente_exoneraciones_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'cliente_exoneraciones'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: cliente_exoneraciones_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.cliente_exoneraciones_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: cliente_exoneraciones_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.cliente_exoneraciones_auditoria_id_seq OWNED BY public.cliente_exoneraciones_auditoria.id;
+
+
+--
+-- Name: cliente_exoneraciones_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.cliente_exoneraciones_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: cliente_exoneraciones_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.cliente_exoneraciones_id_seq OWNED BY public.cliente_exoneraciones.id;
+
+
+--
 -- Name: clientes; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -8145,7 +8294,7 @@ CREATE TABLE public.documento_linea_impuestos (
     ie_volumen_unidad_consumo numeric(10,5),
     ie_impuesto_unidad numeric(18,5),
     ex_tipo_documento character varying(2),
-    ex_tipo_documento_otro character varying(2),
+    ex_tipo_documento_otro character varying(100),
     ex_numero_documento text,
     ex_articulo character varying(10),
     ex_inciso character varying(5),
@@ -9810,6 +9959,20 @@ ALTER TABLE ONLY public.categorias_producto_auditoria ALTER COLUMN id SET DEFAUL
 
 
 --
+-- Name: cliente_exoneraciones id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cliente_exoneraciones ALTER COLUMN id SET DEFAULT nextval('public.cliente_exoneraciones_id_seq'::regclass);
+
+
+--
+-- Name: cliente_exoneraciones_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cliente_exoneraciones_auditoria ALTER COLUMN id SET DEFAULT nextval('public.cliente_exoneraciones_auditoria_id_seq'::regclass);
+
+
+--
 -- Name: clientes id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -10350,6 +10513,30 @@ ALTER TABLE ONLY public.categorias_producto_auditoria
 
 ALTER TABLE ONLY public.categorias_producto
     ADD CONSTRAINT categorias_producto_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: cliente_exoneraciones_auditoria cliente_exoneraciones_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cliente_exoneraciones_auditoria
+    ADD CONSTRAINT cliente_exoneraciones_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: cliente_exoneraciones cliente_exoneraciones_client_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cliente_exoneraciones
+    ADD CONSTRAINT cliente_exoneraciones_client_id_key UNIQUE (client_id);
+
+
+--
+-- Name: cliente_exoneraciones cliente_exoneraciones_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cliente_exoneraciones
+    ADD CONSTRAINT cliente_exoneraciones_pkey PRIMARY KEY (id);
 
 
 --
@@ -11400,6 +11587,13 @@ CREATE TRIGGER trg_categorias_producto_auditoria AFTER INSERT OR DELETE OR UPDAT
 
 
 --
+-- Name: cliente_exoneraciones trg_cliente_exoneraciones_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_cliente_exoneraciones_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.cliente_exoneraciones FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
 -- Name: clientes trg_clientes_auditoria; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -11491,6 +11685,14 @@ ALTER TABLE ONLY public.bodega_productos
 
 ALTER TABLE ONLY public.caja_cierre_medios_pago
     ADD CONSTRAINT caja_cierre_medios_pago_cierre_id_fkey FOREIGN KEY (cierre_id) REFERENCES public.caja_cierres(id) ON DELETE CASCADE;
+
+
+--
+-- Name: cliente_exoneraciones cliente_exoneraciones_client_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cliente_exoneraciones
+    ADD CONSTRAINT cliente_exoneraciones_client_id_fkey FOREIGN KEY (client_id) REFERENCES public.clients(id);
 
 
 --
