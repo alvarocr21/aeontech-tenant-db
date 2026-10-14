@@ -36,6 +36,7 @@ COMMENT ON EXTENSION unaccent IS 'text search dictionary that removes accents';
 
 CREATE FUNCTION public.fn_auditoria_generica() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $_$
             DECLARE
                 v_datos_antes JSONB := NULL;
@@ -458,6 +459,7 @@ $$;
 
 CREATE FUNCTION public.sp_agenda_evento_create(p_empresa_id bigint, p_sucursal_id bigint, p_user_id bigint, p_titulo character varying, p_fecha_inicio timestamp without time zone, p_fecha_fin timestamp without time zone, p_todo_el_dia boolean, p_cliente_id bigint, p_color character varying, p_estado character varying) RETURNS bigint
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE v_id BIGINT;
             BEGIN
@@ -482,6 +484,7 @@ CREATE FUNCTION public.sp_agenda_evento_create(p_empresa_id bigint, p_sucursal_i
 
 CREATE FUNCTION public.sp_agenda_evento_get(p_id bigint, p_empresa_id bigint) RETURNS TABLE(id bigint, empresa_id bigint, sucursal_id bigint, user_id bigint, titulo character varying, fecha_inicio timestamp without time zone, fecha_fin timestamp without time zone, todo_el_dia boolean, cliente_id bigint, cliente_nombre character varying, color character varying, estado character varying, documento_id bigint, created_at timestamp without time zone, updated_at timestamp without time zone)
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             BEGIN
                 RETURN QUERY
@@ -503,6 +506,7 @@ CREATE FUNCTION public.sp_agenda_evento_get(p_id bigint, p_empresa_id bigint) RE
 
 CREATE FUNCTION public.sp_agenda_evento_linea_create(p_evento_id bigint, p_servicio_id bigint, p_funcionario_id bigint, p_fecha_inicio timestamp without time zone, p_fecha_fin timestamp without time zone, p_comentario text, p_ubicacion character varying, p_orden integer) RETURNS bigint
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE
                 v_id          BIGINT;
@@ -526,6 +530,7 @@ CREATE FUNCTION public.sp_agenda_evento_linea_create(p_evento_id bigint, p_servi
 
 CREATE FUNCTION public.sp_agenda_evento_linea_producto_create(p_linea_id bigint, p_producto_id bigint, p_cantidad numeric) RETURNS bigint
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE v_id BIGINT;
             BEGIN
@@ -542,6 +547,7 @@ CREATE FUNCTION public.sp_agenda_evento_linea_producto_create(p_linea_id bigint,
 
 CREATE FUNCTION public.sp_agenda_evento_lineas_delete(p_evento_id bigint) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             BEGIN
                 DELETE FROM agenda_evento_linea_productos
@@ -556,6 +562,7 @@ CREATE FUNCTION public.sp_agenda_evento_lineas_delete(p_evento_id bigint) RETURN
 
 CREATE FUNCTION public.sp_agenda_evento_lineas_list(p_evento_id bigint) RETURNS TABLE(linea_id bigint, servicio_id bigint, servicio_nombre character varying, funcionario_id bigint, funcionario_nombre character varying, funcionario_color character varying, fecha_inicio timestamp without time zone, fecha_fin timestamp without time zone, comentario text, ubicacion character varying, orden integer, productos jsonb)
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             BEGIN
                 RETURN QUERY
@@ -587,6 +594,7 @@ CREATE FUNCTION public.sp_agenda_evento_lineas_list(p_evento_id bigint) RETURNS 
 
 CREATE FUNCTION public.sp_agenda_evento_list(p_empresa_id bigint, p_fecha_desde timestamp without time zone, p_fecha_hasta timestamp without time zone, p_funcionario_ids bigint[] DEFAULT NULL::bigint[], p_sucursal_id bigint DEFAULT NULL::bigint) RETURNS TABLE(evento_id bigint, linea_id bigint, titulo character varying, fecha_inicio timestamp without time zone, fecha_fin timestamp without time zone, todo_el_dia boolean, cliente_id bigint, cliente_nombre character varying, cliente_telefono character varying, cliente_email character varying, color character varying, estado character varying, servicio_id bigint, servicio_nombre character varying, funcionario_id bigint, funcionario_nombre character varying, funcionario_color character varying, sucursal_id bigint)
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             BEGIN
                 RETURN QUERY
@@ -618,6 +626,7 @@ CREATE FUNCTION public.sp_agenda_evento_list(p_empresa_id bigint, p_fecha_desde 
 
 CREATE FUNCTION public.sp_agenda_evento_marcar_facturado(p_id bigint, p_empresa_id bigint, p_documento_id bigint) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE v_rows INTEGER;
             BEGIN
@@ -636,6 +645,7 @@ CREATE FUNCTION public.sp_agenda_evento_marcar_facturado(p_id bigint, p_empresa_
 
 CREATE FUNCTION public.sp_agenda_evento_mover(p_id bigint, p_empresa_id bigint, p_fecha_inicio timestamp without time zone, p_fecha_fin timestamp without time zone) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE
                 v_rows              INTEGER;
@@ -734,6 +744,7 @@ CREATE FUNCTION public.sp_agenda_evento_soft_delete(p_id bigint, p_empresa_id bi
 
 CREATE FUNCTION public.sp_agenda_evento_update(p_id bigint, p_empresa_id bigint, p_titulo character varying, p_fecha_inicio timestamp without time zone, p_fecha_fin timestamp without time zone, p_todo_el_dia boolean, p_cliente_id bigint, p_color character varying, p_estado character varying, p_sucursal_id bigint DEFAULT NULL::bigint) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE
                 v_rows              INTEGER;
@@ -767,6 +778,7 @@ CREATE FUNCTION public.sp_agenda_evento_update(p_id bigint, p_empresa_id bigint,
 
 CREATE FUNCTION public.sp_bitacora_insert(p_user_id bigint, p_empresa_id bigint, p_sucursal_id bigint, p_metodo character varying, p_endpoint character varying, p_request_headers jsonb, p_request_body jsonb, p_response_status integer, p_response_body jsonb, p_ip_address character varying, p_user_agent text, p_duracion_ms integer) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 BEGIN
     INSERT INTO bitacora_api (user_id, empresa_id, sucursal_id, metodo, endpoint, request_headers, request_body, response_status, response_body, ip_address, user_agent, duracion_ms)
@@ -780,6 +792,7 @@ END; $$;
 
 CREATE FUNCTION public.sp_bodega_create(p_empresa_id bigint, p_name character varying, p_description text DEFAULT NULL::text) RETURNS TABLE(id bigint, name character varying, is_default boolean)
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE
                 v_is_default BOOLEAN;
@@ -812,6 +825,7 @@ CREATE FUNCTION public.sp_bodega_create(p_empresa_id bigint, p_name character va
 
 CREATE FUNCTION public.sp_bodega_create(p_empresa_id bigint, p_name character varying, p_description text DEFAULT NULL::text, p_permite_stock_negativo boolean DEFAULT false) RETURNS TABLE(id bigint, name character varying, is_default boolean)
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 DECLARE
     v_is_default BOOLEAN;
@@ -905,6 +919,7 @@ CREATE FUNCTION public.sp_bodega_list_eliminadas(p_empresa_id bigint) RETURNS TA
 
 CREATE FUNCTION public.sp_bodega_producto_ajustar_stock(p_bodega_id bigint, p_producto_id bigint, p_delta numeric) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE
                 v_permite_negativo BOOLEAN;
@@ -930,6 +945,7 @@ CREATE FUNCTION public.sp_bodega_producto_ajustar_stock(p_bodega_id bigint, p_pr
 
 CREATE FUNCTION public.sp_bodega_producto_set_stock_min(p_bodega_id bigint, p_producto_id bigint, p_stock_min numeric) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 DECLARE v_rows INTEGER;
 BEGIN
@@ -947,6 +963,7 @@ END; $$;
 
 CREATE FUNCTION public.sp_bodega_producto_stock(p_bodega_id bigint, p_producto_id bigint, p_stock numeric, p_stock_min numeric) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE v_rows INTEGER;
             BEGIN
@@ -962,6 +979,7 @@ CREATE FUNCTION public.sp_bodega_producto_stock(p_bodega_id bigint, p_producto_i
 
 CREATE FUNCTION public.sp_bodega_producto_toggle(p_bodega_id bigint, p_producto_id bigint) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 DECLARE v_rows INTEGER;
 BEGIN
@@ -980,6 +998,7 @@ $$;
 
 CREATE FUNCTION public.sp_bodega_restore(p_id bigint, p_empresa_id bigint) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             BEGIN
                 UPDATE bodegas
@@ -996,6 +1015,7 @@ CREATE FUNCTION public.sp_bodega_restore(p_id bigint, p_empresa_id bigint) RETUR
 
 CREATE FUNCTION public.sp_bodega_set_default(p_id bigint, p_empresa_id bigint) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE v_rows INTEGER;
             BEGIN
@@ -1013,6 +1033,7 @@ CREATE FUNCTION public.sp_bodega_set_default(p_id bigint, p_empresa_id bigint) R
 
 CREATE FUNCTION public.sp_bodega_soft_delete(p_id bigint) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE v_rows INTEGER;
             BEGIN
@@ -1032,6 +1053,7 @@ CREATE FUNCTION public.sp_bodega_soft_delete(p_id bigint) RETURNS boolean
 
 CREATE FUNCTION public.sp_bodega_update(p_id bigint, p_name character varying, p_description text DEFAULT NULL::text) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE v_rows INTEGER;
             BEGIN
@@ -1047,6 +1069,7 @@ CREATE FUNCTION public.sp_bodega_update(p_id bigint, p_name character varying, p
 
 CREATE FUNCTION public.sp_bodega_update(p_id bigint, p_name character varying, p_description text DEFAULT NULL::text, p_permite_stock_negativo boolean DEFAULT false) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 DECLARE v_rows INTEGER;
 BEGIN
@@ -1332,6 +1355,7 @@ CREATE FUNCTION public.sp_client_list_eliminados(p_empresa_id bigint) RETURNS TA
 
 CREATE FUNCTION public.sp_client_restore(p_id bigint) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE v_rows INTEGER;
             BEGIN
@@ -1388,6 +1412,7 @@ CREATE FUNCTION public.sp_client_set_central_id(p_id bigint, p_central_client_id
 
 CREATE FUNCTION public.sp_client_soft_delete(p_id bigint) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 DECLARE v_rows INTEGER;
 BEGIN
@@ -1421,6 +1446,7 @@ CREATE FUNCTION public.sp_client_toggle_by_central_id(p_central_client_id bigint
 
 CREATE FUNCTION public.sp_client_toggle_status(p_id bigint) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 DECLARE v_rows INTEGER;
 BEGIN
@@ -1757,6 +1783,7 @@ CREATE FUNCTION public.sp_cliente_resumen(p_cliente_id bigint, p_empresa_id bigi
 
 CREATE FUNCTION public.sp_clientes_con_adelantos(p_empresa_id bigint) RETURNS TABLE(cliente_id bigint, nombre character varying, tax_id character varying, tax_id_type character varying, correo character varying, cantidad_recibos bigint, saldo_disponible numeric, moneda character varying)
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             BEGIN
                 RETURN QUERY
@@ -1784,6 +1811,7 @@ CREATE FUNCTION public.sp_clientes_con_adelantos(p_empresa_id bigint) RETURNS TA
 
 CREATE FUNCTION public.sp_company_settings_get(p_empresa_id bigint) RETURNS TABLE(id bigint, empresa_id bigint, legal_name character varying, commercial_name character varying, tax_id character varying, tax_id_type character varying, province_code character varying, canton_code character varying, district_code character varying, other_signs text, phone character varying, email character varying, actividad_economica character varying, leyenda_tributaria text, hacienda_environment character varying, has_hacienda_credentials boolean, has_certificate boolean, certificate_subject text, certificate_issuer text, certificate_serial character varying, certificate_valid_from timestamp without time zone, certificate_valid_to timestamp without time zone, certificate_tax_id character varying, certificate_validated_at timestamp without time zone, hacienda_token_tested_at timestamp without time zone, hacienda_token_expires_at timestamp without time zone, validation_status character varying, validation_errors jsonb, is_active boolean, updated_at timestamp without time zone, clients_managed_by_central boolean, has_onvo_card boolean, onvo_customer_id character varying, onvo_payment_method_id character varying, onvo_card_brand character varying, onvo_card_last4 character varying, onvo_card_exp_month smallint, onvo_card_exp_year smallint, logo_url text, logo_public_id text)
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             BEGIN
                 RETURN QUERY
@@ -1815,6 +1843,7 @@ CREATE FUNCTION public.sp_company_settings_get(p_empresa_id bigint) RETURNS TABL
 
 CREATE FUNCTION public.sp_company_settings_save(p_empresa_id bigint, p_legal_name character varying, p_commercial_name character varying, p_tax_id character varying, p_tax_id_type character varying, p_province_code character varying, p_canton_code character varying, p_district_code character varying, p_other_signs text, p_phone character varying, p_email character varying, p_hacienda_environment character varying, p_hacienda_username_encrypted text, p_hacienda_password_encrypted text, p_certificate_p12_encrypted text, p_certificate_password_encrypted text, p_certificate_subject text, p_certificate_issuer text, p_certificate_serial character varying, p_certificate_valid_from timestamp without time zone, p_certificate_valid_to timestamp without time zone, p_certificate_tax_id character varying, p_certificate_validated_at timestamp without time zone, p_hacienda_token_tested_at timestamp without time zone, p_hacienda_token_expires_at timestamp without time zone, p_validation_status character varying, p_validation_errors jsonb) RETURNS TABLE(id bigint, validation_status character varying)
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             BEGIN
                 RETURN QUERY
@@ -1878,6 +1907,7 @@ CREATE FUNCTION public.sp_company_settings_save(p_empresa_id bigint, p_legal_nam
 
 CREATE FUNCTION public.sp_company_settings_save(p_empresa_id bigint, p_legal_name character varying, p_commercial_name character varying, p_tax_id character varying, p_tax_id_type character varying, p_province_code character varying, p_canton_code character varying, p_district_code character varying, p_other_signs text, p_phone character varying, p_email character varying, p_actividad_economica character varying, p_leyenda_tributaria text, p_hacienda_environment character varying, p_hacienda_username_encrypted text, p_hacienda_password_encrypted text, p_certificate_p12_encrypted text, p_certificate_password_encrypted text, p_certificate_subject text, p_certificate_issuer text, p_certificate_serial character varying, p_certificate_valid_from timestamp without time zone, p_certificate_valid_to timestamp without time zone, p_certificate_tax_id character varying, p_certificate_validated_at timestamp without time zone, p_hacienda_token_tested_at timestamp without time zone, p_hacienda_token_expires_at timestamp without time zone, p_validation_status character varying, p_validation_errors jsonb) RETURNS TABLE(id bigint, validation_status character varying)
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             BEGIN
                 RETURN QUERY
@@ -1945,6 +1975,7 @@ CREATE FUNCTION public.sp_company_settings_save(p_empresa_id bigint, p_legal_nam
 
 CREATE FUNCTION public.sp_company_settings_save(p_empresa_id bigint, p_legal_name character varying, p_commercial_name character varying, p_tax_id character varying, p_tax_id_type character varying, p_province_code character varying, p_canton_code character varying, p_district_code character varying, p_other_signs text, p_phone character varying, p_email character varying, p_actividad_economica character varying, p_leyenda_tributaria text, p_hacienda_environment character varying, p_hacienda_username_encrypted text, p_hacienda_password_encrypted text, p_certificate_p12_encrypted text, p_certificate_password_encrypted text, p_certificate_subject text, p_certificate_issuer text, p_certificate_serial character varying, p_certificate_valid_from timestamp without time zone, p_certificate_valid_to timestamp without time zone, p_certificate_tax_id character varying, p_certificate_validated_at timestamp without time zone, p_hacienda_token_tested_at timestamp without time zone, p_hacienda_token_expires_at timestamp without time zone, p_validation_status character varying, p_validation_errors jsonb, p_logo_url text DEFAULT NULL::text, p_logo_public_id text DEFAULT NULL::text) RETURNS TABLE(id bigint, validation_status character varying)
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 BEGIN
   RETURN QUERY
@@ -2015,6 +2046,7 @@ END; $$;
 
 CREATE FUNCTION public.sp_company_settings_sensitive_get(p_empresa_id bigint) RETURNS TABLE(hacienda_environment character varying, hacienda_username_encrypted text, hacienda_password_encrypted text, certificate_p12_encrypted text, certificate_password_encrypted text, validation_status character varying)
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
     BEGIN
         RETURN QUERY
@@ -2037,6 +2069,7 @@ CREATE FUNCTION public.sp_company_settings_sensitive_get(p_empresa_id bigint) RE
 
 CREATE FUNCTION public.sp_company_settings_set_onvo_card(p_empresa_id bigint, p_customer_id character varying, p_payment_method_id character varying, p_card_brand character varying, p_card_last4 character varying, p_card_exp_month smallint, p_card_exp_year smallint) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE v_rows INT;
             BEGIN
@@ -2525,6 +2558,7 @@ CREATE FUNCTION public.sp_cotizacion_update(p_id bigint, p_empresa_id bigint, p_
 
 CREATE FUNCTION public.sp_cuenta_por_cobrar_create(p_empresa_id bigint, p_documento_id bigint, p_cliente_id bigint, p_monto_total numeric, p_dias_credito integer DEFAULT NULL::integer) RETURNS bigint
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 DECLARE
     v_id BIGINT;
@@ -2564,6 +2598,7 @@ END; $$;
 
 CREATE FUNCTION public.sp_documento_ajustar_inventario(p_documento_id bigint) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE
                 v_doc            RECORD;
@@ -3290,6 +3325,7 @@ CREATE TABLE public.empresa_hacienda_config (
 
 CREATE FUNCTION public.sp_empresa_hacienda_get(p_empresa_id bigint) RETURNS SETOF public.empresa_hacienda_config
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             BEGIN
                 RETURN QUERY
@@ -3306,6 +3342,7 @@ CREATE FUNCTION public.sp_empresa_hacienda_get(p_empresa_id bigint) RETURNS SETO
 
 CREATE FUNCTION public.sp_empresa_hacienda_save_certificado(p_empresa_id bigint, p_cert_b64 text, p_cert_pin text, p_cert_cn character varying, p_fecha_inicio date, p_fecha_vence date, p_valido boolean, p_updated_by text) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             BEGIN
                 UPDATE empresa_hacienda_config SET
@@ -3329,6 +3366,7 @@ CREATE FUNCTION public.sp_empresa_hacienda_save_certificado(p_empresa_id bigint,
 
 CREATE FUNCTION public.sp_empresa_hacienda_save_credenciales(p_empresa_id bigint, p_usuario character varying, p_contrasena text, p_updated_by text) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             BEGIN
                 UPDATE empresa_hacienda_config SET
@@ -3349,6 +3387,7 @@ CREATE FUNCTION public.sp_empresa_hacienda_save_credenciales(p_empresa_id bigint
 
 CREATE FUNCTION public.sp_empresa_hacienda_save_info(p_empresa_id bigint, p_tipo_id character varying, p_numero_id character varying, p_nombre_emisor character varying, p_nombre_comercial character varying, p_codigo_pais character varying, p_codigo_actividad character varying, p_telefono character varying, p_correo character varying, p_provincia character varying, p_canton character varying, p_distrito character varying, p_barrio character varying, p_otras_senas text, p_ambiente character varying, p_updated_by text) RETURNS SETOF public.empresa_hacienda_config
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             BEGIN
                 INSERT INTO empresa_hacienda_config (
@@ -3391,6 +3430,7 @@ CREATE FUNCTION public.sp_empresa_hacienda_save_info(p_empresa_id bigint, p_tipo
 
 CREATE FUNCTION public.sp_empresa_hacienda_set_credenciales_status(p_empresa_id bigint, p_validas boolean) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             BEGIN
                 UPDATE empresa_hacienda_config SET
@@ -3612,6 +3652,7 @@ $$;
 
 CREATE FUNCTION public.sp_factura_aplicar_adelantos(p_documento_id bigint, p_monto numeric) RETURNS numeric
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE
                 v_cxc            RECORD;
@@ -4132,6 +4173,7 @@ CREATE FUNCTION public.sp_factura_recibida_vincular_linea(p_id bigint, p_empresa
 
 CREATE FUNCTION public.sp_funcionario_create(p_empresa_id bigint, p_name character varying, p_tax_id character varying, p_email character varying, p_phone character varying, p_address text, p_birth_date date DEFAULT NULL::date, p_commission_pct numeric DEFAULT 0.00, p_notes text DEFAULT NULL::text, p_horario_semanal jsonb DEFAULT '[]'::jsonb) RETURNS TABLE(id bigint, name character varying)
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE
                 v_palette VARCHAR[] := ARRAY['#1976D2','#388E3C','#F57C00','#D32F2F','#7B1FA2','#00796B','#5D4037','#455A64'];
@@ -4169,6 +4211,7 @@ CREATE FUNCTION public.sp_funcionario_create(p_empresa_id bigint, p_name charact
 
 CREATE FUNCTION public.sp_funcionario_find(p_id bigint) RETURNS TABLE(id bigint, empresa_id bigint, name character varying, tax_id character varying, email character varying, phone character varying, address text, birth_date date, commission_pct numeric, notes text, is_default boolean, is_active boolean, color character varying, horario_semanal jsonb, sucursales jsonb, created_at timestamp without time zone, updated_at timestamp without time zone)
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             BEGIN
                 RETURN QUERY
@@ -4194,6 +4237,7 @@ CREATE FUNCTION public.sp_funcionario_find(p_id bigint) RETURNS TABLE(id bigint,
 
 CREATE FUNCTION public.sp_funcionario_list(p_empresa_id bigint) RETURNS TABLE(id bigint, empresa_id bigint, name character varying, tax_id character varying, email character varying, phone character varying, address text, birth_date date, commission_pct numeric, notes text, is_default boolean, is_active boolean, color character varying, horario_semanal jsonb, sucursales jsonb, created_at timestamp without time zone, updated_at timestamp without time zone)
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             BEGIN
                 RETURN QUERY
@@ -4234,6 +4278,7 @@ CREATE FUNCTION public.sp_funcionario_list_eliminados(p_empresa_id bigint) RETUR
 
 CREATE FUNCTION public.sp_funcionario_restore(p_id bigint) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE v_rows INTEGER;
             BEGIN
@@ -4251,6 +4296,7 @@ CREATE FUNCTION public.sp_funcionario_restore(p_id bigint) RETURNS boolean
 
 CREATE FUNCTION public.sp_funcionario_search(p_empresa_id bigint, p_query character varying) RETURNS TABLE(id bigint, empresa_id bigint, name character varying, tax_id character varying, email character varying, phone character varying, address text, birth_date date, commission_pct numeric, notes text, is_default boolean, is_active boolean, created_at timestamp without time zone, updated_at timestamp without time zone)
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             BEGIN
                 RETURN QUERY
@@ -4278,6 +4324,7 @@ CREATE FUNCTION public.sp_funcionario_search(p_empresa_id bigint, p_query charac
 
 CREATE FUNCTION public.sp_funcionario_set_default(p_id bigint, p_empresa_id bigint) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE v_rows INTEGER;
             BEGIN
@@ -4298,6 +4345,7 @@ CREATE FUNCTION public.sp_funcionario_set_default(p_id bigint, p_empresa_id bigi
 
 CREATE FUNCTION public.sp_funcionario_soft_delete(p_id bigint) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE v_rows INTEGER;
             BEGIN
@@ -4314,6 +4362,7 @@ CREATE FUNCTION public.sp_funcionario_soft_delete(p_id bigint) RETURNS boolean
 
 CREATE FUNCTION public.sp_funcionario_sucursales_set(p_funcionario_id bigint, p_sucursales jsonb) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE
                 v_horario JSONB;
@@ -4340,6 +4389,7 @@ CREATE FUNCTION public.sp_funcionario_sucursales_set(p_funcionario_id bigint, p_
 
 CREATE FUNCTION public.sp_funcionario_toggle_status(p_id bigint) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE v_rows INTEGER;
             BEGIN
@@ -4356,6 +4406,7 @@ CREATE FUNCTION public.sp_funcionario_toggle_status(p_id bigint) RETURNS boolean
 
 CREATE FUNCTION public.sp_funcionario_update(p_id bigint, p_name character varying, p_tax_id character varying, p_email character varying, p_phone character varying, p_address text, p_birth_date date DEFAULT NULL::date, p_commission_pct numeric DEFAULT 0.00, p_notes text DEFAULT NULL::text, p_horario_semanal jsonb DEFAULT NULL::jsonb) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE
                 v_rows        INTEGER;
@@ -4392,6 +4443,7 @@ CREATE FUNCTION public.sp_funcionario_update(p_id bigint, p_name character varyi
 
 CREATE FUNCTION public.sp_inventario_kardex(p_empresa_id bigint, p_producto_id bigint DEFAULT NULL::bigint, p_bodega_id bigint DEFAULT NULL::bigint, p_fecha_desde date DEFAULT NULL::date, p_fecha_hasta date DEFAULT NULL::date, p_page integer DEFAULT 1, p_per_page integer DEFAULT 50) RETURNS TABLE(id bigint, fecha timestamp without time zone, tipo character varying, referencia character varying, documento_id bigint, producto_id bigint, producto_codigo character varying, producto_nombre character varying, bodega_origen_id bigint, bodega_origen character varying, bodega_destino character varying, cantidad numeric, entrada numeric, salida numeric, stock_antes numeric, stock_despues numeric, user_id bigint, notas text, total_rows bigint)
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             BEGIN
                 RETURN QUERY
@@ -4442,6 +4494,7 @@ CREATE FUNCTION public.sp_inventario_kardex(p_empresa_id bigint, p_producto_id b
 
 CREATE FUNCTION public.sp_inventario_movimientos(p_empresa_id bigint, p_bodega_id bigint DEFAULT NULL::bigint, p_producto_id bigint DEFAULT NULL::bigint, p_tipo character varying DEFAULT NULL::character varying, p_fecha_desde date DEFAULT NULL::date, p_fecha_hasta date DEFAULT NULL::date, p_limit integer DEFAULT 100, p_offset integer DEFAULT 0) RETURNS TABLE(id bigint, fecha timestamp without time zone, tipo character varying, bodega_origen character varying, bodega_destino character varying, producto_codigo character varying, producto_nombre character varying, cantidad numeric, stock_antes numeric, stock_despues numeric, precio_base numeric, monto_total numeric, referencia character varying, notas text, documento_id bigint, user_id bigint, proveedor_nombre character varying, total_count bigint)
     LANGUAGE sql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
                 SELECT
                     m.id,
@@ -4484,6 +4537,7 @@ CREATE FUNCTION public.sp_inventario_movimientos(p_empresa_id bigint, p_bodega_i
 
 CREATE FUNCTION public.sp_inventario_registrar_desde_documento(p_documento_id bigint, p_user_id bigint) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 DECLARE
     v_tipo_doc  VARCHAR(2);
@@ -4538,6 +4592,7 @@ $$;
 
 CREATE FUNCTION public.sp_inventario_registrar_movimiento(p_empresa_id bigint, p_tipo character varying, p_bodega_origen_id bigint, p_bodega_destino_id bigint, p_producto_id bigint, p_cantidad numeric, p_referencia character varying, p_notas text, p_user_id bigint, p_proveedor_id bigint DEFAULT NULL::bigint) RETURNS bigint
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE
                 v_stock_antes   NUMERIC;
@@ -4613,6 +4668,7 @@ CREATE FUNCTION public.sp_inventario_registrar_movimiento(p_empresa_id bigint, p
 
 CREATE FUNCTION public.sp_inventario_registrar_movimiento_lote(p_empresa_id bigint, p_tipo character varying, p_bodega_origen_id bigint, p_bodega_destino_id bigint, p_lineas jsonb, p_referencia character varying, p_notas text, p_user_id bigint, p_proveedor_id bigint DEFAULT NULL::bigint) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE
                 v_linea JSONB;
@@ -4668,6 +4724,7 @@ CREATE FUNCTION public.sp_medio_pago_create(p_empresa_id bigint, p_nombre charac
 
 CREATE FUNCTION public.sp_medio_pago_delete(p_id bigint, p_empresa_id bigint) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             BEGIN
                 UPDATE empresa_medios_pago SET deleted_at = NOW(), updated_at = NOW()
@@ -4736,6 +4793,7 @@ CREATE FUNCTION public.sp_medio_pago_reordenar(p_id bigint, p_empresa_id bigint,
 
 CREATE FUNCTION public.sp_medio_pago_update(p_id bigint, p_empresa_id bigint, p_nombre character varying, p_tipo_hacienda_codigo character varying, p_tipo_hacienda_nombre character varying, p_is_active boolean) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             BEGIN
                 UPDATE empresa_medios_pago SET
@@ -4775,6 +4833,7 @@ CREATE FUNCTION public.sp_medios_pago_list(p_empresa_id bigint) RETURNS TABLE(id
 
 CREATE FUNCTION public.sp_mercadeo_campana_create(p_empresa_id bigint, p_plantilla_id bigint, p_nombre character varying, p_canal character varying, p_filtro_destinatarios jsonb, p_enviado_por bigint) RETURNS bigint
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE v_id BIGINT;
             BEGIN
@@ -4793,6 +4852,7 @@ CREATE FUNCTION public.sp_mercadeo_campana_create(p_empresa_id bigint, p_plantil
 
 CREATE FUNCTION public.sp_mercadeo_campana_envio_bulk_insert(p_campana_id bigint, p_destinatarios jsonb) RETURNS integer
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE v_count INTEGER;
             BEGIN
@@ -4816,6 +4876,7 @@ CREATE FUNCTION public.sp_mercadeo_campana_envio_bulk_insert(p_campana_id bigint
 
 CREATE FUNCTION public.sp_mercadeo_campana_envio_marcar(p_envio_id bigint, p_estado character varying, p_error_mensaje text DEFAULT NULL::text) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE
                 v_campana_id BIGINT;
@@ -4855,6 +4916,7 @@ CREATE FUNCTION public.sp_mercadeo_campana_envio_marcar(p_envio_id bigint, p_est
 
 CREATE FUNCTION public.sp_mercadeo_campana_get(p_id bigint, p_empresa_id bigint) RETURNS TABLE(id bigint, plantilla_id bigint, plantilla_nombre character varying, nombre character varying, canal character varying, estado character varying, total_destinatarios integer, total_enviados integer, total_fallidos integer, filtro_destinatarios jsonb, enviado_at timestamp without time zone, created_at timestamp without time zone)
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             BEGIN
                 RETURN QUERY
@@ -4873,6 +4935,7 @@ CREATE FUNCTION public.sp_mercadeo_campana_get(p_id bigint, p_empresa_id bigint)
 
 CREATE FUNCTION public.sp_mercadeo_campana_list(p_empresa_id bigint) RETURNS TABLE(id bigint, plantilla_id bigint, plantilla_nombre character varying, nombre character varying, canal character varying, estado character varying, total_destinatarios integer, total_enviados integer, total_fallidos integer, enviado_at timestamp without time zone, created_at timestamp without time zone)
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             BEGIN
                 RETURN QUERY
@@ -4891,6 +4954,7 @@ CREATE FUNCTION public.sp_mercadeo_campana_list(p_empresa_id bigint) RETURNS TAB
 
 CREATE FUNCTION public.sp_mercadeo_destinatarios_resolver(p_empresa_id bigint, p_filtro character varying, p_canal character varying) RETURNS TABLE(cliente_id bigint, nombre character varying, destino character varying, saldo_pendiente numeric, birth_date date)
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             BEGIN
                 RETURN QUERY
@@ -4922,6 +4986,7 @@ CREATE FUNCTION public.sp_mercadeo_destinatarios_resolver(p_empresa_id bigint, p
 
 CREATE FUNCTION public.sp_mercadeo_plantilla_create(p_empresa_id bigint, p_categoria character varying, p_canal character varying, p_nombre character varying, p_asunto character varying, p_contenido_html text, p_contenido_texto text, p_variables_usadas jsonb) RETURNS bigint
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE v_id BIGINT;
             BEGIN
@@ -4940,6 +5005,7 @@ CREATE FUNCTION public.sp_mercadeo_plantilla_create(p_empresa_id bigint, p_categ
 
 CREATE FUNCTION public.sp_mercadeo_plantilla_delete(p_id bigint, p_empresa_id bigint) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE v_rows INTEGER;
             BEGIN
@@ -4955,6 +5021,7 @@ CREATE FUNCTION public.sp_mercadeo_plantilla_delete(p_id bigint, p_empresa_id bi
 
 CREATE FUNCTION public.sp_mercadeo_plantilla_get(p_id bigint, p_empresa_id bigint) RETURNS TABLE(id bigint, categoria character varying, canal character varying, nombre character varying, asunto character varying, contenido_html text, contenido_texto text, variables_usadas jsonb, activo boolean, created_at timestamp without time zone, updated_at timestamp without time zone)
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             BEGIN
                 RETURN QUERY
@@ -4971,6 +5038,7 @@ CREATE FUNCTION public.sp_mercadeo_plantilla_get(p_id bigint, p_empresa_id bigin
 
 CREATE FUNCTION public.sp_mercadeo_plantilla_list(p_empresa_id bigint, p_categoria character varying DEFAULT NULL::character varying, p_canal character varying DEFAULT NULL::character varying) RETURNS TABLE(id bigint, categoria character varying, canal character varying, nombre character varying, asunto character varying, contenido_html text, contenido_texto text, variables_usadas jsonb, activo boolean, created_at timestamp without time zone, updated_at timestamp without time zone)
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             BEGIN
                 RETURN QUERY
@@ -4990,6 +5058,7 @@ CREATE FUNCTION public.sp_mercadeo_plantilla_list(p_empresa_id bigint, p_categor
 
 CREATE FUNCTION public.sp_mercadeo_plantilla_update(p_id bigint, p_empresa_id bigint, p_categoria character varying, p_canal character varying, p_nombre character varying, p_asunto character varying, p_contenido_html text, p_contenido_texto text, p_variables_usadas jsonb, p_activo boolean) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE v_rows INTEGER;
             BEGIN
@@ -5391,6 +5460,7 @@ $$;
 
 CREATE FUNCTION public.sp_producto_create(p_empresa_id bigint, p_code character varying, p_name character varying, p_description text, p_unit_measure character varying, p_cabys_code character varying, p_price numeric, p_tax_type character varying, p_tax_code character varying, p_tax_rate numeric, p_tax_tarifa_codigo character varying, p_image_url text, p_image_public_id character varying, p_moneda character varying, p_codigo_barras character varying, p_partida_arancelaria character varying DEFAULT NULL::character varying) RETURNS TABLE(id bigint, code character varying, name character varying)
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE
                 v_id BIGINT;
@@ -5419,6 +5489,7 @@ CREATE FUNCTION public.sp_producto_create(p_empresa_id bigint, p_code character 
 
 CREATE FUNCTION public.sp_producto_create(p_empresa_id bigint, p_code character varying, p_name character varying, p_description text, p_unit_measure character varying, p_cabys_code character varying, p_price numeric, p_tax_type character varying, p_tax_code character varying, p_tax_rate numeric, p_tax_tarifa_codigo character varying, p_image_url text, p_image_public_id character varying, p_moneda character varying, p_codigo_barras character varying, p_partida_arancelaria character varying DEFAULT NULL::character varying, p_comision_activa boolean DEFAULT false, p_comision_pct numeric DEFAULT NULL::numeric) RETURNS TABLE(id bigint, code character varying, name character varying)
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE
                 v_id BIGINT;
@@ -5449,6 +5520,7 @@ CREATE FUNCTION public.sp_producto_create(p_empresa_id bigint, p_code character 
 
 CREATE FUNCTION public.sp_producto_deleted_list(p_empresa_id bigint) RETURNS TABLE(id bigint, code character varying, name character varying, description text, type character varying, image_url text, image_public_id character varying, deleted_at timestamp without time zone)
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 BEGIN
     RETURN QUERY
@@ -5568,6 +5640,7 @@ CREATE FUNCTION public.sp_producto_proveedor_vincular(p_empresa_id bigint, p_pro
 
 CREATE FUNCTION public.sp_producto_restore(p_id bigint) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 DECLARE v_rows INTEGER;
 BEGIN
@@ -5584,6 +5657,7 @@ $$;
 
 CREATE FUNCTION public.sp_producto_soft_delete(p_id bigint) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE v_rows INTEGER;
             BEGIN
@@ -5599,6 +5673,7 @@ CREATE FUNCTION public.sp_producto_soft_delete(p_id bigint) RETURNS boolean
 
 CREATE FUNCTION public.sp_producto_toggle(p_id bigint) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE v_rows INTEGER;
             BEGIN
@@ -5614,6 +5689,7 @@ CREATE FUNCTION public.sp_producto_toggle(p_id bigint) RETURNS boolean
 
 CREATE FUNCTION public.sp_producto_update(p_id bigint, p_code character varying, p_name character varying, p_description text, p_unit_measure character varying, p_cabys_code character varying, p_price numeric, p_tax_type character varying, p_tax_code character varying, p_tax_rate numeric, p_tax_tarifa_codigo character varying, p_image_url text, p_image_public_id character varying, p_moneda character varying, p_codigo_barras character varying, p_partida_arancelaria character varying DEFAULT NULL::character varying) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE v_rows INTEGER;
             BEGIN
@@ -5648,6 +5724,7 @@ CREATE FUNCTION public.sp_producto_update(p_id bigint, p_code character varying,
 
 CREATE FUNCTION public.sp_producto_update(p_id bigint, p_code character varying, p_name character varying, p_description text, p_unit_measure character varying, p_cabys_code character varying, p_price numeric, p_tax_type character varying, p_tax_code character varying, p_tax_rate numeric, p_tax_tarifa_codigo character varying, p_image_url text, p_image_public_id character varying, p_moneda character varying, p_codigo_barras character varying, p_partida_arancelaria character varying DEFAULT NULL::character varying, p_comision_activa boolean DEFAULT false, p_comision_pct numeric DEFAULT NULL::numeric) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE v_rows INTEGER;
             BEGIN
@@ -5875,6 +5952,7 @@ CREATE FUNCTION public.sp_proveedor_list_eliminados(p_empresa_id bigint) RETURNS
 
 CREATE FUNCTION public.sp_proveedor_restore(p_id bigint, p_empresa_id bigint) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             BEGIN
                 UPDATE proveedores
@@ -6046,6 +6124,7 @@ $$;
 
 CREATE FUNCTION public.sp_recibo_adelanto_aplicar(p_recibo_adelanto_id bigint, p_documento_id bigint, p_monto numeric) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE v_saldo NUMERIC;
             BEGIN
@@ -6076,6 +6155,7 @@ CREATE FUNCTION public.sp_recibo_adelanto_aplicar(p_recibo_adelanto_id bigint, p
 
 CREATE FUNCTION public.sp_recibo_adelanto_create(p_documento_id bigint, p_empresa_id bigint, p_cliente_id bigint, p_monto numeric, p_moneda character varying DEFAULT 'CRC'::character varying) RETURNS bigint
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE v_id BIGINT;
             BEGIN
@@ -6092,6 +6172,7 @@ CREATE FUNCTION public.sp_recibo_adelanto_create(p_documento_id bigint, p_empres
 
 CREATE FUNCTION public.sp_recibo_pago_create(p_documento_id bigint, p_empresa_id bigint, p_aplicaciones jsonb, p_medios_pago jsonb) RETURNS bigint
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE
                 v_item JSONB;
@@ -6156,6 +6237,7 @@ CREATE FUNCTION public.sp_recibo_pago_create(p_documento_id bigint, p_empresa_id
 
 CREATE FUNCTION public.sp_refrescar_estado_credito_cliente(p_cliente_id bigint) RETURNS character varying
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 DECLARE
     v_max_atraso INTEGER;
@@ -6183,6 +6265,7 @@ END; $$;
 
 CREATE FUNCTION public.sp_reporte_cxc_mora(p_empresa_id bigint, p_fecha_corte date DEFAULT CURRENT_DATE) RETURNS TABLE(id bigint, cliente_id bigint, cliente_nombre character varying, cliente_cedula character varying, documento_id bigint, moneda character varying, monto_total numeric, saldo_pendiente numeric, fecha_emision timestamp without time zone, fecha_vencimiento timestamp without time zone, dias_atraso integer, estado character varying)
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 BEGIN
     RETURN QUERY
@@ -6216,6 +6299,7 @@ $$;
 
 CREATE FUNCTION public.sp_reporte_cxp(p_empresa_id bigint, p_fecha_corte date DEFAULT CURRENT_DATE) RETURNS TABLE(id bigint, proveedor_nombre character varying, proveedor_cedula character varying, numero_consecutivo_emisor character varying, clave character varying, moneda character varying, total_comprobante numeric, monto_pagado numeric, saldo_pendiente numeric, fecha_emision timestamp without time zone, fecha_vencimiento date, dias_atraso integer, estado character varying)
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             BEGIN
                 RETURN QUERY
@@ -6389,6 +6473,7 @@ $$;
 
 CREATE FUNCTION public.sp_reporte_libro_compras(p_empresa_id bigint, p_fecha_desde date, p_fecha_hasta date, p_estado_recepcion character varying DEFAULT NULL::character varying) RETURNS TABLE(id bigint, fecha_emision timestamp without time zone, tipo_documento character varying, numero_consecutivo_emisor character varying, clave character varying, emisor_nombre character varying, emisor_numero_id character varying, moneda character varying, total_comprobante numeric, total_impuesto numeric, estado_recepcion character varying, estado_hacienda character varying)
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             BEGIN
                 RETURN QUERY
@@ -6529,6 +6614,7 @@ $$;
 
 CREATE FUNCTION public.sp_servicio_create(p_empresa_id bigint, p_code character varying, p_name character varying, p_description text, p_unit_measure character varying, p_cabys_code character varying, p_price numeric, p_tax_type character varying, p_tax_code character varying, p_tax_rate numeric, p_tax_tarifa_codigo character varying, p_image_url text, p_image_public_id character varying, p_moneda character varying, p_codigo_barras character varying, p_partida_arancelaria character varying DEFAULT NULL::character varying, p_duracion_minutos integer DEFAULT NULL::integer) RETURNS TABLE(id bigint, code character varying, name character varying)
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE
                 v_id BIGINT;
@@ -6554,6 +6640,7 @@ CREATE FUNCTION public.sp_servicio_create(p_empresa_id bigint, p_code character 
 
 CREATE FUNCTION public.sp_servicio_create(p_empresa_id bigint, p_code character varying, p_name character varying, p_description text, p_unit_measure character varying, p_cabys_code character varying, p_price numeric, p_tax_type character varying, p_tax_code character varying, p_tax_rate numeric, p_tax_tarifa_codigo character varying, p_image_url text, p_image_public_id character varying, p_moneda character varying, p_codigo_barras character varying, p_partida_arancelaria character varying DEFAULT NULL::character varying, p_duracion_minutos integer DEFAULT NULL::integer, p_comision_activa boolean DEFAULT false, p_comision_pct numeric DEFAULT NULL::numeric) RETURNS TABLE(id bigint, code character varying, name character varying)
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE
                 v_id BIGINT;
@@ -6629,6 +6716,7 @@ CREATE FUNCTION public.sp_servicio_list(p_empresa_id bigint, p_search character 
 
 CREATE FUNCTION public.sp_servicio_soft_delete(p_id bigint) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE v_rows INTEGER;
             BEGIN
@@ -6644,6 +6732,7 @@ CREATE FUNCTION public.sp_servicio_soft_delete(p_id bigint) RETURNS boolean
 
 CREATE FUNCTION public.sp_servicio_toggle(p_id bigint) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE v_rows INTEGER;
             BEGIN
@@ -6659,6 +6748,7 @@ CREATE FUNCTION public.sp_servicio_toggle(p_id bigint) RETURNS boolean
 
 CREATE FUNCTION public.sp_servicio_update(p_id bigint, p_code character varying, p_name character varying, p_description text, p_unit_measure character varying, p_cabys_code character varying, p_price numeric, p_tax_type character varying, p_tax_code character varying, p_tax_rate numeric, p_tax_tarifa_codigo character varying, p_image_url text, p_image_public_id character varying, p_moneda character varying, p_codigo_barras character varying, p_partida_arancelaria character varying DEFAULT NULL::character varying, p_duracion_minutos integer DEFAULT NULL::integer) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE v_rows INTEGER;
             BEGIN
@@ -6694,6 +6784,7 @@ CREATE FUNCTION public.sp_servicio_update(p_id bigint, p_code character varying,
 
 CREATE FUNCTION public.sp_servicio_update(p_id bigint, p_code character varying, p_name character varying, p_description text, p_unit_measure character varying, p_cabys_code character varying, p_price numeric, p_tax_type character varying, p_tax_code character varying, p_tax_rate numeric, p_tax_tarifa_codigo character varying, p_image_url text, p_image_public_id character varying, p_moneda character varying, p_codigo_barras character varying, p_partida_arancelaria character varying DEFAULT NULL::character varying, p_duracion_minutos integer DEFAULT NULL::integer, p_comision_activa boolean DEFAULT false, p_comision_pct numeric DEFAULT NULL::numeric) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
             DECLARE v_rows INTEGER;
             BEGIN
@@ -6779,6 +6870,7 @@ CREATE FUNCTION public.sp_sucursal_horario_upsert(p_sucursal_id bigint, p_horari
 
 CREATE FUNCTION public.sp_tipo_cod_ref_delete(p_id bigint) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 BEGIN
     UPDATE tipos_codigo_referencia SET deleted_at = NOW() WHERE id = p_id AND deleted_at IS NULL;
@@ -6792,6 +6884,7 @@ $$;
 
 CREATE FUNCTION public.sp_tipo_cod_ref_list(p_solo_activos boolean DEFAULT true) RETURNS TABLE(id bigint, codigo character varying, nombre character varying, activo boolean, created_at timestamp without time zone, updated_at timestamp without time zone)
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 BEGIN
     RETURN QUERY
@@ -6810,6 +6903,7 @@ $$;
 
 CREATE FUNCTION public.sp_tipo_cod_ref_save(p_id bigint, p_codigo character varying, p_nombre character varying, p_activo boolean DEFAULT true) RETURNS bigint
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 DECLARE v_id BIGINT;
 BEGIN
@@ -6834,6 +6928,7 @@ $$;
 
 CREATE FUNCTION public.sp_tipo_doc_ref_delete(p_id bigint) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 BEGIN
     UPDATE tipos_documento_referencia SET deleted_at = NOW() WHERE id = p_id AND deleted_at IS NULL;
@@ -6847,6 +6942,7 @@ $$;
 
 CREATE FUNCTION public.sp_tipo_doc_ref_list(p_solo_activos boolean DEFAULT true) RETURNS TABLE(id bigint, codigo character varying, nombre character varying, activo boolean, created_at timestamp without time zone, updated_at timestamp without time zone)
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 BEGIN
     RETURN QUERY
@@ -6865,6 +6961,7 @@ $$;
 
 CREATE FUNCTION public.sp_tipo_doc_ref_save(p_id bigint, p_codigo character varying, p_nombre character varying, p_activo boolean DEFAULT true) RETURNS bigint
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 DECLARE v_id BIGINT;
 BEGIN
@@ -6889,6 +6986,7 @@ $$;
 
 CREATE FUNCTION public.sp_validar_credito_cliente(p_empresa_id bigint, p_cliente_id bigint, p_monto_nuevo numeric, p_moneda character varying DEFAULT 'CRC'::character varying, p_tipo_cambio numeric DEFAULT 1) RETURNS TABLE(permitido boolean, motivo character varying)
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 DECLARE
     v_limite     NUMERIC;
