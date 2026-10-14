@@ -7806,6 +7806,17 @@ ALTER SEQUENCE public.clients_id_seq OWNED BY public.clients.id;
 
 
 --
+-- Name: cobro_facturas_externas; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cobro_facturas_externas (
+    referencia character varying(80) NOT NULL,
+    documento_id bigint NOT NULL,
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
 -- Name: company_settings; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -10577,6 +10588,14 @@ ALTER TABLE ONLY public.clients_auditoria
 
 ALTER TABLE ONLY public.clients
     ADD CONSTRAINT clients_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: cobro_facturas_externas cobro_facturas_externas_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cobro_facturas_externas
+    ADD CONSTRAINT cobro_facturas_externas_pkey PRIMARY KEY (referencia);
 
 
 --
