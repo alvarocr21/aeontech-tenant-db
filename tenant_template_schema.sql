@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict Puz9BGhIaZdzOlF7dvW8aYHkPtyLuJWhXd5xCLCkNneieN64KbTAvUHpLZSfcln
+\restrict EMJWzInyhro5SMEtT8OCeT4Afxv8JmKfljm3pV1vxiao1Yz4cZyJQlEKE7eZPwA
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
@@ -8910,6 +8910,42 @@ ALTER SEQUENCE public.empresa_monedas_id_seq OWNED BY public.empresa_monedas.id;
 
 
 --
+-- Name: empresa_perfil_fiscal; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.empresa_perfil_fiscal (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    regimen character varying(20) DEFAULT 'general'::character varying NOT NULL,
+    tipo_actividad character varying(25) DEFAULT 'productos_servicios'::character varying NOT NULL,
+    cargado_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT empresa_perfil_fiscal_regimen_check CHECK (((regimen)::text = ANY ((ARRAY['simplificado'::character varying, 'general'::character varying, 'agropecuario'::character varying])::text[]))),
+    CONSTRAINT empresa_perfil_fiscal_tipo_actividad_check CHECK (((tipo_actividad)::text = ANY ((ARRAY['salud'::character varying, 'productos'::character varying, 'servicios'::character varying, 'productos_servicios'::character varying])::text[])))
+);
+
+
+--
+-- Name: empresa_perfil_fiscal_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.empresa_perfil_fiscal_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: empresa_perfil_fiscal_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.empresa_perfil_fiscal_id_seq OWNED BY public.empresa_perfil_fiscal.id;
+
+
+--
 -- Name: empresa_tarifas_impuesto; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -10356,6 +10392,13 @@ ALTER TABLE ONLY public.empresa_monedas ALTER COLUMN id SET DEFAULT nextval('pub
 
 
 --
+-- Name: empresa_perfil_fiscal id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.empresa_perfil_fiscal ALTER COLUMN id SET DEFAULT nextval('public.empresa_perfil_fiscal_id_seq'::regclass);
+
+
+--
 -- Name: empresa_tarifas_impuesto id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -10974,6 +11017,22 @@ ALTER TABLE ONLY public.empresa_monedas
 
 ALTER TABLE ONLY public.empresa_monedas
     ADD CONSTRAINT empresa_monedas_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: empresa_perfil_fiscal empresa_perfil_fiscal_empresa_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.empresa_perfil_fiscal
+    ADD CONSTRAINT empresa_perfil_fiscal_empresa_id_key UNIQUE (empresa_id);
+
+
+--
+-- Name: empresa_perfil_fiscal empresa_perfil_fiscal_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.empresa_perfil_fiscal
+    ADD CONSTRAINT empresa_perfil_fiscal_pkey PRIMARY KEY (id);
 
 
 --
@@ -12107,5 +12166,5 @@ ALTER TABLE ONLY public.sucursal_bodegas
 -- PostgreSQL database dump complete
 --
 
-\unrestrict Puz9BGhIaZdzOlF7dvW8aYHkPtyLuJWhXd5xCLCkNneieN64KbTAvUHpLZSfcln
+\unrestrict EMJWzInyhro5SMEtT8OCeT4Afxv8JmKfljm3pV1vxiao1Yz4cZyJQlEKE7eZPwA
 
