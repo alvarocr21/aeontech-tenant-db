@@ -2,8 +2,10 @@
 -- PostgreSQL database dump
 --
 
--- Dumped from database version 14.13
--- Dumped by pg_dump version 14.13
+\restrict Puz9BGhIaZdzOlF7dvW8aYHkPtyLuJWhXd5xCLCkNneieN64KbTAvUHpLZSfcln
+
+-- Dumped from database version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
+-- Dumped by pg_dump version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;
@@ -15,6 +17,13 @@ SET check_function_bodies = false;
 SET xmloption = content;
 SET client_min_messages = warning;
 SET row_security = off;
+
+--
+-- Name: public; Type: SCHEMA; Schema: -; Owner: -
+--
+
+-- *not* creating schema, since initdb creates it
+
 
 --
 -- Name: unaccent; Type: EXTENSION; Schema: -; Owner: -
@@ -781,9 +790,17 @@ CREATE FUNCTION public.sp_bitacora_insert(p_user_id bigint, p_empresa_id bigint,
     SET search_path TO 'public', 'pg_temp'
     AS $$
 BEGIN
-    INSERT INTO bitacora_api (user_id, empresa_id, sucursal_id, metodo, endpoint, request_headers, request_body, response_status, response_body, ip_address, user_agent, duracion_ms)
-    VALUES (p_user_id, p_empresa_id, p_sucursal_id, p_metodo, p_endpoint, p_request_headers, p_request_body, p_response_status, p_response_body, p_ip_address, p_user_agent, p_duracion_ms);
-END; $$;
+    INSERT INTO bitacora_api (
+        user_id, empresa_id, sucursal_id, metodo, endpoint,
+        request_headers, request_body, response_status, response_body,
+        ip_address, user_agent, duracion_ms
+    ) VALUES (
+        p_user_id, p_empresa_id, p_sucursal_id, p_metodo, p_endpoint,
+        p_request_headers, p_request_body, p_response_status, p_response_body,
+        p_ip_address, p_user_agent, p_duracion_ms
+    );
+END;
+$$;
 
 
 --
@@ -981,15 +998,12 @@ CREATE FUNCTION public.sp_bodega_producto_toggle(p_bodega_id bigint, p_producto_
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public', 'pg_temp'
     AS $$
-DECLARE v_rows INTEGER;
-BEGIN
-    INSERT INTO bodega_productos (bodega_id, producto_id, is_active, stock, stock_min)
-    VALUES (p_bodega_id, p_producto_id, true, 0, 0)
-    ON CONFLICT (bodega_id, producto_id)
-    DO UPDATE SET is_active = NOT bodega_productos.is_active, updated_at = NOW();
-    RETURN true;
-END;
-$$;
+            DECLARE v_rows INTEGER;
+            BEGIN
+                UPDATE bodega_productos SET is_active = NOT is_active, updated_at = NOW()
+                WHERE bodega_id = p_bodega_id AND producto_id = p_producto_id;
+                GET DIAGNOSTICS v_rows = ROW_COUNT; RETURN v_rows > 0;
+            END; $$;
 
 
 --
@@ -2173,13 +2187,16 @@ $$;
 CREATE FUNCTION public.sp_consecutivo_ajustar(p_empresa_id bigint, p_id bigint, p_nuevo_valor bigint) RETURNS boolean
     LANGUAGE plpgsql
     AS $$
+DECLARE
+    v_rows INT;
 BEGIN
     UPDATE documento_consecutivos
-       SET ultimo_consecutivo = p_nuevo_valor,
-           updated_at         = NOW()
-     WHERE id = p_id AND empresa_id = p_empresa_id;
+    SET ultimo_consecutivo = p_nuevo_valor,
+        updated_at         = NOW()
+    WHERE id = p_id AND empresa_id = p_empresa_id;
 
-    RETURN FOUND;
+    GET DIAGNOSTICS v_rows = ROW_COUNT;
+    RETURN v_rows > 0;
 END;
 $$;
 
@@ -2798,7 +2815,7 @@ CREATE TABLE public.documentos_electronicos (
     adelanto_recibo_id bigint,
     adelanto_error text,
     CONSTRAINT chk_doc_estado CHECK (((estado)::text = ANY (ARRAY['borrador'::text, 'procesando'::text, 'aceptado'::text, 'rechazado'::text, 'error'::text, 'pendiente_manual'::text]))),
-    CONSTRAINT documentos_electronicos_estado_check CHECK (((estado)::text = ANY ((ARRAY['borrador'::character varying, 'procesando'::character varying, 'aceptado'::character varying, 'rechazado'::character varying, 'anulado'::character varying, 'error'::character varying, 'pendiente_manual'::character varying])::text[])))
+    CONSTRAINT documentos_electronicos_estado_check CHECK (((estado)::text = ANY (ARRAY[('borrador'::character varying)::text, ('procesando'::character varying)::text, ('aceptado'::character varying)::text, ('rechazado'::character varying)::text, ('anulado'::character varying)::text, ('error'::character varying)::text, ('pendiente_manual'::character varying)::text])))
 );
 
 
@@ -5203,29 +5220,29 @@ CREATE FUNCTION public.sp_orden_pedido_get(p_id bigint, p_empresa_id bigint) RET
 CREATE FUNCTION public.sp_orden_pedido_list(p_empresa_id bigint, p_estado character varying DEFAULT NULL::character varying, p_search text DEFAULT NULL::text, p_fecha_desde date DEFAULT NULL::date, p_fecha_hasta date DEFAULT NULL::date, p_page integer DEFAULT 1, p_per_page integer DEFAULT 20) RETURNS TABLE(id bigint, numero character varying, fecha timestamp without time zone, proveedor_id bigint, proveedor_nombre character varying, bodega_id bigint, bodega_nombre character varying, moneda character varying, estado character varying, created_at timestamp without time zone, total_rows bigint)
     LANGUAGE plpgsql
     AS $$
-BEGIN
-    RETURN QUERY
-    SELECT
-        o.id, o.numero, o.fecha,
-        o.proveedor_id, p.name AS proveedor_nombre,
-        o.bodega_id, b.name AS bodega_nombre,
-        o.moneda, o.estado, o.created_at,
-        COUNT(*) OVER()::BIGINT AS total_rows
-    FROM ordenes_pedido o
-    LEFT JOIN proveedores p ON p.id = o.proveedor_id
-    LEFT JOIN bodegas b ON b.id = o.bodega_id
-    WHERE o.empresa_id = p_empresa_id
-      AND o.deleted_at IS NULL
-      AND (p_estado IS NULL OR o.estado = p_estado)
-      AND (p_fecha_desde IS NULL OR o.fecha::DATE >= p_fecha_desde)
-      AND (p_fecha_hasta IS NULL OR o.fecha::DATE <= p_fecha_hasta)
-      AND (p_search IS NULL
-           OR o.numero ILIKE '%' || p_search || '%'
-           OR p.name ILIKE '%' || p_search || '%')
-    ORDER BY o.created_at DESC
-    LIMIT p_per_page OFFSET (p_page - 1) * p_per_page;
-END;
-$$;
+            BEGIN
+                RETURN QUERY
+                SELECT
+                    o.id, o.numero, o.fecha,
+                    o.proveedor_id, p.name AS proveedor_nombre,
+                    o.bodega_id, b.name AS bodega_nombre,
+                    o.moneda, o.estado, o.created_at,
+                    COUNT(*) OVER()::BIGINT AS total_rows
+                FROM ordenes_pedido o
+                LEFT JOIN proveedores p ON p.id = o.proveedor_id
+                LEFT JOIN bodegas b ON b.id = o.bodega_id
+                WHERE o.empresa_id = p_empresa_id
+                  AND o.deleted_at IS NULL
+                  AND (p_estado IS NULL OR o.estado = p_estado)
+                  AND (p_fecha_desde IS NULL OR o.fecha::DATE >= p_fecha_desde)
+                  AND (p_fecha_hasta IS NULL OR o.fecha::DATE <= p_fecha_hasta)
+                  AND (p_search IS NULL
+                       OR o.numero ILIKE '%' || p_search || '%'
+                       OR p.name ILIKE '%' || p_search || '%')
+                ORDER BY o.created_at DESC
+                LIMIT p_per_page OFFSET (p_page - 1) * p_per_page;
+            END;
+            $$;
 
 
 --
@@ -7300,8 +7317,8 @@ CREATE TABLE public.bitacora_api (
     user_id bigint,
     empresa_id bigint,
     sucursal_id bigint,
-    metodo character varying(10) NOT NULL,
-    endpoint character varying(500) NOT NULL,
+    metodo character varying(10),
+    endpoint character varying(500),
     request_headers jsonb,
     request_body jsonb,
     response_status integer,
@@ -7309,7 +7326,7 @@ CREATE TABLE public.bitacora_api (
     ip_address character varying(45),
     user_agent text,
     duracion_ms integer,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now()
 );
 
 
@@ -7861,7 +7878,7 @@ CREATE TABLE public.clients_auditoria (
     app_user_id bigint,
     ip_address character varying(45),
     created_at timestamp without time zone DEFAULT now() NOT NULL,
-    CONSTRAINT clients_auditoria_operacion_check CHECK (((operacion)::text = ANY ((ARRAY['INSERT'::character varying, 'UPDATE'::character varying, 'DELETE'::character varying])::text[])))
+    CONSTRAINT clients_auditoria_operacion_check CHECK (((operacion)::text = ANY (ARRAY[('INSERT'::character varying)::text, ('UPDATE'::character varying)::text, ('DELETE'::character varying)::text])))
 );
 
 
@@ -7964,8 +7981,8 @@ CREATE TABLE public.company_settings (
     onvo_card_last4 character varying(4),
     onvo_card_exp_month smallint,
     onvo_card_exp_year smallint,
-    CONSTRAINT company_settings_hacienda_environment_check CHECK (((hacienda_environment)::text = ANY ((ARRAY['stag'::character varying, 'prod'::character varying])::text[]))),
-    CONSTRAINT company_settings_validation_status_check CHECK (((validation_status)::text = ANY ((ARRAY['pending'::character varying, 'valid'::character varying, 'invalid'::character varying])::text[])))
+    CONSTRAINT company_settings_hacienda_environment_check CHECK (((hacienda_environment)::text = ANY (ARRAY[('stag'::character varying)::text, ('prod'::character varying)::text]))),
+    CONSTRAINT company_settings_validation_status_check CHECK (((validation_status)::text = ANY (ARRAY[('pending'::character varying)::text, ('valid'::character varying)::text, ('invalid'::character varying)::text])))
 );
 
 
@@ -8041,7 +8058,7 @@ CREATE TABLE public.compras_items (
     created_at timestamp without time zone DEFAULT now() NOT NULL,
     updated_at timestamp without time zone DEFAULT now() NOT NULL,
     deleted_at timestamp without time zone,
-    CONSTRAINT compras_items_tipo_check CHECK (((tipo)::text = ANY ((ARRAY['P'::character varying, 'S'::character varying])::text[])))
+    CONSTRAINT compras_items_tipo_check CHECK (((tipo)::text = ANY (ARRAY[('P'::character varying)::text, ('S'::character varying)::text])))
 );
 
 
@@ -8219,28 +8236,6 @@ ALTER SEQUENCE public.cotizaciones_id_seq OWNED BY public.cotizaciones.id;
 
 
 --
--- Name: cuentas_por_cobrar; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.cuentas_por_cobrar (
-    id bigint NOT NULL,
-    empresa_id bigint NOT NULL,
-    documento_id bigint NOT NULL,
-    cliente_id bigint NOT NULL,
-    monto_total numeric(18,5) NOT NULL,
-    saldo_pendiente numeric(18,5) NOT NULL,
-    fecha_emision timestamp without time zone NOT NULL,
-    fecha_vencimiento timestamp without time zone,
-    estado character varying(20) DEFAULT 'vigente'::character varying NOT NULL,
-    created_at timestamp without time zone DEFAULT now() NOT NULL,
-    updated_at timestamp without time zone DEFAULT now() NOT NULL,
-    origen_venta character varying(10) DEFAULT 'credito'::character varying NOT NULL,
-    CONSTRAINT chk_cxc_estado CHECK (((estado)::text = ANY ((ARRAY['vigente'::character varying, 'mora'::character varying, 'pagada'::character varying, 'anulada'::character varying])::text[]))),
-    CONSTRAINT chk_cxc_origen_venta CHECK (((origen_venta)::text = ANY ((ARRAY['credito'::character varying, 'apartado'::character varying])::text[])))
-);
-
-
---
 -- Name: cuentas_por_cobrar_id_seq; Type: SEQUENCE; Schema: public; Owner: -
 --
 
@@ -8253,10 +8248,57 @@ CREATE SEQUENCE public.cuentas_por_cobrar_id_seq
 
 
 --
--- Name: cuentas_por_cobrar_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+-- Name: cuentas_por_cobrar; Type: TABLE; Schema: public; Owner: -
 --
 
-ALTER SEQUENCE public.cuentas_por_cobrar_id_seq OWNED BY public.cuentas_por_cobrar.id;
+CREATE TABLE public.cuentas_por_cobrar (
+    id bigint DEFAULT nextval('public.cuentas_por_cobrar_id_seq'::regclass) NOT NULL,
+    empresa_id bigint NOT NULL,
+    documento_id bigint NOT NULL,
+    cliente_id bigint NOT NULL,
+    monto_total numeric(18,5) NOT NULL,
+    saldo_pendiente numeric(18,5) NOT NULL,
+    fecha_emision timestamp without time zone NOT NULL,
+    fecha_vencimiento timestamp without time zone,
+    estado character varying(20) DEFAULT 'vigente'::character varying NOT NULL,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    origen_venta character varying(10) DEFAULT 'credito'::character varying NOT NULL,
+    CONSTRAINT chk_cxc_estado CHECK (((estado)::text = ANY (ARRAY[('vigente'::character varying)::text, ('mora'::character varying)::text, ('pagada'::character varying)::text, ('anulada'::character varying)::text]))),
+    CONSTRAINT chk_cxc_origen_venta CHECK (((origen_venta)::text = ANY ((ARRAY['credito'::character varying, 'apartado'::character varying])::text[])))
+);
+
+
+--
+-- Name: db_version; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.db_version (
+    id integer NOT NULL,
+    version character varying(20) NOT NULL,
+    description text NOT NULL,
+    applied_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: db_version_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.db_version_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: db_version_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.db_version_id_seq OWNED BY public.db_version.id;
 
 
 --
@@ -8295,19 +8337,6 @@ ALTER SEQUENCE public.documento_consecutivos_id_seq OWNED BY public.documento_co
 
 
 --
--- Name: documento_cxc_aplicaciones; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.documento_cxc_aplicaciones (
-    id bigint NOT NULL,
-    documento_id bigint NOT NULL,
-    cuenta_por_cobrar_id bigint NOT NULL,
-    monto_aplicado numeric(18,5) NOT NULL,
-    created_at timestamp without time zone DEFAULT now() NOT NULL
-);
-
-
---
 -- Name: documento_cxc_aplicaciones_id_seq; Type: SEQUENCE; Schema: public; Owner: -
 --
 
@@ -8320,10 +8349,16 @@ CREATE SEQUENCE public.documento_cxc_aplicaciones_id_seq
 
 
 --
--- Name: documento_cxc_aplicaciones_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+-- Name: documento_cxc_aplicaciones; Type: TABLE; Schema: public; Owner: -
 --
 
-ALTER SEQUENCE public.documento_cxc_aplicaciones_id_seq OWNED BY public.documento_cxc_aplicaciones.id;
+CREATE TABLE public.documento_cxc_aplicaciones (
+    id bigint DEFAULT nextval('public.documento_cxc_aplicaciones_id_seq'::regclass) NOT NULL,
+    documento_id bigint NOT NULL,
+    cuenta_por_cobrar_id bigint NOT NULL,
+    monto_aplicado numeric(18,5) NOT NULL,
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
 
 
 --
@@ -8919,12 +8954,12 @@ CREATE TABLE public.empresa_tipo_cambios (
     id bigint NOT NULL,
     empresa_id bigint NOT NULL,
     fecha date NOT NULL,
-    compra numeric(12,4) NOT NULL,
-    venta numeric(12,4) NOT NULL,
-    fuente character varying(100) DEFAULT 'Manual'::character varying NOT NULL,
+    compra numeric(12,4),
+    venta numeric(12,4),
+    fuente character varying(100) DEFAULT 'Manual'::character varying,
     created_by bigint,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now(),
+    updated_at timestamp with time zone DEFAULT now()
 );
 
 
@@ -9304,11 +9339,23 @@ ALTER SEQUENCE public.migrations_id_seq OWNED BY public.migrations.id;
 
 
 --
+-- Name: movimientos_inventario_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.movimientos_inventario_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
 -- Name: movimientos_inventario; Type: TABLE; Schema: public; Owner: -
 --
 
 CREATE TABLE public.movimientos_inventario (
-    id bigint NOT NULL,
+    id bigint DEFAULT nextval('public.movimientos_inventario_id_seq'::regclass) NOT NULL,
     empresa_id bigint NOT NULL,
     tipo character varying(20) NOT NULL,
     bodega_origen_id bigint NOT NULL,
@@ -9327,25 +9374,6 @@ CREATE TABLE public.movimientos_inventario (
     proveedor_id bigint,
     CONSTRAINT movimientos_inventario_cantidad_check CHECK ((cantidad > (0)::numeric))
 );
-
-
---
--- Name: movimientos_inventario_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
-CREATE SEQUENCE public.movimientos_inventario_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-
---
--- Name: movimientos_inventario_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
-ALTER SEQUENCE public.movimientos_inventario_id_seq OWNED BY public.movimientos_inventario.id;
 
 
 --
@@ -9527,7 +9555,7 @@ CREATE TABLE public.productos (
     duracion_minutos integer,
     comision_activa boolean DEFAULT false NOT NULL,
     comision_pct numeric(5,2),
-    CONSTRAINT productos_type_check CHECK (((type)::text = ANY ((ARRAY['product'::character varying, 'service'::character varying])::text[])))
+    CONSTRAINT productos_type_check CHECK (((type)::text = ANY (ARRAY[('product'::character varying)::text, ('service'::character varying)::text])))
 );
 
 
@@ -9671,11 +9699,23 @@ ALTER SEQUENCE public.proveedores_id_seq OWNED BY public.proveedores.id;
 
 
 --
+-- Name: recibos_adelanto_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.recibos_adelanto_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
 -- Name: recibos_adelanto; Type: TABLE; Schema: public; Owner: -
 --
 
 CREATE TABLE public.recibos_adelanto (
-    id bigint NOT NULL,
+    id bigint DEFAULT nextval('public.recibos_adelanto_id_seq'::regclass) NOT NULL,
     empresa_id bigint NOT NULL,
     documento_id bigint NOT NULL,
     cliente_id bigint NOT NULL,
@@ -9685,20 +9725,7 @@ CREATE TABLE public.recibos_adelanto (
     created_at timestamp without time zone DEFAULT now() NOT NULL,
     updated_at timestamp without time zone DEFAULT now() NOT NULL,
     moneda character varying(3) DEFAULT 'CRC'::character varying NOT NULL,
-    CONSTRAINT chk_adelanto_estado CHECK (((estado)::text = ANY ((ARRAY['disponible'::character varying, 'agotado'::character varying, 'anulado'::character varying])::text[])))
-);
-
-
---
--- Name: recibos_adelanto_aplicaciones; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.recibos_adelanto_aplicaciones (
-    id bigint NOT NULL,
-    recibo_adelanto_id bigint NOT NULL,
-    documento_id bigint NOT NULL,
-    monto_aplicado numeric(18,5) NOT NULL,
-    created_at timestamp without time zone DEFAULT now() NOT NULL
+    CONSTRAINT chk_adelanto_estado CHECK (((estado)::text = ANY (ARRAY[('disponible'::character varying)::text, ('agotado'::character varying)::text, ('anulado'::character varying)::text])))
 );
 
 
@@ -9715,29 +9742,16 @@ CREATE SEQUENCE public.recibos_adelanto_aplicaciones_id_seq
 
 
 --
--- Name: recibos_adelanto_aplicaciones_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+-- Name: recibos_adelanto_aplicaciones; Type: TABLE; Schema: public; Owner: -
 --
 
-ALTER SEQUENCE public.recibos_adelanto_aplicaciones_id_seq OWNED BY public.recibos_adelanto_aplicaciones.id;
-
-
---
--- Name: recibos_adelanto_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
-CREATE SEQUENCE public.recibos_adelanto_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-
---
--- Name: recibos_adelanto_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
-ALTER SEQUENCE public.recibos_adelanto_id_seq OWNED BY public.recibos_adelanto.id;
+CREATE TABLE public.recibos_adelanto_aplicaciones (
+    id bigint DEFAULT nextval('public.recibos_adelanto_aplicaciones_id_seq'::regclass) NOT NULL,
+    recibo_adelanto_id bigint NOT NULL,
+    documento_id bigint NOT NULL,
+    monto_aplicado numeric(18,5) NOT NULL,
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
 
 
 --
@@ -9747,8 +9761,7 @@ ALTER SEQUENCE public.recibos_adelanto_id_seq OWNED BY public.recibos_adelanto.i
 CREATE TABLE public.schema_migrations (
     id integer NOT NULL,
     version character varying(20) NOT NULL,
-    description text NOT NULL,
-    applied_at timestamp without time zone DEFAULT now() NOT NULL
+    applied_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 
@@ -9861,15 +9874,74 @@ ALTER SEQUENCE public.servicios_id_seq OWNED BY public.servicios.id;
 
 
 --
--- Name: sucursal_bodegas; Type: TABLE; Schema: public; Owner: -
+-- Name: sistema_parametros; Type: TABLE; Schema: public; Owner: -
 --
 
-CREATE TABLE public.sucursal_bodegas (
+CREATE TABLE public.sistema_parametros (
     id bigint NOT NULL,
-    sucursal_id bigint NOT NULL,
-    bodega_id bigint NOT NULL,
+    clave character varying(80) NOT NULL,
+    valor character varying(255) NOT NULL,
+    descripcion text,
+    updated_by bigint,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: sistema_parametros_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.sistema_parametros_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'sistema_parametros'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
     created_at timestamp without time zone DEFAULT now() NOT NULL
 );
+
+
+--
+-- Name: sistema_parametros_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.sistema_parametros_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: sistema_parametros_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.sistema_parametros_auditoria_id_seq OWNED BY public.sistema_parametros_auditoria.id;
+
+
+--
+-- Name: sistema_parametros_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.sistema_parametros_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: sistema_parametros_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.sistema_parametros_id_seq OWNED BY public.sistema_parametros.id;
 
 
 --
@@ -9885,10 +9957,15 @@ CREATE SEQUENCE public.sucursal_bodegas_id_seq
 
 
 --
--- Name: sucursal_bodegas_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+-- Name: sucursal_bodegas; Type: TABLE; Schema: public; Owner: -
 --
 
-ALTER SEQUENCE public.sucursal_bodegas_id_seq OWNED BY public.sucursal_bodegas.id;
+CREATE TABLE public.sucursal_bodegas (
+    id bigint DEFAULT nextval('public.sucursal_bodegas_id_seq'::regclass) NOT NULL,
+    sucursal_id bigint NOT NULL,
+    bodega_id bigint NOT NULL,
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
 
 
 --
@@ -10160,10 +10237,10 @@ ALTER TABLE ONLY public.cotizaciones_auditoria ALTER COLUMN id SET DEFAULT nextv
 
 
 --
--- Name: cuentas_por_cobrar id; Type: DEFAULT; Schema: public; Owner: -
+-- Name: db_version id; Type: DEFAULT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.cuentas_por_cobrar ALTER COLUMN id SET DEFAULT nextval('public.cuentas_por_cobrar_id_seq'::regclass);
+ALTER TABLE ONLY public.db_version ALTER COLUMN id SET DEFAULT nextval('public.db_version_id_seq'::regclass);
 
 
 --
@@ -10171,13 +10248,6 @@ ALTER TABLE ONLY public.cuentas_por_cobrar ALTER COLUMN id SET DEFAULT nextval('
 --
 
 ALTER TABLE ONLY public.documento_consecutivos ALTER COLUMN id SET DEFAULT nextval('public.documento_consecutivos_id_seq'::regclass);
-
-
---
--- Name: documento_cxc_aplicaciones id; Type: DEFAULT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.documento_cxc_aplicaciones ALTER COLUMN id SET DEFAULT nextval('public.documento_cxc_aplicaciones_id_seq'::regclass);
 
 
 --
@@ -10370,13 +10440,6 @@ ALTER TABLE ONLY public.migrations ALTER COLUMN id SET DEFAULT nextval('public.m
 
 
 --
--- Name: movimientos_inventario id; Type: DEFAULT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.movimientos_inventario ALTER COLUMN id SET DEFAULT nextval('public.movimientos_inventario_id_seq'::regclass);
-
-
---
 -- Name: orden_pedido_consecutivos id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -10433,20 +10496,6 @@ ALTER TABLE ONLY public.proveedores_auditoria ALTER COLUMN id SET DEFAULT nextva
 
 
 --
--- Name: recibos_adelanto id; Type: DEFAULT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.recibos_adelanto ALTER COLUMN id SET DEFAULT nextval('public.recibos_adelanto_id_seq'::regclass);
-
-
---
--- Name: recibos_adelanto_aplicaciones id; Type: DEFAULT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.recibos_adelanto_aplicaciones ALTER COLUMN id SET DEFAULT nextval('public.recibos_adelanto_aplicaciones_id_seq'::regclass);
-
-
---
 -- Name: schema_migrations id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -10468,10 +10517,17 @@ ALTER TABLE ONLY public.servicios_auditoria ALTER COLUMN id SET DEFAULT nextval(
 
 
 --
--- Name: sucursal_bodegas id; Type: DEFAULT; Schema: public; Owner: -
+-- Name: sistema_parametros id; Type: DEFAULT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.sucursal_bodegas ALTER COLUMN id SET DEFAULT nextval('public.sucursal_bodegas_id_seq'::regclass);
+ALTER TABLE ONLY public.sistema_parametros ALTER COLUMN id SET DEFAULT nextval('public.sistema_parametros_id_seq'::regclass);
+
+
+--
+-- Name: sistema_parametros_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sistema_parametros_auditoria ALTER COLUMN id SET DEFAULT nextval('public.sistema_parametros_auditoria_id_seq'::regclass);
 
 
 --
@@ -10758,6 +10814,14 @@ ALTER TABLE ONLY public.cotizaciones
 
 ALTER TABLE ONLY public.cuentas_por_cobrar
     ADD CONSTRAINT cuentas_por_cobrar_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: db_version db_version_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.db_version
+    ADD CONSTRAINT db_version_pkey PRIMARY KEY (id);
 
 
 --
@@ -11145,6 +11209,30 @@ ALTER TABLE ONLY public.servicios
 
 
 --
+-- Name: sistema_parametros_auditoria sistema_parametros_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sistema_parametros_auditoria
+    ADD CONSTRAINT sistema_parametros_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: sistema_parametros sistema_parametros_clave_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sistema_parametros
+    ADD CONSTRAINT sistema_parametros_clave_key UNIQUE (clave);
+
+
+--
+-- Name: sistema_parametros sistema_parametros_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sistema_parametros
+    ADD CONSTRAINT sistema_parametros_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: sucursal_bodegas sucursal_bodegas_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -11366,34 +11454,6 @@ CREATE INDEX idx_agenda_eventos_documento ON public.agenda_eventos USING btree (
 --
 
 CREATE INDEX idx_agenda_eventos_empresa_fecha ON public.agenda_eventos USING btree (empresa_id, fecha_inicio);
-
-
---
--- Name: idx_bitacora_api_created; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_bitacora_api_created ON public.bitacora_api USING btree (created_at DESC);
-
-
---
--- Name: idx_bitacora_api_empresa; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_bitacora_api_empresa ON public.bitacora_api USING btree (empresa_id);
-
-
---
--- Name: idx_bitacora_api_endpoint; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_bitacora_api_endpoint ON public.bitacora_api USING btree (endpoint);
-
-
---
--- Name: idx_bitacora_api_user; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_bitacora_api_user ON public.bitacora_api USING btree (user_id);
 
 
 --
@@ -11789,6 +11849,13 @@ CREATE TRIGGER trg_servicios_auditoria AFTER INSERT OR DELETE OR UPDATE ON publi
 
 
 --
+-- Name: sistema_parametros trg_sistema_parametros_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_sistema_parametros_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.sistema_parametros FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
 -- Name: bodega_productos bodega_productos_bodega_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -12039,4 +12106,6 @@ ALTER TABLE ONLY public.sucursal_bodegas
 --
 -- PostgreSQL database dump complete
 --
+
+\unrestrict Puz9BGhIaZdzOlF7dvW8aYHkPtyLuJWhXd5xCLCkNneieN64KbTAvUHpLZSfcln
 
