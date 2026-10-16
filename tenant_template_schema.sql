@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict ed84B139u5T1wK0sTH77gdNAVVaYGOYbhdZmdS45udlyk0fEhX0uOC2RdmlPDnl
+\restrict FsrLPjZUnJgLhgdkIvFuoQrThzpWqshCadVEQx1pGr0QYqSzCtVXePilgE2ObkQ
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
@@ -5473,6 +5473,37 @@ CREATE FUNCTION public.sp_orden_pedido_update(p_id bigint, p_empresa_id bigint, 
                 RETURN FOUND;
             END;
             $$;
+
+
+--
+-- Name: sp_producto_alertas_stock(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_producto_alertas_stock(p_empresa_id bigint, p_bodega_id bigint) RETURNS TABLE(total_negativos bigint, total_bajos bigint, nombres_negativos text)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    WITH base AS (
+        SELECT p.name, bp.stock, bp.stock_min
+        FROM bodega_productos bp
+        JOIN productos p ON p.id = bp.producto_id
+        WHERE p.empresa_id = p_empresa_id
+          AND bp.bodega_id = p_bodega_id
+          AND p.deleted_at IS NULL
+          AND p.is_active
+          AND bp.is_active
+          AND COALESCE(p.type, '') <> 'service'
+          AND bp.stock IS NOT NULL
+    )
+    SELECT
+        (SELECT COUNT(*) FROM base WHERE stock < 0)::BIGINT,
+        (SELECT COUNT(*) FROM base WHERE stock >= 0 AND COALESCE(stock_min, 0) > 0 AND stock <= stock_min)::BIGINT,
+        (SELECT COALESCE(jsonb_agg(n.name), '[]'::jsonb)::TEXT
+           FROM (SELECT b.name FROM base b WHERE b.stock < 0 ORDER BY b.name LIMIT 3) n);
+END;
+$$;
 
 
 --
@@ -12209,5 +12240,5 @@ ALTER TABLE ONLY public.sucursal_bodegas
 -- PostgreSQL database dump complete
 --
 
-\unrestrict ed84B139u5T1wK0sTH77gdNAVVaYGOYbhdZmdS45udlyk0fEhX0uOC2RdmlPDnl
+\unrestrict FsrLPjZUnJgLhgdkIvFuoQrThzpWqshCadVEQx1pGr0QYqSzCtVXePilgE2ObkQ
 
