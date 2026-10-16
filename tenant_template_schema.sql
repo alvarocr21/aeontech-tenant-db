@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict kdZ8TC7wNKTvf6dXSEqOtV3iC2eorlxwx4xcXCcyWBk2M0eXs4tlrzHsCz1RE3n
+\restrict ed84B139u5T1wK0sTH77gdNAVVaYGOYbhdZmdS45udlyk0fEhX0uOC2RdmlPDnl
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
@@ -4503,6 +4503,48 @@ CREATE FUNCTION public.sp_inventario_kardex(p_empresa_id bigint, p_producto_id b
                 LIMIT GREATEST(p_per_page, 1) OFFSET GREATEST(p_page - 1, 0) * GREATEST(p_per_page, 1);
             END;
             $$;
+
+
+--
+-- Name: sp_inventario_kardex_totales(bigint, bigint, bigint, date, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_inventario_kardex_totales(p_empresa_id bigint, p_producto_id bigint DEFAULT NULL::bigint, p_bodega_id bigint DEFAULT NULL::bigint, p_fecha_desde date DEFAULT NULL::date, p_fecha_hasta date DEFAULT NULL::date) RETURNS TABLE(total_movimientos bigint, total_entrada numeric, total_salida numeric, stock_actual numeric)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    WITH f AS (
+        SELECT
+            m.id,
+            m.created_at,
+            m.stock_despues,
+            CASE WHEN m.tipo IN ('entrada','devolucion')
+                   OR (m.tipo = 'ajuste'   AND m.stock_despues >= m.stock_antes)
+                   OR (m.tipo = 'traslado' AND m.stock_despues >  m.stock_antes)
+                 THEN m.cantidad ELSE 0 END AS entrada,
+            CASE WHEN m.tipo IN ('salida','venta','danio')
+                   OR (m.tipo = 'ajuste'   AND m.stock_despues < m.stock_antes)
+                   OR (m.tipo = 'traslado' AND m.stock_despues <= m.stock_antes)
+                 THEN m.cantidad ELSE 0 END AS salida
+        FROM movimientos_inventario m
+        WHERE m.empresa_id       = p_empresa_id
+          AND (p_producto_id IS NULL OR m.producto_id      = p_producto_id)
+          AND (p_bodega_id   IS NULL OR m.bodega_origen_id = p_bodega_id)
+          AND (p_fecha_desde IS NULL OR m.created_at::date >= p_fecha_desde)
+          AND (p_fecha_hasta IS NULL OR m.created_at::date <= p_fecha_hasta)
+    )
+    SELECT
+        COUNT(*)::BIGINT,
+        COALESCE(SUM(f.entrada), 0)::NUMERIC,
+        COALESCE(SUM(f.salida),  0)::NUMERIC,
+        CASE WHEN p_producto_id IS NOT NULL AND p_bodega_id IS NOT NULL
+             THEN (SELECT x.stock_despues FROM f x ORDER BY x.created_at DESC, x.id DESC LIMIT 1)
+             ELSE NULL END
+    FROM f;
+END;
+$$;
 
 
 --
@@ -12167,5 +12209,5 @@ ALTER TABLE ONLY public.sucursal_bodegas
 -- PostgreSQL database dump complete
 --
 
-\unrestrict kdZ8TC7wNKTvf6dXSEqOtV3iC2eorlxwx4xcXCcyWBk2M0eXs4tlrzHsCz1RE3n
+\unrestrict ed84B139u5T1wK0sTH77gdNAVVaYGOYbhdZmdS45udlyk0fEhX0uOC2RdmlPDnl
 
