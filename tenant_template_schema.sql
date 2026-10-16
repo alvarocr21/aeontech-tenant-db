@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict EMJWzInyhro5SMEtT8OCeT4Afxv8JmKfljm3pV1vxiao1Yz4cZyJQlEKE7eZPwA
+\restrict kdZ8TC7wNKTvf6dXSEqOtV3iC2eorlxwx4xcXCcyWBk2M0eXs4tlrzHsCz1RE3n
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
@@ -6568,21 +6568,22 @@ CREATE FUNCTION public.sp_reporte_ranking_clientes(p_empresa_id bigint, p_fecha_
 BEGIN
     RETURN QUERY
     SELECT
-        ROW_NUMBER() OVER (ORDER BY SUM(d.total_comprobante) DESC)::BIGINT AS posicion,
+        ROW_NUMBER() OVER (ORDER BY SUM(CASE WHEN d.tipo_documento = '03' THEN -d.total_comprobante ELSE d.total_comprobante END) DESC)::BIGINT AS posicion,
         COALESCE(d.receptor_nombre,    'Consumidor Final')::VARCHAR AS receptor_nombre,
         COALESCE(d.receptor_numero_id, '—')::VARCHAR                AS receptor_numero_id,
-        COUNT(*)::BIGINT              AS cantidad_docs,
-        SUM(d.total_venta_neta)       AS total_venta_neta,
-        SUM(d.total_impuesto)         AS total_impuesto,
-        SUM(d.total_comprobante)      AS total_comprobante
+        COUNT(*) FILTER (WHERE d.tipo_documento <> '03')::BIGINT    AS cantidad_docs,
+        SUM(CASE WHEN d.tipo_documento = '03' THEN -d.total_venta_neta ELSE d.total_venta_neta END) AS total_venta_neta,
+        SUM(CASE WHEN d.tipo_documento = '03' THEN -d.total_impuesto   ELSE d.total_impuesto   END) AS total_impuesto,
+        SUM(CASE WHEN d.tipo_documento = '03' THEN -d.total_comprobante ELSE d.total_comprobante END) AS total_comprobante
     FROM documentos_electronicos d
     WHERE d.empresa_id  = p_empresa_id
       AND d.estado      = 'aceptado'
       AND d.deleted_at  IS NULL
+      AND d.tipo_documento <> '08'
       AND COALESCE(d.moneda, 'CRC') = COALESCE(p_moneda, 'CRC')
       AND d.fecha_emision::DATE BETWEEN p_fecha_desde AND p_fecha_hasta
     GROUP BY d.receptor_nombre, d.receptor_numero_id
-    ORDER BY SUM(d.total_comprobante) DESC
+    ORDER BY SUM(CASE WHEN d.tipo_documento = '03' THEN -d.total_comprobante ELSE d.total_comprobante END) DESC
     LIMIT p_limit;
 END;
 $$;
@@ -12166,5 +12167,5 @@ ALTER TABLE ONLY public.sucursal_bodegas
 -- PostgreSQL database dump complete
 --
 
-\unrestrict EMJWzInyhro5SMEtT8OCeT4Afxv8JmKfljm3pV1vxiao1Yz4cZyJQlEKE7eZPwA
+\unrestrict kdZ8TC7wNKTvf6dXSEqOtV3iC2eorlxwx4xcXCcyWBk2M0eXs4tlrzHsCz1RE3n
 
