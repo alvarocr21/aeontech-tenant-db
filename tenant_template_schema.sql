@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict gPTeBKhpwyMN5ggAUMzD33ulxljhTpx2A92KabBJETFAOXIIzSt0UwQT3VYQR1e
+\restrict TxPzQaabrCvtg007vHJDqc7QIu4yhazEoFK2NgY98isdqsuZ89z3XXIwzkkgKzv
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
@@ -4500,7 +4500,7 @@ CREATE FUNCTION public.sp_inventario_kardex(p_empresa_id bigint, p_producto_id b
                   AND (p_bodega_id   IS NULL OR m.bodega_origen_id = p_bodega_id)
                   AND (p_fecha_desde IS NULL OR m.created_at::date >= p_fecha_desde)
                   AND (p_fecha_hasta IS NULL OR m.created_at::date <= p_fecha_hasta)
-                ORDER BY m.created_at DESC
+                ORDER BY m.created_at DESC, m.id DESC
                 LIMIT GREATEST(p_per_page, 1) OFFSET GREATEST(p_page - 1, 0) * GREATEST(p_per_page, 1);
             END;
             $$;
@@ -4586,7 +4586,7 @@ CREATE FUNCTION public.sp_inventario_movimientos(p_empresa_id bigint, p_bodega_i
                   AND (p_tipo        IS NULL OR m.tipo             = p_tipo)
                   AND (p_fecha_desde IS NULL OR m.created_at::date >= p_fecha_desde)
                   AND (p_fecha_hasta IS NULL OR m.created_at::date <= p_fecha_hasta)
-                ORDER BY m.created_at DESC
+                ORDER BY m.created_at DESC, m.id DESC
                 LIMIT p_limit OFFSET p_offset;
             $$;
 
@@ -12241,5 +12241,5 @@ ALTER TABLE ONLY public.sucursal_bodegas
 -- PostgreSQL database dump complete
 --
 
-\unrestrict gPTeBKhpwyMN5ggAUMzD33ulxljhTpx2A92KabBJETFAOXIIzSt0UwQT3VYQR1e
+\unrestrict TxPzQaabrCvtg007vHJDqc7QIu4yhazEoFK2NgY98isdqsuZ89z3XXIwzkkgKzv
 
