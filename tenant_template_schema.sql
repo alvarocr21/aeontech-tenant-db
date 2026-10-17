@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict FsrLPjZUnJgLhgdkIvFuoQrThzpWqshCadVEQx1pGr0QYqSzCtVXePilgE2ObkQ
+\restrict gPTeBKhpwyMN5ggAUMzD33ulxljhTpx2A92KabBJETFAOXIIzSt0UwQT3VYQR1e
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
@@ -2814,6 +2814,7 @@ CREATE TABLE public.documentos_electronicos (
     pending_adelanto_aplicaciones jsonb,
     adelanto_recibo_id bigint,
     adelanto_error text,
+    postproceso_error text,
     CONSTRAINT chk_doc_estado CHECK (((estado)::text = ANY (ARRAY['borrador'::text, 'procesando'::text, 'aceptado'::text, 'rechazado'::text, 'error'::text, 'pendiente_manual'::text]))),
     CONSTRAINT documentos_electronicos_estado_check CHECK (((estado)::text = ANY (ARRAY[('borrador'::character varying)::text, ('procesando'::character varying)::text, ('aceptado'::character varying)::text, ('rechazado'::character varying)::text, ('anulado'::character varying)::text, ('error'::character varying)::text, ('pendiente_manual'::character varying)::text])))
 );
@@ -12240,5 +12241,5 @@ ALTER TABLE ONLY public.sucursal_bodegas
 -- PostgreSQL database dump complete
 --
 
-\unrestrict FsrLPjZUnJgLhgdkIvFuoQrThzpWqshCadVEQx1pGr0QYqSzCtVXePilgE2ObkQ
+\unrestrict gPTeBKhpwyMN5ggAUMzD33ulxljhTpx2A92KabBJETFAOXIIzSt0UwQT3VYQR1e
 
