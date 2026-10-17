@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict TxPzQaabrCvtg007vHJDqc7QIu4yhazEoFK2NgY98isdqsuZ89z3XXIwzkkgKzv
+\restrict 2G1AojQ8YwrhdNdDdwsMu2DfLTl8XqAnriD3qF4ZYChoOgSMUlQsrnfv009OdwE
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
@@ -304,6 +304,21 @@ CREATE FUNCTION public.sp_agenda_avisos_config_upsert(p_empresa_id bigint, p_avi
 
 
 --
+-- Name: sp_agenda_avisos_desmarcar_enviado(bigint, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_agenda_avisos_desmarcar_enviado(p_evento_id bigint, p_tipo character varying) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+    BEGIN
+        DELETE FROM agenda_avisos_envios
+         WHERE evento_id = p_evento_id AND tipo = p_tipo;
+        RETURN FOUND;
+    END;
+    $$;
+
+
+--
 -- Name: sp_agenda_avisos_marcar_enviado(bigint, character varying); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -326,28 +341,29 @@ CREATE FUNCTION public.sp_agenda_avisos_marcar_enviado(p_evento_id bigint, p_tip
 CREATE FUNCTION public.sp_agenda_avisos_pendientes_dia_antes(p_fecha_ref timestamp without time zone) RETURNS TABLE(evento_id bigint, empresa_id bigint, titulo character varying, ubicacion character varying, fecha_inicio timestamp without time zone, cliente_nombre character varying, cliente_correo character varying, mensaje_custom text)
     LANGUAGE plpgsql
     AS $$
-            BEGIN
-                RETURN QUERY
-                SELECT
-                    e.id, e.empresa_id, e.titulo,
-                    (SELECT l.ubicacion FROM agenda_evento_lineas l WHERE l.evento_id = e.id ORDER BY l.orden, l.id LIMIT 1),
-                    e.fecha_inicio,
-                    cl.name, cl.email,
-                    cfg.aviso_dia_antes_mensaje
-                FROM agenda_eventos e
-                JOIN clients cl ON cl.id = e.cliente_id
-                LEFT JOIN agenda_avisos_config cfg ON cfg.empresa_id = e.empresa_id
-                WHERE e.deleted_at IS NULL
-                  AND e.estado NOT IN ('cancelado','completado')
-                  AND cl.email IS NOT NULL AND cl.email <> ''
-                  AND COALESCE(cfg.aviso_dia_antes_activo, true) = true
-                  AND e.fecha_inicio BETWEEN (p_fecha_ref + INTERVAL '24 hours') AND (p_fecha_ref + INTERVAL '25 hours')
-                  AND NOT EXISTS (
-                      SELECT 1 FROM agenda_avisos_envios v
-                      WHERE v.evento_id = e.id AND v.tipo = 'dia_antes'
-                  );
-            END;
-            $$;
+    BEGIN
+        RETURN QUERY
+        SELECT
+            e.id, e.empresa_id, e.titulo,
+            (SELECT l.ubicacion FROM agenda_evento_lineas l WHERE l.evento_id = e.id ORDER BY l.orden, l.id LIMIT 1),
+            e.fecha_inicio,
+            cl.name, cl.email,
+            cfg.aviso_dia_antes_mensaje
+        FROM agenda_eventos e
+        JOIN clients cl ON cl.id = e.cliente_id
+        LEFT JOIN agenda_avisos_config cfg ON cfg.empresa_id = e.empresa_id
+        WHERE e.deleted_at IS NULL
+          AND e.estado NOT IN ('cancelado','completado')
+          AND cl.email IS NOT NULL AND cl.email <> ''
+          AND COALESCE(cfg.aviso_dia_antes_activo, true) = true
+          AND e.fecha_inicio >= (p_fecha_ref + INTERVAL '22 hours')
+          AND e.fecha_inicio <  (p_fecha_ref + INTERVAL '25 hours')
+          AND NOT EXISTS (
+              SELECT 1 FROM agenda_avisos_envios v
+              WHERE v.evento_id = e.id AND v.tipo = 'dia_antes'
+          );
+    END;
+    $$;
 
 
 --
@@ -357,30 +373,31 @@ CREATE FUNCTION public.sp_agenda_avisos_pendientes_dia_antes(p_fecha_ref timesta
 CREATE FUNCTION public.sp_agenda_avisos_pendientes_discrecional(p_fecha_ref timestamp without time zone) RETURNS TABLE(evento_id bigint, empresa_id bigint, titulo character varying, ubicacion character varying, fecha_inicio timestamp without time zone, cliente_nombre character varying, cliente_correo character varying, mensaje_custom text)
     LANGUAGE plpgsql
     AS $$
-            BEGIN
-                RETURN QUERY
-                SELECT
-                    e.id, e.empresa_id, e.titulo,
-                    (SELECT l.ubicacion FROM agenda_evento_lineas l WHERE l.evento_id = e.id ORDER BY l.orden, l.id LIMIT 1),
-                    e.fecha_inicio,
-                    cl.name, cl.email,
-                    cfg.aviso_discrecional_mensaje
-                FROM agenda_eventos e
-                JOIN clients cl ON cl.id = e.cliente_id
-                JOIN agenda_avisos_config cfg ON cfg.empresa_id = e.empresa_id
-                WHERE e.deleted_at IS NULL
-                  AND e.estado NOT IN ('cancelado','completado')
-                  AND cl.email IS NOT NULL AND cl.email <> ''
-                  AND cfg.aviso_discrecional_activo = true
-                  AND e.fecha_inicio BETWEEN
-                        (p_fecha_ref + (cfg.aviso_discrecional_dias || ' days')::INTERVAL)
-                        AND (p_fecha_ref + (cfg.aviso_discrecional_dias || ' days')::INTERVAL + INTERVAL '1 hour')
-                  AND NOT EXISTS (
-                      SELECT 1 FROM agenda_avisos_envios v
-                      WHERE v.evento_id = e.id AND v.tipo = 'discrecional'
-                  );
-            END;
-            $$;
+    BEGIN
+        RETURN QUERY
+        SELECT
+            e.id, e.empresa_id, e.titulo,
+            (SELECT l.ubicacion FROM agenda_evento_lineas l WHERE l.evento_id = e.id ORDER BY l.orden, l.id LIMIT 1),
+            e.fecha_inicio,
+            cl.name, cl.email,
+            cfg.aviso_discrecional_mensaje
+        FROM agenda_eventos e
+        JOIN clients cl ON cl.id = e.cliente_id
+        JOIN agenda_avisos_config cfg ON cfg.empresa_id = e.empresa_id
+        WHERE e.deleted_at IS NULL
+          AND e.estado NOT IN ('cancelado','completado')
+          AND cl.email IS NOT NULL AND cl.email <> ''
+          AND cfg.aviso_discrecional_activo = true
+          AND e.fecha_inicio >=
+                (p_fecha_ref + (cfg.aviso_discrecional_dias || ' days')::INTERVAL - INTERVAL '2 hours')
+          AND e.fecha_inicio <
+                (p_fecha_ref + (cfg.aviso_discrecional_dias || ' days')::INTERVAL + INTERVAL '1 hour')
+          AND NOT EXISTS (
+              SELECT 1 FROM agenda_avisos_envios v
+              WHERE v.evento_id = e.id AND v.tipo = 'discrecional'
+          );
+    END;
+    $$;
 
 
 --
@@ -1623,7 +1640,7 @@ BEGIN
             NULL::VARCHAR,
             e.estado::VARCHAR,
             e.titulo::VARCHAR,
-            NULL::TEXT,
+            ('Creada el ' || to_char(e.created_at, 'DD/MM/YYYY HH24:MI'))::TEXT,
             NULL::NUMERIC,
             NULL::VARCHAR,
             NULL::VARCHAR
@@ -12241,5 +12258,5 @@ ALTER TABLE ONLY public.sucursal_bodegas
 -- PostgreSQL database dump complete
 --
 
-\unrestrict TxPzQaabrCvtg007vHJDqc7QIu4yhazEoFK2NgY98isdqsuZ89z3XXIwzkkgKzv
+\unrestrict 2G1AojQ8YwrhdNdDdwsMu2DfLTl8XqAnriD3qF4ZYChoOgSMUlQsrnfv009OdwE
 
