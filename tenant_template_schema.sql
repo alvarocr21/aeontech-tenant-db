@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict g5jSdl3luqaZDR3Fjln0Pt1oXWai2We1UjoFhlPMnCFzexJM0VOQdKvxlORUUGb
+\restrict EeFQdkyWdWAagRcXYcFX9U4CnNauRaUa32eqdKIFQUuknG9r6QSRwUcjVsSLpyi
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
@@ -8252,84 +8252,6 @@ ALTER SEQUENCE public.cliente_exoneraciones_id_seq OWNED BY public.cliente_exone
 
 
 --
--- Name: clientes; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.clientes (
-    id bigint NOT NULL,
-    empresa_id bigint NOT NULL,
-    name character varying(255) NOT NULL,
-    legal_name character varying(255),
-    tax_id character varying(50),
-    email character varying(255),
-    phone character varying(50),
-    address text,
-    birth_date date,
-    notes text,
-    is_active boolean DEFAULT true NOT NULL,
-    deleted_at timestamp without time zone,
-    created_at timestamp without time zone DEFAULT now() NOT NULL,
-    updated_at timestamp without time zone DEFAULT now() NOT NULL
-);
-
-
---
--- Name: clientes_auditoria; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.clientes_auditoria (
-    id bigint NOT NULL,
-    tabla character varying(50) DEFAULT 'clientes'::character varying NOT NULL,
-    operacion character varying(10) NOT NULL,
-    registro_id bigint NOT NULL,
-    datos_antes jsonb,
-    datos_despues jsonb,
-    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
-    app_user_id bigint,
-    ip_address character varying(45),
-    created_at timestamp without time zone DEFAULT now() NOT NULL
-);
-
-
---
--- Name: clientes_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
-CREATE SEQUENCE public.clientes_auditoria_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-
---
--- Name: clientes_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
-ALTER SEQUENCE public.clientes_auditoria_id_seq OWNED BY public.clientes_auditoria.id;
-
-
---
--- Name: clientes_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
-CREATE SEQUENCE public.clientes_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-
---
--- Name: clientes_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
-ALTER SEQUENCE public.clientes_id_seq OWNED BY public.clientes.id;
-
-
---
 -- Name: clients; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -11345,20 +11267,6 @@ ALTER TABLE ONLY public.cliente_exoneraciones_auditoria ALTER COLUMN id SET DEFA
 
 
 --
--- Name: clientes id; Type: DEFAULT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.clientes ALTER COLUMN id SET DEFAULT nextval('public.clientes_id_seq'::regclass);
-
-
---
--- Name: clientes_auditoria id; Type: DEFAULT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.clientes_auditoria ALTER COLUMN id SET DEFAULT nextval('public.clientes_auditoria_id_seq'::regclass);
-
-
---
 -- Name: clients id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -12030,22 +11938,6 @@ ALTER TABLE ONLY public.cliente_exoneraciones
 
 ALTER TABLE ONLY public.cliente_exoneraciones
     ADD CONSTRAINT cliente_exoneraciones_pkey PRIMARY KEY (id);
-
-
---
--- Name: clientes_auditoria clientes_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.clientes_auditoria
-    ADD CONSTRAINT clientes_auditoria_pkey PRIMARY KEY (id);
-
-
---
--- Name: clientes clientes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.clientes
-    ADD CONSTRAINT clientes_pkey PRIMARY KEY (id);
 
 
 --
@@ -13405,13 +13297,6 @@ CREATE TRIGGER trg_cliente_exoneraciones_auditoria AFTER INSERT OR DELETE OR UPD
 
 
 --
--- Name: clientes trg_clientes_auditoria; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER trg_clientes_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.clientes FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
-
-
---
 -- Name: clients trg_clients_auditoria; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -13852,5 +13737,5 @@ ALTER TABLE ONLY public.sucursal_bodegas
 -- PostgreSQL database dump complete
 --
 
-\unrestrict g5jSdl3luqaZDR3Fjln0Pt1oXWai2We1UjoFhlPMnCFzexJM0VOQdKvxlORUUGb
+\unrestrict EeFQdkyWdWAagRcXYcFX9U4CnNauRaUa32eqdKIFQUuknG9r6QSRwUcjVsSLpyi
 
