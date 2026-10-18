@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 6Tu5SCLa5sWoaOFUVkwHZQZkW5ABfFdqAp0lq3heWIsdPEUBLTdsv96Zj1hdsdW
+\restrict XQtUcRC5Lq8RKQg3hsJm9PvCVFyBXEDcoT3FBqSSgbadqqAARB8jc5J1AHCNXHm
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
@@ -1619,7 +1619,7 @@ CREATE FUNCTION public.sp_client_create(p_empresa_id bigint, p_name character va
 -- Name: sp_client_find(bigint); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_client_find(p_id bigint) RETURNS TABLE(id bigint, name character varying, legal_name character varying, tax_id_type character varying, tax_id character varying, email character varying, phone character varying, address text, notes text, birth_date date, is_active boolean, actividad_economica_codigo character varying, actividad_economica_descripcion character varying, province_code character varying, canton_code character varying, district_code character varying, created_at timestamp without time zone, updated_at timestamp without time zone, dias_credito integer, limite_credito numeric, estado_credito character varying, saldo_pendiente numeric, porcentaje_descuento numeric)
+CREATE FUNCTION public.sp_client_find(p_id bigint) RETURNS TABLE(id bigint, name character varying, legal_name character varying, tax_id_type character varying, tax_id character varying, email character varying, phone character varying, address text, notes text, birth_date date, is_active boolean, actividad_economica_codigo character varying, actividad_economica_descripcion character varying, province_code character varying, canton_code character varying, district_code character varying, created_at timestamp without time zone, updated_at timestamp without time zone, dias_credito integer, limite_credito numeric, estado_credito character varying, saldo_pendiente numeric, porcentaje_descuento numeric, saldos_moneda jsonb)
     LANGUAGE sql STABLE
     AS $$
                 SELECT c.id, c.name, c.legal_name, c.tax_id_type, c.tax_id, c.email, c.phone, c.address, c.notes,
@@ -1629,8 +1629,17 @@ CREATE FUNCTION public.sp_client_find(p_id bigint) RETURNS TABLE(id bigint, name
                        c.dias_credito, c.limite_credito, c.estado_credito,
                        COALESCE((SELECT SUM(cxc.saldo_pendiente) FROM cuentas_por_cobrar cxc
                                  WHERE cxc.cliente_id = c.id AND cxc.estado IN ('vigente','mora')), 0) AS saldo_pendiente,
-                       c.porcentaje_descuento
-                FROM   clients c WHERE c.id = p_id AND c.deleted_at IS NULL LIMIT 1;
+                       c.porcentaje_descuento,
+                       COALESCE((
+                           SELECT jsonb_object_agg(m.moneda, m.saldo)
+                             FROM (SELECT COALESCE(d.moneda, 'CRC') AS moneda, SUM(cxc.saldo_pendiente) AS saldo
+                                     FROM cuentas_por_cobrar cxc
+                                     JOIN documentos_electronicos d ON d.id = cxc.documento_id
+                                    WHERE cxc.cliente_id = c.id AND cxc.estado IN ('vigente','mora')
+                                    GROUP BY COALESCE(d.moneda, 'CRC')
+                                   HAVING SUM(cxc.saldo_pendiente) <> 0) m
+                       ), '{}'::jsonb) AS saldos_moneda
+                FROM clients c WHERE c.id = p_id AND c.deleted_at IS NULL LIMIT 1;
             $$;
 
 
@@ -1655,7 +1664,7 @@ CREATE FUNCTION public.sp_client_find_by_central_id(p_central_client_id bigint) 
 -- Name: sp_client_find_by_tax_id(character varying); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_client_find_by_tax_id(p_tax_id character varying) RETURNS TABLE(id bigint, name character varying, legal_name character varying, tax_id_type character varying, tax_id character varying, email character varying, phone character varying, address text, notes text, birth_date date, is_active boolean, actividad_economica_codigo character varying, actividad_economica_descripcion character varying, province_code character varying, canton_code character varying, district_code character varying, created_at timestamp without time zone, updated_at timestamp without time zone, dias_credito integer, limite_credito numeric, estado_credito character varying, saldo_pendiente numeric, porcentaje_descuento numeric)
+CREATE FUNCTION public.sp_client_find_by_tax_id(p_tax_id character varying) RETURNS TABLE(id bigint, name character varying, legal_name character varying, tax_id_type character varying, tax_id character varying, email character varying, phone character varying, address text, notes text, birth_date date, is_active boolean, actividad_economica_codigo character varying, actividad_economica_descripcion character varying, province_code character varying, canton_code character varying, district_code character varying, created_at timestamp without time zone, updated_at timestamp without time zone, dias_credito integer, limite_credito numeric, estado_credito character varying, saldo_pendiente numeric, porcentaje_descuento numeric, saldos_moneda jsonb)
     LANGUAGE sql STABLE
     AS $$
                 SELECT c.id, c.name, c.legal_name, c.tax_id_type, c.tax_id, c.email, c.phone, c.address, c.notes,
@@ -1665,8 +1674,17 @@ CREATE FUNCTION public.sp_client_find_by_tax_id(p_tax_id character varying) RETU
                        c.dias_credito, c.limite_credito, c.estado_credito,
                        COALESCE((SELECT SUM(cxc.saldo_pendiente) FROM cuentas_por_cobrar cxc
                                  WHERE cxc.cliente_id = c.id AND cxc.estado IN ('vigente','mora')), 0) AS saldo_pendiente,
-                       c.porcentaje_descuento
-                FROM   clients c WHERE c.tax_id = p_tax_id AND c.deleted_at IS NULL LIMIT 1;
+                       c.porcentaje_descuento,
+                       COALESCE((
+                           SELECT jsonb_object_agg(m.moneda, m.saldo)
+                             FROM (SELECT COALESCE(d.moneda, 'CRC') AS moneda, SUM(cxc.saldo_pendiente) AS saldo
+                                     FROM cuentas_por_cobrar cxc
+                                     JOIN documentos_electronicos d ON d.id = cxc.documento_id
+                                    WHERE cxc.cliente_id = c.id AND cxc.estado IN ('vigente','mora')
+                                    GROUP BY COALESCE(d.moneda, 'CRC')
+                                   HAVING SUM(cxc.saldo_pendiente) <> 0) m
+                       ), '{}'::jsonb) AS saldos_moneda
+                FROM clients c WHERE c.tax_id = p_tax_id AND c.deleted_at IS NULL LIMIT 1;
             $$;
 
 
@@ -1674,7 +1692,7 @@ CREATE FUNCTION public.sp_client_find_by_tax_id(p_tax_id character varying) RETU
 -- Name: sp_client_list(bigint); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_client_list(p_empresa_id bigint) RETURNS TABLE(id bigint, name character varying, legal_name character varying, tax_id_type character varying, tax_id character varying, email character varying, phone character varying, address text, notes text, birth_date date, is_active boolean, actividad_economica_codigo character varying, actividad_economica_descripcion character varying, province_code character varying, canton_code character varying, district_code character varying, created_at timestamp without time zone, updated_at timestamp without time zone, dias_credito integer, limite_credito numeric, estado_credito character varying, saldo_pendiente numeric, porcentaje_descuento numeric)
+CREATE FUNCTION public.sp_client_list(p_empresa_id bigint) RETURNS TABLE(id bigint, name character varying, legal_name character varying, tax_id_type character varying, tax_id character varying, email character varying, phone character varying, address text, notes text, birth_date date, is_active boolean, actividad_economica_codigo character varying, actividad_economica_descripcion character varying, province_code character varying, canton_code character varying, district_code character varying, created_at timestamp without time zone, updated_at timestamp without time zone, dias_credito integer, limite_credito numeric, estado_credito character varying, saldo_pendiente numeric, porcentaje_descuento numeric, saldos_moneda jsonb)
     LANGUAGE sql STABLE
     AS $$
                 SELECT c.id, c.name, c.legal_name, c.tax_id_type, c.tax_id, c.email, c.phone, c.address, c.notes,
@@ -1684,8 +1702,17 @@ CREATE FUNCTION public.sp_client_list(p_empresa_id bigint) RETURNS TABLE(id bigi
                        c.dias_credito, c.limite_credito, c.estado_credito,
                        COALESCE((SELECT SUM(cxc.saldo_pendiente) FROM cuentas_por_cobrar cxc
                                  WHERE cxc.cliente_id = c.id AND cxc.estado IN ('vigente','mora')), 0) AS saldo_pendiente,
-                       c.porcentaje_descuento
-                FROM   clients c WHERE c.deleted_at IS NULL ORDER BY c.name;
+                       c.porcentaje_descuento,
+                       COALESCE((
+                           SELECT jsonb_object_agg(m.moneda, m.saldo)
+                             FROM (SELECT COALESCE(d.moneda, 'CRC') AS moneda, SUM(cxc.saldo_pendiente) AS saldo
+                                     FROM cuentas_por_cobrar cxc
+                                     JOIN documentos_electronicos d ON d.id = cxc.documento_id
+                                    WHERE cxc.cliente_id = c.id AND cxc.estado IN ('vigente','mora')
+                                    GROUP BY COALESCE(d.moneda, 'CRC')
+                                   HAVING SUM(cxc.saldo_pendiente) <> 0) m
+                       ), '{}'::jsonb) AS saldos_moneda
+                FROM clients c WHERE c.deleted_at IS NULL ORDER BY c.name;
             $$;
 
 
@@ -1725,7 +1752,7 @@ CREATE FUNCTION public.sp_client_restore(p_id bigint) RETURNS boolean
 -- Name: sp_client_search(bigint, character varying); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_client_search(p_empresa_id bigint, p_query character varying) RETURNS TABLE(id bigint, name character varying, legal_name character varying, tax_id_type character varying, tax_id character varying, email character varying, phone character varying, address text, notes text, birth_date date, is_active boolean, actividad_economica_codigo character varying, actividad_economica_descripcion character varying, province_code character varying, canton_code character varying, district_code character varying, created_at timestamp without time zone, updated_at timestamp without time zone, dias_credito integer, limite_credito numeric, estado_credito character varying, saldo_pendiente numeric, porcentaje_descuento numeric)
+CREATE FUNCTION public.sp_client_search(p_empresa_id bigint, p_query character varying) RETURNS TABLE(id bigint, name character varying, legal_name character varying, tax_id_type character varying, tax_id character varying, email character varying, phone character varying, address text, notes text, birth_date date, is_active boolean, actividad_economica_codigo character varying, actividad_economica_descripcion character varying, province_code character varying, canton_code character varying, district_code character varying, created_at timestamp without time zone, updated_at timestamp without time zone, dias_credito integer, limite_credito numeric, estado_credito character varying, saldo_pendiente numeric, porcentaje_descuento numeric, saldos_moneda jsonb)
     LANGUAGE sql STABLE
     AS $$
                 SELECT c.id, c.name, c.legal_name, c.tax_id_type, c.tax_id, c.email, c.phone, c.address, c.notes,
@@ -1735,10 +1762,19 @@ CREATE FUNCTION public.sp_client_search(p_empresa_id bigint, p_query character v
                        c.dias_credito, c.limite_credito, c.estado_credito,
                        COALESCE((SELECT SUM(cxc.saldo_pendiente) FROM cuentas_por_cobrar cxc
                                  WHERE cxc.cliente_id = c.id AND cxc.estado IN ('vigente','mora')), 0) AS saldo_pendiente,
-                       c.porcentaje_descuento
-                FROM   clients c WHERE c.deleted_at IS NULL
-                  AND  (c.name ILIKE '%'||p_query||'%' OR c.tax_id ILIKE '%'||p_query||'%'
-                        OR c.legal_name ILIKE '%'||p_query||'%')
+                       c.porcentaje_descuento,
+                       COALESCE((
+                           SELECT jsonb_object_agg(m.moneda, m.saldo)
+                             FROM (SELECT COALESCE(d.moneda, 'CRC') AS moneda, SUM(cxc.saldo_pendiente) AS saldo
+                                     FROM cuentas_por_cobrar cxc
+                                     JOIN documentos_electronicos d ON d.id = cxc.documento_id
+                                    WHERE cxc.cliente_id = c.id AND cxc.estado IN ('vigente','mora')
+                                    GROUP BY COALESCE(d.moneda, 'CRC')
+                                   HAVING SUM(cxc.saldo_pendiente) <> 0) m
+                       ), '{}'::jsonb) AS saldos_moneda
+                FROM clients c WHERE c.deleted_at IS NULL
+                  AND (c.name ILIKE '%'||p_query||'%' OR c.tax_id ILIKE '%'||p_query||'%'
+                       OR c.legal_name ILIKE '%'||p_query||'%')
                 ORDER BY c.name LIMIT 50;
             $$;
 
@@ -2068,7 +2104,7 @@ $$;
 -- Name: sp_cliente_resumen(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_cliente_resumen(p_cliente_id bigint, p_empresa_id bigint) RETURNS TABLE(total_citas bigint, citas_completadas bigint, citas_canceladas bigint, citas_pendientes bigint, total_facturas bigint, total_facturado numeric, total_notas_credito bigint, top_servicios json, top_productos json, top_funcionarios json)
+CREATE FUNCTION public.sp_cliente_resumen(p_cliente_id bigint, p_empresa_id bigint) RETURNS TABLE(total_citas bigint, citas_completadas bigint, citas_canceladas bigint, citas_pendientes bigint, total_facturas bigint, total_facturado numeric, total_facturado_moneda json, total_notas_credito bigint, top_servicios json, top_productos json, top_funcionarios json)
     LANGUAGE plpgsql
     AS $$
             BEGIN
@@ -2091,6 +2127,13 @@ CREATE FUNCTION public.sp_cliente_resumen(p_cliente_id bigint, p_empresa_id bigi
                     (SELECT COALESCE(SUM(d.total_comprobante), 0) FROM documentos_electronicos d
                        WHERE d.receptor_cliente_id = p_cliente_id AND d.empresa_id = p_empresa_id AND d.deleted_at IS NULL
                          AND d.tipo_documento = '01' AND d.estado = 'aceptado'),
+                    (SELECT COALESCE(json_object_agg(t.moneda, t.total), '{}'::json) FROM (
+                        SELECT COALESCE(d.moneda, 'CRC') AS moneda, SUM(d.total_comprobante) AS total
+                        FROM documentos_electronicos d
+                        WHERE d.receptor_cliente_id = p_cliente_id AND d.empresa_id = p_empresa_id AND d.deleted_at IS NULL
+                          AND d.tipo_documento = '01' AND d.estado = 'aceptado'
+                        GROUP BY COALESCE(d.moneda, 'CRC')
+                    ) t),
                     (SELECT COUNT(*) FROM documentos_electronicos d
                        WHERE d.receptor_cliente_id = p_cliente_id AND d.empresa_id = p_empresa_id AND d.deleted_at IS NULL
                          AND d.tipo_documento = '03' AND d.estado = 'aceptado'),
@@ -13738,5 +13781,5 @@ ALTER TABLE ONLY public.sucursal_bodegas
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 6Tu5SCLa5sWoaOFUVkwHZQZkW5ABfFdqAp0lq3heWIsdPEUBLTdsv96Zj1hdsdW
+\unrestrict XQtUcRC5Lq8RKQg3hsJm9PvCVFyBXEDcoT3FBqSSgbadqqAARB8jc5J1AHCNXHm
 
