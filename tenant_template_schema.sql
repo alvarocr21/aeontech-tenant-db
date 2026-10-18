@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict EeFQdkyWdWAagRcXYcFX9U4CnNauRaUa32eqdKIFQUuknG9r6QSRwUcjVsSLpyi
+\restrict 6Tu5SCLa5sWoaOFUVkwHZQZkW5ABfFdqAp0lq3heWIsdPEUBLTdsv96Zj1hdsdW
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
@@ -113,16 +113,17 @@ DECLARE
     v_datos_antes JSONB := NULL;
     v_datos_despues JSONB := NULL;
     v_tabla_auditoria TEXT;
+    v_excluidas TEXT[] := COALESCE(TG_ARGV, ARRAY[]::TEXT[]);
 BEGIN
     v_tabla_auditoria := TG_TABLE_NAME || '_auditoria';
 
     IF TG_OP = 'DELETE' THEN
-        v_datos_antes := to_jsonb(OLD) - TG_ARGV;
+        v_datos_antes := to_jsonb(OLD) - v_excluidas;
     ELSIF TG_OP = 'UPDATE' THEN
-        v_datos_antes   := to_jsonb(OLD) - TG_ARGV;
-        v_datos_despues := to_jsonb(NEW) - TG_ARGV;
+        v_datos_antes   := to_jsonb(OLD) - v_excluidas;
+        v_datos_despues := to_jsonb(NEW) - v_excluidas;
     ELSE
-        v_datos_despues := to_jsonb(NEW) - TG_ARGV;
+        v_datos_despues := to_jsonb(NEW) - v_excluidas;
     END IF;
 
     EXECUTE format(
@@ -13737,5 +13738,5 @@ ALTER TABLE ONLY public.sucursal_bodegas
 -- PostgreSQL database dump complete
 --
 
-\unrestrict EeFQdkyWdWAagRcXYcFX9U4CnNauRaUa32eqdKIFQUuknG9r6QSRwUcjVsSLpyi
+\unrestrict 6Tu5SCLa5sWoaOFUVkwHZQZkW5ABfFdqAp0lq3heWIsdPEUBLTdsv96Zj1hdsdW
 
