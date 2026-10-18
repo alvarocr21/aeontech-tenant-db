@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict gsnIMuuWTMsonyhQtEDjQwsP0TR45Qd1FojnbgTlPQBrKrvB4Ma7e3n55DkuwxA
+\restrict g5jSdl3luqaZDR3Fjln0Pt1oXWai2We1UjoFhlPMnCFzexJM0VOQdKvxlORUUGb
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
@@ -109,36 +109,36 @@ CREATE FUNCTION public.fn_auditoria_generica() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public', 'pg_temp'
     AS $_$
-            DECLARE
-                v_datos_antes JSONB := NULL;
-                v_datos_despues JSONB := NULL;
-                v_tabla_auditoria TEXT;
-            BEGIN
-                v_tabla_auditoria := TG_TABLE_NAME || '_auditoria';
+DECLARE
+    v_datos_antes JSONB := NULL;
+    v_datos_despues JSONB := NULL;
+    v_tabla_auditoria TEXT;
+BEGIN
+    v_tabla_auditoria := TG_TABLE_NAME || '_auditoria';
 
-                IF TG_OP = 'DELETE' THEN
-                    v_datos_antes := to_jsonb(OLD);
-                ELSIF TG_OP = 'UPDATE' THEN
-                    v_datos_antes   := to_jsonb(OLD);
-                    v_datos_despues := to_jsonb(NEW);
-                ELSE
-                    v_datos_despues := to_jsonb(NEW);
-                END IF;
+    IF TG_OP = 'DELETE' THEN
+        v_datos_antes := to_jsonb(OLD) - TG_ARGV;
+    ELSIF TG_OP = 'UPDATE' THEN
+        v_datos_antes   := to_jsonb(OLD) - TG_ARGV;
+        v_datos_despues := to_jsonb(NEW) - TG_ARGV;
+    ELSE
+        v_datos_despues := to_jsonb(NEW) - TG_ARGV;
+    END IF;
 
-                EXECUTE format(
-                    'INSERT INTO %I (operacion, registro_id, datos_antes, datos_despues, app_user_id, ip_address)
-                     VALUES ($1, $2, $3, $4,
-                             NULLIF(current_setting(''app.current_user_id'', true), '''')::BIGINT,
-                             NULLIF(current_setting(''app.current_ip'', true), ''''))',
-                    v_tabla_auditoria
-                ) USING TG_OP,
-                    CASE TG_OP WHEN 'DELETE' THEN OLD.id ELSE NEW.id END,
-                    v_datos_antes,
-                    v_datos_despues;
+    EXECUTE format(
+        'INSERT INTO %I (operacion, registro_id, datos_antes, datos_despues, app_user_id, ip_address)
+         VALUES ($1, $2, $3, $4,
+                 NULLIF(current_setting(''app.current_user_id'', true), '''')::BIGINT,
+                 NULLIF(current_setting(''app.current_ip'', true), ''''))',
+        v_tabla_auditoria
+    ) USING TG_OP,
+        CASE TG_OP WHEN 'DELETE' THEN OLD.id ELSE NEW.id END,
+        v_datos_antes,
+        v_datos_despues;
 
-                RETURN CASE TG_OP WHEN 'DELETE' THEN OLD ELSE NEW END;
-            END;
-            $_$;
+    RETURN CASE TG_OP WHEN 'DELETE' THEN OLD ELSE NEW END;
+END;
+$_$;
 
 
 --
@@ -7631,6 +7631,43 @@ CREATE TABLE public.agenda_evento_lineas (
 
 
 --
+-- Name: agenda_evento_lineas_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.agenda_evento_lineas_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'agenda_evento_lineas'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: agenda_evento_lineas_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.agenda_evento_lineas_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: agenda_evento_lineas_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.agenda_evento_lineas_auditoria_id_seq OWNED BY public.agenda_evento_lineas_auditoria.id;
+
+
+--
 -- Name: agenda_evento_lineas_id_seq; Type: SEQUENCE; Schema: public; Owner: -
 --
 
@@ -8007,6 +8044,43 @@ COMMENT ON COLUMN public.caja_cierres.egresos IS 'Gastos/retiros de efectivo dur
 --
 
 COMMENT ON COLUMN public.caja_cierres.totales_moneda IS 'Conciliación completa por moneda: {"CRC": {total_sistema, total_declarado, diferencia, total_efectivo_fisico, total_egresos, total_general_ingresado, total_ventas_netas_fisicas}, "USD": {...}}';
+
+
+--
+-- Name: caja_cierres_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.caja_cierres_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'caja_cierres'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: caja_cierres_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.caja_cierres_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: caja_cierres_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.caja_cierres_auditoria_id_seq OWNED BY public.caja_cierres_auditoria.id;
 
 
 --
@@ -8695,6 +8769,43 @@ CREATE TABLE public.cuentas_por_cobrar (
 
 
 --
+-- Name: cuentas_por_cobrar_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cuentas_por_cobrar_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'cuentas_por_cobrar'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: cuentas_por_cobrar_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.cuentas_por_cobrar_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: cuentas_por_cobrar_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.cuentas_por_cobrar_auditoria_id_seq OWNED BY public.cuentas_por_cobrar_auditoria.id;
+
+
+--
 -- Name: db_version; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -8784,6 +8895,43 @@ CREATE TABLE public.documento_cxc_aplicaciones (
     monto_aplicado numeric(18,5) NOT NULL,
     created_at timestamp without time zone DEFAULT now() NOT NULL
 );
+
+
+--
+-- Name: documento_cxc_aplicaciones_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.documento_cxc_aplicaciones_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'documento_cxc_aplicaciones'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: documento_cxc_aplicaciones_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.documento_cxc_aplicaciones_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: documento_cxc_aplicaciones_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.documento_cxc_aplicaciones_auditoria_id_seq OWNED BY public.documento_cxc_aplicaciones_auditoria.id;
 
 
 --
@@ -9206,6 +9354,43 @@ ALTER SEQUENCE public.empresa_condicion_ventas_id_seq OWNED BY public.empresa_co
 
 
 --
+-- Name: empresa_hacienda_config_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.empresa_hacienda_config_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'empresa_hacienda_config'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: empresa_hacienda_config_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.empresa_hacienda_config_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: empresa_hacienda_config_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.empresa_hacienda_config_auditoria_id_seq OWNED BY public.empresa_hacienda_config_auditoria.id;
+
+
+--
 -- Name: empresa_hacienda_config_bitacora; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -9279,6 +9464,43 @@ CREATE TABLE public.empresa_medios_pago (
 
 
 --
+-- Name: empresa_medios_pago_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.empresa_medios_pago_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'empresa_medios_pago'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: empresa_medios_pago_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.empresa_medios_pago_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: empresa_medios_pago_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.empresa_medios_pago_auditoria_id_seq OWNED BY public.empresa_medios_pago_auditoria.id;
+
+
+--
 -- Name: empresa_medios_pago_id_seq; Type: SEQUENCE; Schema: public; Owner: -
 --
 
@@ -9313,6 +9535,43 @@ CREATE TABLE public.empresa_monedas (
     updated_at timestamp without time zone DEFAULT now() NOT NULL,
     simbolo character varying(10) DEFAULT ''::character varying NOT NULL
 );
+
+
+--
+-- Name: empresa_monedas_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.empresa_monedas_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'empresa_monedas'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: empresa_monedas_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.empresa_monedas_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: empresa_monedas_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.empresa_monedas_auditoria_id_seq OWNED BY public.empresa_monedas_auditoria.id;
 
 
 --
@@ -9352,6 +9611,43 @@ CREATE TABLE public.empresa_perfil_fiscal (
 
 
 --
+-- Name: empresa_perfil_fiscal_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.empresa_perfil_fiscal_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'empresa_perfil_fiscal'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: empresa_perfil_fiscal_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.empresa_perfil_fiscal_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: empresa_perfil_fiscal_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.empresa_perfil_fiscal_auditoria_id_seq OWNED BY public.empresa_perfil_fiscal_auditoria.id;
+
+
+--
 -- Name: empresa_perfil_fiscal_id_seq; Type: SEQUENCE; Schema: public; Owner: -
 --
 
@@ -9386,6 +9682,43 @@ CREATE TABLE public.empresa_tarifas_impuesto (
     created_at timestamp without time zone DEFAULT now() NOT NULL,
     updated_at timestamp without time zone DEFAULT now() NOT NULL
 );
+
+
+--
+-- Name: empresa_tarifas_impuesto_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.empresa_tarifas_impuesto_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'empresa_tarifas_impuesto'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: empresa_tarifas_impuesto_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.empresa_tarifas_impuesto_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: empresa_tarifas_impuesto_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.empresa_tarifas_impuesto_auditoria_id_seq OWNED BY public.empresa_tarifas_impuesto_auditoria.id;
 
 
 --
@@ -9461,6 +9794,43 @@ CREATE TABLE public.empresa_tipos_descuento (
 
 
 --
+-- Name: empresa_tipos_descuento_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.empresa_tipos_descuento_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'empresa_tipos_descuento'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: empresa_tipos_descuento_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.empresa_tipos_descuento_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: empresa_tipos_descuento_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.empresa_tipos_descuento_auditoria_id_seq OWNED BY public.empresa_tipos_descuento_auditoria.id;
+
+
+--
 -- Name: empresa_tipos_descuento_id_seq; Type: SEQUENCE; Schema: public; Owner: -
 --
 
@@ -9497,6 +9867,43 @@ CREATE TABLE public.empresa_tipos_impuesto (
 
 
 --
+-- Name: empresa_tipos_impuesto_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.empresa_tipos_impuesto_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'empresa_tipos_impuesto'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: empresa_tipos_impuesto_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.empresa_tipos_impuesto_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: empresa_tipos_impuesto_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.empresa_tipos_impuesto_auditoria_id_seq OWNED BY public.empresa_tipos_impuesto_auditoria.id;
+
+
+--
 -- Name: empresa_tipos_impuesto_id_seq; Type: SEQUENCE; Schema: public; Owner: -
 --
 
@@ -9513,6 +9920,43 @@ CREATE SEQUENCE public.empresa_tipos_impuesto_id_seq
 --
 
 ALTER SEQUENCE public.empresa_tipos_impuesto_id_seq OWNED BY public.empresa_tipos_impuesto.id;
+
+
+--
+-- Name: facturas_recibidas_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.facturas_recibidas_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'facturas_recibidas'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: facturas_recibidas_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.facturas_recibidas_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: facturas_recibidas_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.facturas_recibidas_auditoria_id_seq OWNED BY public.facturas_recibidas_auditoria.id;
 
 
 --
@@ -9545,6 +9989,43 @@ CREATE TABLE public.funcionario_sucursales (
     sucursal_name character varying(150),
     created_at timestamp without time zone DEFAULT now() NOT NULL
 );
+
+
+--
+-- Name: funcionario_sucursales_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.funcionario_sucursales_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'funcionario_sucursales'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: funcionario_sucursales_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.funcionario_sucursales_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: funcionario_sucursales_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.funcionario_sucursales_auditoria_id_seq OWNED BY public.funcionario_sucursales_auditoria.id;
 
 
 --
@@ -9708,6 +10189,43 @@ CREATE TABLE public.mercadeo_campanas (
 
 
 --
+-- Name: mercadeo_campanas_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.mercadeo_campanas_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'mercadeo_campanas'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: mercadeo_campanas_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.mercadeo_campanas_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: mercadeo_campanas_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.mercadeo_campanas_auditoria_id_seq OWNED BY public.mercadeo_campanas_auditoria.id;
+
+
+--
 -- Name: mercadeo_campanas_id_seq; Type: SEQUENCE; Schema: public; Owner: -
 --
 
@@ -9747,6 +10265,43 @@ CREATE TABLE public.mercadeo_plantillas (
     CONSTRAINT chk_mercadeo_plantillas_canal CHECK (((canal)::text = ANY ((ARRAY['email'::character varying, 'whatsapp'::character varying])::text[]))),
     CONSTRAINT chk_mercadeo_plantillas_categoria CHECK (((categoria)::text = ANY ((ARRAY['promocion'::character varying, 'dia_especial'::character varying, 'cobro'::character varying])::text[])))
 );
+
+
+--
+-- Name: mercadeo_plantillas_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.mercadeo_plantillas_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'mercadeo_plantillas'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: mercadeo_plantillas_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.mercadeo_plantillas_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: mercadeo_plantillas_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.mercadeo_plantillas_auditoria_id_seq OWNED BY public.mercadeo_plantillas_auditoria.id;
 
 
 --
@@ -9964,6 +10519,43 @@ CREATE TABLE public.producto_proveedor_equivalencias (
     created_at timestamp without time zone DEFAULT now() NOT NULL,
     updated_at timestamp without time zone DEFAULT now() NOT NULL
 );
+
+
+--
+-- Name: producto_proveedor_equivalencias_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.producto_proveedor_equivalencias_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'producto_proveedor_equivalencias'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: producto_proveedor_equivalencias_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.producto_proveedor_equivalencias_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: producto_proveedor_equivalencias_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.producto_proveedor_equivalencias_auditoria_id_seq OWNED BY public.producto_proveedor_equivalencias_auditoria.id;
 
 
 --
@@ -10216,6 +10808,80 @@ CREATE TABLE public.recibos_adelanto_aplicaciones (
 
 
 --
+-- Name: recibos_adelanto_aplicaciones_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.recibos_adelanto_aplicaciones_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'recibos_adelanto_aplicaciones'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: recibos_adelanto_aplicaciones_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.recibos_adelanto_aplicaciones_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: recibos_adelanto_aplicaciones_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.recibos_adelanto_aplicaciones_auditoria_id_seq OWNED BY public.recibos_adelanto_aplicaciones_auditoria.id;
+
+
+--
+-- Name: recibos_adelanto_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.recibos_adelanto_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'recibos_adelanto'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: recibos_adelanto_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.recibos_adelanto_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: recibos_adelanto_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.recibos_adelanto_auditoria_id_seq OWNED BY public.recibos_adelanto_auditoria.id;
+
+
+--
 -- Name: schema_migrations; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -10430,6 +11096,43 @@ CREATE TABLE public.sucursal_bodegas (
 
 
 --
+-- Name: sucursal_bodegas_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.sucursal_bodegas_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'sucursal_bodegas'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: sucursal_bodegas_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.sucursal_bodegas_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: sucursal_bodegas_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.sucursal_bodegas_auditoria_id_seq OWNED BY public.sucursal_bodegas_auditoria.id;
+
+
+--
 -- Name: sucursal_horarios; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -10537,6 +11240,13 @@ ALTER TABLE ONLY public.agenda_evento_lineas ALTER COLUMN id SET DEFAULT nextval
 
 
 --
+-- Name: agenda_evento_lineas_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.agenda_evento_lineas_auditoria ALTER COLUMN id SET DEFAULT nextval('public.agenda_evento_lineas_auditoria_id_seq'::regclass);
+
+
+--
 -- Name: agenda_eventos id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -10597,6 +11307,13 @@ ALTER TABLE ONLY public.caja_cierre_medios_pago ALTER COLUMN id SET DEFAULT next
 --
 
 ALTER TABLE ONLY public.caja_cierres ALTER COLUMN id SET DEFAULT nextval('public.caja_cierres_id_seq'::regclass);
+
+
+--
+-- Name: caja_cierres_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.caja_cierres_auditoria ALTER COLUMN id SET DEFAULT nextval('public.caja_cierres_auditoria_id_seq'::regclass);
 
 
 --
@@ -10698,6 +11415,13 @@ ALTER TABLE ONLY public.cotizaciones_auditoria ALTER COLUMN id SET DEFAULT nextv
 
 
 --
+-- Name: cuentas_por_cobrar_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cuentas_por_cobrar_auditoria ALTER COLUMN id SET DEFAULT nextval('public.cuentas_por_cobrar_auditoria_id_seq'::regclass);
+
+
+--
 -- Name: db_version id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -10709,6 +11433,13 @@ ALTER TABLE ONLY public.db_version ALTER COLUMN id SET DEFAULT nextval('public.d
 --
 
 ALTER TABLE ONLY public.documento_consecutivos ALTER COLUMN id SET DEFAULT nextval('public.documento_consecutivos_id_seq'::regclass);
+
+
+--
+-- Name: documento_cxc_aplicaciones_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.documento_cxc_aplicaciones_auditoria ALTER COLUMN id SET DEFAULT nextval('public.documento_cxc_aplicaciones_auditoria_id_seq'::regclass);
 
 
 --
@@ -10796,6 +11527,13 @@ ALTER TABLE ONLY public.empresa_hacienda_config ALTER COLUMN id SET DEFAULT next
 
 
 --
+-- Name: empresa_hacienda_config_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.empresa_hacienda_config_auditoria ALTER COLUMN id SET DEFAULT nextval('public.empresa_hacienda_config_auditoria_id_seq'::regclass);
+
+
+--
 -- Name: empresa_hacienda_config_bitacora id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -10810,10 +11548,24 @@ ALTER TABLE ONLY public.empresa_medios_pago ALTER COLUMN id SET DEFAULT nextval(
 
 
 --
+-- Name: empresa_medios_pago_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.empresa_medios_pago_auditoria ALTER COLUMN id SET DEFAULT nextval('public.empresa_medios_pago_auditoria_id_seq'::regclass);
+
+
+--
 -- Name: empresa_monedas id; Type: DEFAULT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.empresa_monedas ALTER COLUMN id SET DEFAULT nextval('public.empresa_monedas_id_seq'::regclass);
+
+
+--
+-- Name: empresa_monedas_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.empresa_monedas_auditoria ALTER COLUMN id SET DEFAULT nextval('public.empresa_monedas_auditoria_id_seq'::regclass);
 
 
 --
@@ -10824,10 +11576,24 @@ ALTER TABLE ONLY public.empresa_perfil_fiscal ALTER COLUMN id SET DEFAULT nextva
 
 
 --
+-- Name: empresa_perfil_fiscal_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.empresa_perfil_fiscal_auditoria ALTER COLUMN id SET DEFAULT nextval('public.empresa_perfil_fiscal_auditoria_id_seq'::regclass);
+
+
+--
 -- Name: empresa_tarifas_impuesto id; Type: DEFAULT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.empresa_tarifas_impuesto ALTER COLUMN id SET DEFAULT nextval('public.empresa_tarifas_impuesto_id_seq'::regclass);
+
+
+--
+-- Name: empresa_tarifas_impuesto_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.empresa_tarifas_impuesto_auditoria ALTER COLUMN id SET DEFAULT nextval('public.empresa_tarifas_impuesto_auditoria_id_seq'::regclass);
 
 
 --
@@ -10845,10 +11611,24 @@ ALTER TABLE ONLY public.empresa_tipos_descuento ALTER COLUMN id SET DEFAULT next
 
 
 --
+-- Name: empresa_tipos_descuento_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.empresa_tipos_descuento_auditoria ALTER COLUMN id SET DEFAULT nextval('public.empresa_tipos_descuento_auditoria_id_seq'::regclass);
+
+
+--
 -- Name: empresa_tipos_impuesto id; Type: DEFAULT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.empresa_tipos_impuesto ALTER COLUMN id SET DEFAULT nextval('public.empresa_tipos_impuesto_id_seq'::regclass);
+
+
+--
+-- Name: empresa_tipos_impuesto_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.empresa_tipos_impuesto_auditoria ALTER COLUMN id SET DEFAULT nextval('public.empresa_tipos_impuesto_auditoria_id_seq'::regclass);
 
 
 --
@@ -10859,10 +11639,24 @@ ALTER TABLE ONLY public.facturas_recibidas ALTER COLUMN id SET DEFAULT nextval('
 
 
 --
+-- Name: facturas_recibidas_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.facturas_recibidas_auditoria ALTER COLUMN id SET DEFAULT nextval('public.facturas_recibidas_auditoria_id_seq'::regclass);
+
+
+--
 -- Name: funcionario_sucursales id; Type: DEFAULT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.funcionario_sucursales ALTER COLUMN id SET DEFAULT nextval('public.funcionario_sucursales_id_seq'::regclass);
+
+
+--
+-- Name: funcionario_sucursales_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.funcionario_sucursales_auditoria ALTER COLUMN id SET DEFAULT nextval('public.funcionario_sucursales_auditoria_id_seq'::regclass);
 
 
 --
@@ -10894,10 +11688,24 @@ ALTER TABLE ONLY public.mercadeo_campanas ALTER COLUMN id SET DEFAULT nextval('p
 
 
 --
+-- Name: mercadeo_campanas_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.mercadeo_campanas_auditoria ALTER COLUMN id SET DEFAULT nextval('public.mercadeo_campanas_auditoria_id_seq'::regclass);
+
+
+--
 -- Name: mercadeo_plantillas id; Type: DEFAULT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.mercadeo_plantillas ALTER COLUMN id SET DEFAULT nextval('public.mercadeo_plantillas_id_seq'::regclass);
+
+
+--
+-- Name: mercadeo_plantillas_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.mercadeo_plantillas_auditoria ALTER COLUMN id SET DEFAULT nextval('public.mercadeo_plantillas_auditoria_id_seq'::regclass);
 
 
 --
@@ -10936,6 +11744,13 @@ ALTER TABLE ONLY public.producto_proveedor_equivalencias ALTER COLUMN id SET DEF
 
 
 --
+-- Name: producto_proveedor_equivalencias_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.producto_proveedor_equivalencias_auditoria ALTER COLUMN id SET DEFAULT nextval('public.producto_proveedor_equivalencias_auditoria_id_seq'::regclass);
+
+
+--
 -- Name: productos id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -10961,6 +11776,20 @@ ALTER TABLE ONLY public.proveedores ALTER COLUMN id SET DEFAULT nextval('public.
 --
 
 ALTER TABLE ONLY public.proveedores_auditoria ALTER COLUMN id SET DEFAULT nextval('public.proveedores_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: recibos_adelanto_aplicaciones_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.recibos_adelanto_aplicaciones_auditoria ALTER COLUMN id SET DEFAULT nextval('public.recibos_adelanto_aplicaciones_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: recibos_adelanto_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.recibos_adelanto_auditoria ALTER COLUMN id SET DEFAULT nextval('public.recibos_adelanto_auditoria_id_seq'::regclass);
 
 
 --
@@ -10996,6 +11825,13 @@ ALTER TABLE ONLY public.sistema_parametros ALTER COLUMN id SET DEFAULT nextval('
 --
 
 ALTER TABLE ONLY public.sistema_parametros_auditoria ALTER COLUMN id SET DEFAULT nextval('public.sistema_parametros_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: sucursal_bodegas_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sucursal_bodegas_auditoria ALTER COLUMN id SET DEFAULT nextval('public.sucursal_bodegas_auditoria_id_seq'::regclass);
 
 
 --
@@ -11042,6 +11878,14 @@ ALTER TABLE ONLY public.agenda_avisos_tokens
 
 ALTER TABLE ONLY public.agenda_evento_linea_productos
     ADD CONSTRAINT agenda_evento_linea_productos_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: agenda_evento_lineas_auditoria agenda_evento_lineas_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.agenda_evento_lineas_auditoria
+    ADD CONSTRAINT agenda_evento_lineas_auditoria_pkey PRIMARY KEY (id);
 
 
 --
@@ -11130,6 +11974,14 @@ ALTER TABLE ONLY public.bodegas
 
 ALTER TABLE ONLY public.caja_cierre_medios_pago
     ADD CONSTRAINT caja_cierre_medios_pago_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: caja_cierres_auditoria caja_cierres_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.caja_cierres_auditoria
+    ADD CONSTRAINT caja_cierres_auditoria_pkey PRIMARY KEY (id);
 
 
 --
@@ -11277,6 +12129,14 @@ ALTER TABLE ONLY public.cotizaciones
 
 
 --
+-- Name: cuentas_por_cobrar_auditoria cuentas_por_cobrar_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cuentas_por_cobrar_auditoria
+    ADD CONSTRAINT cuentas_por_cobrar_auditoria_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: cuentas_por_cobrar cuentas_por_cobrar_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -11298,6 +12158,14 @@ ALTER TABLE ONLY public.db_version
 
 ALTER TABLE ONLY public.documento_consecutivos
     ADD CONSTRAINT documento_consecutivos_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: documento_cxc_aplicaciones_auditoria documento_cxc_aplicaciones_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.documento_cxc_aplicaciones_auditoria
+    ADD CONSTRAINT documento_cxc_aplicaciones_auditoria_pkey PRIMARY KEY (id);
 
 
 --
@@ -11397,6 +12265,14 @@ ALTER TABLE ONLY public.empresa_condicion_ventas
 
 
 --
+-- Name: empresa_hacienda_config_auditoria empresa_hacienda_config_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.empresa_hacienda_config_auditoria
+    ADD CONSTRAINT empresa_hacienda_config_auditoria_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: empresa_hacienda_config_bitacora empresa_hacienda_config_bitacora_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -11421,11 +12297,27 @@ ALTER TABLE ONLY public.empresa_hacienda_config
 
 
 --
+-- Name: empresa_medios_pago_auditoria empresa_medios_pago_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.empresa_medios_pago_auditoria
+    ADD CONSTRAINT empresa_medios_pago_auditoria_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: empresa_medios_pago empresa_medios_pago_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.empresa_medios_pago
     ADD CONSTRAINT empresa_medios_pago_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: empresa_monedas_auditoria empresa_monedas_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.empresa_monedas_auditoria
+    ADD CONSTRAINT empresa_monedas_auditoria_pkey PRIMARY KEY (id);
 
 
 --
@@ -11445,6 +12337,14 @@ ALTER TABLE ONLY public.empresa_monedas
 
 
 --
+-- Name: empresa_perfil_fiscal_auditoria empresa_perfil_fiscal_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.empresa_perfil_fiscal_auditoria
+    ADD CONSTRAINT empresa_perfil_fiscal_auditoria_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: empresa_perfil_fiscal empresa_perfil_fiscal_empresa_id_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -11458,6 +12358,14 @@ ALTER TABLE ONLY public.empresa_perfil_fiscal
 
 ALTER TABLE ONLY public.empresa_perfil_fiscal
     ADD CONSTRAINT empresa_perfil_fiscal_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: empresa_tarifas_impuesto_auditoria empresa_tarifas_impuesto_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.empresa_tarifas_impuesto_auditoria
+    ADD CONSTRAINT empresa_tarifas_impuesto_auditoria_pkey PRIMARY KEY (id);
 
 
 --
@@ -11477,11 +12385,27 @@ ALTER TABLE ONLY public.empresa_tipo_cambios
 
 
 --
+-- Name: empresa_tipos_descuento_auditoria empresa_tipos_descuento_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.empresa_tipos_descuento_auditoria
+    ADD CONSTRAINT empresa_tipos_descuento_auditoria_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: empresa_tipos_descuento empresa_tipos_descuento_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.empresa_tipos_descuento
     ADD CONSTRAINT empresa_tipos_descuento_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: empresa_tipos_impuesto_auditoria empresa_tipos_impuesto_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.empresa_tipos_impuesto_auditoria
+    ADD CONSTRAINT empresa_tipos_impuesto_auditoria_pkey PRIMARY KEY (id);
 
 
 --
@@ -11493,11 +12417,27 @@ ALTER TABLE ONLY public.empresa_tipos_impuesto
 
 
 --
+-- Name: facturas_recibidas_auditoria facturas_recibidas_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.facturas_recibidas_auditoria
+    ADD CONSTRAINT facturas_recibidas_auditoria_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: facturas_recibidas facturas_recibidas_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.facturas_recibidas
     ADD CONSTRAINT facturas_recibidas_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: funcionario_sucursales_auditoria funcionario_sucursales_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.funcionario_sucursales_auditoria
+    ADD CONSTRAINT funcionario_sucursales_auditoria_pkey PRIMARY KEY (id);
 
 
 --
@@ -11541,11 +12481,27 @@ ALTER TABLE ONLY public.mercadeo_campana_envios
 
 
 --
+-- Name: mercadeo_campanas_auditoria mercadeo_campanas_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.mercadeo_campanas_auditoria
+    ADD CONSTRAINT mercadeo_campanas_auditoria_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: mercadeo_campanas mercadeo_campanas_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.mercadeo_campanas
     ADD CONSTRAINT mercadeo_campanas_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: mercadeo_plantillas_auditoria mercadeo_plantillas_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.mercadeo_plantillas_auditoria
+    ADD CONSTRAINT mercadeo_plantillas_auditoria_pkey PRIMARY KEY (id);
 
 
 --
@@ -11597,6 +12553,14 @@ ALTER TABLE ONLY public.ordenes_pedido
 
 
 --
+-- Name: producto_proveedor_equivalencias_auditoria producto_proveedor_equivalencias_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.producto_proveedor_equivalencias_auditoria
+    ADD CONSTRAINT producto_proveedor_equivalencias_auditoria_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: producto_proveedor_equivalencias producto_proveedor_equivalencias_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -11645,11 +12609,27 @@ ALTER TABLE ONLY public.proveedores
 
 
 --
+-- Name: recibos_adelanto_aplicaciones_auditoria recibos_adelanto_aplicaciones_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.recibos_adelanto_aplicaciones_auditoria
+    ADD CONSTRAINT recibos_adelanto_aplicaciones_auditoria_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: recibos_adelanto_aplicaciones recibos_adelanto_aplicaciones_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.recibos_adelanto_aplicaciones
     ADD CONSTRAINT recibos_adelanto_aplicaciones_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: recibos_adelanto_auditoria recibos_adelanto_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.recibos_adelanto_auditoria
+    ADD CONSTRAINT recibos_adelanto_auditoria_pkey PRIMARY KEY (id);
 
 
 --
@@ -11714,6 +12694,14 @@ ALTER TABLE ONLY public.sistema_parametros
 
 ALTER TABLE ONLY public.sistema_parametros
     ADD CONSTRAINT sistema_parametros_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: sucursal_bodegas_auditoria sucursal_bodegas_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sucursal_bodegas_auditoria
+    ADD CONSTRAINT sucursal_bodegas_auditoria_pkey PRIMARY KEY (id);
 
 
 --
@@ -11899,6 +12887,13 @@ CREATE INDEX idx_agenda_evento_linea_productos_linea ON public.agenda_evento_lin
 
 
 --
+-- Name: idx_agenda_evento_lineas_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_agenda_evento_lineas_auditoria_registro ON public.agenda_evento_lineas_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
 -- Name: idx_agenda_evento_lineas_documento; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -11983,6 +12978,13 @@ CREATE INDEX idx_caja_cierre_medios ON public.caja_cierre_medios_pago USING btre
 
 
 --
+-- Name: idx_caja_cierres_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_caja_cierres_auditoria_registro ON public.caja_cierres_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
 -- Name: idx_caja_cierres_empresa; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -12008,6 +13010,13 @@ CREATE INDEX idx_cotizaciones_fecha ON public.cotizaciones USING btree (empresa_
 --
 
 CREATE INDEX idx_cotizaciones_receptor_aprobado ON public.cotizaciones USING btree (receptor_cliente_id, aprobado_at DESC, id DESC) WHERE ((deleted_at IS NULL) AND (aprobado_at IS NOT NULL));
+
+
+--
+-- Name: idx_cuentas_por_cobrar_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cuentas_por_cobrar_auditoria_registro ON public.cuentas_por_cobrar_auditoria USING btree (registro_id, created_at DESC);
 
 
 --
@@ -12053,6 +13062,13 @@ CREATE INDEX idx_docs_receptor_fecha ON public.documentos_electronicos USING btr
 
 
 --
+-- Name: idx_documento_cxc_aplicaciones_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_documento_cxc_aplicaciones_auditoria_registro ON public.documento_cxc_aplicaciones_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
 -- Name: idx_documentos_clave; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -12078,6 +13094,62 @@ CREATE INDEX idx_documentos_fecha ON public.documentos_electronicos USING btree 
 --
 
 CREATE INDEX idx_emp_medios_pago_empresa ON public.empresa_medios_pago USING btree (empresa_id) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_empresa_hacienda_config_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_empresa_hacienda_config_auditoria_registro ON public.empresa_hacienda_config_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_empresa_medios_pago_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_empresa_medios_pago_auditoria_registro ON public.empresa_medios_pago_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_empresa_monedas_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_empresa_monedas_auditoria_registro ON public.empresa_monedas_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_empresa_perfil_fiscal_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_empresa_perfil_fiscal_auditoria_registro ON public.empresa_perfil_fiscal_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_empresa_tarifas_impuesto_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_empresa_tarifas_impuesto_auditoria_registro ON public.empresa_tarifas_impuesto_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_empresa_tipos_descuento_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_empresa_tipos_descuento_auditoria_registro ON public.empresa_tipos_descuento_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_empresa_tipos_impuesto_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_empresa_tipos_impuesto_auditoria_registro ON public.empresa_tipos_impuesto_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_facturas_recibidas_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_facturas_recibidas_auditoria_registro ON public.facturas_recibidas_auditoria USING btree (registro_id, created_at DESC);
 
 
 --
@@ -12109,6 +13181,13 @@ CREATE INDEX idx_fr_proveedor_fecha ON public.facturas_recibidas USING btree (pr
 
 
 --
+-- Name: idx_funcionario_sucursales_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_funcionario_sucursales_auditoria_registro ON public.funcionario_sucursales_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
 -- Name: idx_funcionario_sucursales_funcionario; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -12123,10 +13202,24 @@ CREATE INDEX idx_mercadeo_campana_envios_campana ON public.mercadeo_campana_envi
 
 
 --
+-- Name: idx_mercadeo_campanas_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_mercadeo_campanas_auditoria_registro ON public.mercadeo_campanas_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
 -- Name: idx_mercadeo_campanas_empresa; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX idx_mercadeo_campanas_empresa ON public.mercadeo_campanas USING btree (empresa_id);
+
+
+--
+-- Name: idx_mercadeo_plantillas_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_mercadeo_plantillas_auditoria_registro ON public.mercadeo_plantillas_auditoria USING btree (registro_id, created_at DESC);
 
 
 --
@@ -12179,6 +13272,13 @@ CREATE INDEX idx_ordenes_pedido_proveedor_fecha ON public.ordenes_pedido USING b
 
 
 --
+-- Name: idx_producto_proveedor_equivalencias_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_producto_proveedor_equivalencias_auditoria_registro ON public.producto_proveedor_equivalencias_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
 -- Name: idx_productos_codigo_barras; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -12204,6 +13304,27 @@ CREATE INDEX idx_proveedores_empresa ON public.proveedores USING btree (empresa_
 --
 
 CREATE INDEX idx_proveedores_tax_id ON public.proveedores USING btree (tax_id) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_recibos_adelanto_aplicaciones_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_recibos_adelanto_aplicaciones_auditoria_registro ON public.recibos_adelanto_aplicaciones_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_recibos_adelanto_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_recibos_adelanto_auditoria_registro ON public.recibos_adelanto_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_sucursal_bodegas_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_sucursal_bodegas_auditoria_registro ON public.sucursal_bodegas_auditoria USING btree (registro_id, created_at DESC);
 
 
 --
@@ -12235,6 +13356,13 @@ CREATE UNIQUE INDEX uq_fr_clave ON public.facturas_recibidas USING btree (empres
 
 
 --
+-- Name: agenda_evento_lineas trg_agenda_evento_lineas_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_agenda_evento_lineas_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.agenda_evento_lineas FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
 -- Name: agenda_eventos trg_agenda_eventos_auditoria; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -12253,6 +13381,13 @@ CREATE TRIGGER trg_bodega_productos_auditoria AFTER INSERT OR DELETE OR UPDATE O
 --
 
 CREATE TRIGGER trg_bodegas_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.bodegas FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: caja_cierres trg_caja_cierres_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_caja_cierres_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.caja_cierres FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
 
 
 --
@@ -12298,10 +13433,87 @@ CREATE TRIGGER trg_cotizaciones_auditoria AFTER INSERT OR DELETE OR UPDATE ON pu
 
 
 --
+-- Name: cuentas_por_cobrar trg_cuentas_por_cobrar_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_cuentas_por_cobrar_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.cuentas_por_cobrar FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: documento_cxc_aplicaciones trg_documento_cxc_aplicaciones_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_documento_cxc_aplicaciones_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.documento_cxc_aplicaciones FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
 -- Name: documentos_electronicos trg_documentos_auditoria; Type: TRIGGER; Schema: public; Owner: -
 --
 
 CREATE TRIGGER trg_documentos_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.documentos_electronicos FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: empresa_hacienda_config trg_empresa_hacienda_config_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_empresa_hacienda_config_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.empresa_hacienda_config FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica('hacienda_contrasena', 'certificado_p12', 'certificado_pin');
+
+
+--
+-- Name: empresa_medios_pago trg_empresa_medios_pago_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_empresa_medios_pago_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.empresa_medios_pago FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: empresa_monedas trg_empresa_monedas_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_empresa_monedas_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.empresa_monedas FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: empresa_perfil_fiscal trg_empresa_perfil_fiscal_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_empresa_perfil_fiscal_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.empresa_perfil_fiscal FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: empresa_tarifas_impuesto trg_empresa_tarifas_impuesto_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_empresa_tarifas_impuesto_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.empresa_tarifas_impuesto FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: empresa_tipos_descuento trg_empresa_tipos_descuento_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_empresa_tipos_descuento_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.empresa_tipos_descuento FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: empresa_tipos_impuesto trg_empresa_tipos_impuesto_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_empresa_tipos_impuesto_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.empresa_tipos_impuesto FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: facturas_recibidas trg_facturas_recibidas_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_facturas_recibidas_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.facturas_recibidas FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica('xml_recibido', 'xml_mensaje_receptor', 'hacienda_respuesta_mr');
+
+
+--
+-- Name: funcionario_sucursales trg_funcionario_sucursales_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_funcionario_sucursales_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.funcionario_sucursales FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
 
 
 --
@@ -12312,10 +13524,31 @@ CREATE TRIGGER trg_funcionarios_auditoria AFTER INSERT OR DELETE OR UPDATE ON pu
 
 
 --
+-- Name: mercadeo_campanas trg_mercadeo_campanas_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_mercadeo_campanas_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.mercadeo_campanas FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: mercadeo_plantillas trg_mercadeo_plantillas_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_mercadeo_plantillas_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.mercadeo_plantillas FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
 -- Name: ordenes_pedido trg_ordenes_pedido_auditoria; Type: TRIGGER; Schema: public; Owner: -
 --
 
 CREATE TRIGGER trg_ordenes_pedido_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.ordenes_pedido FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: producto_proveedor_equivalencias trg_producto_proveedor_equivalencias_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_producto_proveedor_equivalencias_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.producto_proveedor_equivalencias FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
 
 
 --
@@ -12333,6 +13566,20 @@ CREATE TRIGGER trg_proveedores_auditoria AFTER INSERT OR DELETE OR UPDATE ON pub
 
 
 --
+-- Name: recibos_adelanto_aplicaciones trg_recibos_adelanto_aplicaciones_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_recibos_adelanto_aplicaciones_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.recibos_adelanto_aplicaciones FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: recibos_adelanto trg_recibos_adelanto_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_recibos_adelanto_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.recibos_adelanto FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
 -- Name: servicios trg_servicios_auditoria; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -12344,6 +13591,13 @@ CREATE TRIGGER trg_servicios_auditoria AFTER INSERT OR DELETE OR UPDATE ON publi
 --
 
 CREATE TRIGGER trg_sistema_parametros_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.sistema_parametros FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: sucursal_bodegas trg_sucursal_bodegas_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_sucursal_bodegas_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.sucursal_bodegas FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
 
 
 --
@@ -12598,5 +13852,5 @@ ALTER TABLE ONLY public.sucursal_bodegas
 -- PostgreSQL database dump complete
 --
 
-\unrestrict gsnIMuuWTMsonyhQtEDjQwsP0TR45Qd1FojnbgTlPQBrKrvB4Ma7e3n55DkuwxA
+\unrestrict g5jSdl3luqaZDR3Fjln0Pt1oXWai2We1UjoFhlPMnCFzexJM0VOQdKvxlORUUGb
 
