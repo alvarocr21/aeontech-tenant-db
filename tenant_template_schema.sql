@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict XQtUcRC5Lq8RKQg3hsJm9PvCVFyBXEDcoT3FBqSSgbadqqAARB8jc5J1AHCNXHm
+\restrict FO4HSNKoLqP2tGrXqFoiTd1WIQJRznC2arjI4DohuF2htHY67aWBqXqXDRo48C6
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
@@ -2206,171 +2206,38 @@ CREATE FUNCTION public.sp_clientes_con_adelantos(p_empresa_id bigint) RETURNS TA
 -- Name: sp_company_settings_get(bigint); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_company_settings_get(p_empresa_id bigint) RETURNS TABLE(id bigint, empresa_id bigint, legal_name character varying, commercial_name character varying, tax_id character varying, tax_id_type character varying, province_code character varying, canton_code character varying, district_code character varying, other_signs text, phone character varying, email character varying, actividad_economica character varying, leyenda_tributaria text, hacienda_environment character varying, has_hacienda_credentials boolean, has_certificate boolean, certificate_subject text, certificate_issuer text, certificate_serial character varying, certificate_valid_from timestamp without time zone, certificate_valid_to timestamp without time zone, certificate_tax_id character varying, certificate_validated_at timestamp without time zone, hacienda_token_tested_at timestamp without time zone, hacienda_token_expires_at timestamp without time zone, validation_status character varying, validation_errors jsonb, is_active boolean, updated_at timestamp without time zone, clients_managed_by_central boolean, has_onvo_card boolean, onvo_customer_id character varying, onvo_payment_method_id character varying, onvo_card_brand character varying, onvo_card_last4 character varying, onvo_card_exp_month smallint, onvo_card_exp_year smallint, logo_url text, logo_public_id text)
+CREATE FUNCTION public.sp_company_settings_get(p_empresa_id bigint) RETURNS TABLE(id bigint, empresa_id bigint, legal_name character varying, commercial_name character varying, tax_id character varying, tax_id_type character varying, actividad_economica character varying, leyenda_tributaria text, hacienda_environment character varying, has_hacienda_credentials boolean, has_certificate boolean, certificate_subject text, certificate_issuer text, certificate_serial character varying, certificate_valid_from timestamp without time zone, certificate_valid_to timestamp without time zone, certificate_tax_id character varying, certificate_validated_at timestamp without time zone, hacienda_token_tested_at timestamp without time zone, hacienda_token_expires_at timestamp without time zone, validation_status character varying, validation_errors jsonb, is_active boolean, updated_at timestamp without time zone, clients_managed_by_central boolean, has_onvo_card boolean, onvo_customer_id character varying, onvo_payment_method_id character varying, onvo_card_brand character varying, onvo_card_last4 character varying, onvo_card_exp_month smallint, onvo_card_exp_year smallint, logo_url text, logo_public_id text)
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public', 'pg_temp'
     AS $$
-            BEGIN
-                RETURN QUERY
-                SELECT cs.id, cs.empresa_id, cs.legal_name, cs.commercial_name,
-                       cs.tax_id, cs.tax_id_type, cs.province_code, cs.canton_code,
-                       cs.district_code, cs.other_signs, cs.phone, cs.email,
-                       cs.actividad_economica, cs.leyenda_tributaria,
-                       cs.hacienda_environment,
-                       (cs.hacienda_username_encrypted IS NOT NULL AND cs.hacienda_password_encrypted IS NOT NULL),
-                       (cs.certificate_p12_encrypted IS NOT NULL),
-                       cs.certificate_subject, cs.certificate_issuer, cs.certificate_serial,
-                       cs.certificate_valid_from, cs.certificate_valid_to, cs.certificate_tax_id,
-                       cs.certificate_validated_at, cs.hacienda_token_tested_at,
-                       cs.hacienda_token_expires_at, cs.validation_status, cs.validation_errors,
-                       cs.is_active, cs.updated_at, cs.clients_managed_by_central,
-                       (cs.onvo_payment_method_id IS NOT NULL),
-                       cs.onvo_customer_id, cs.onvo_payment_method_id,
-                       cs.onvo_card_brand, cs.onvo_card_last4, cs.onvo_card_exp_month, cs.onvo_card_exp_year,
-                       cs.logo_url, cs.logo_public_id
-                FROM company_settings cs
-                WHERE cs.empresa_id = p_empresa_id AND cs.deleted_at IS NULL
-                LIMIT 1;
-            END; $$;
+BEGIN
+    RETURN QUERY
+    SELECT cs.id, cs.empresa_id, cs.legal_name, cs.commercial_name,
+           cs.tax_id, cs.tax_id_type,
+           cs.actividad_economica, cs.leyenda_tributaria,
+           cs.hacienda_environment,
+           (cs.hacienda_username_encrypted IS NOT NULL AND cs.hacienda_password_encrypted IS NOT NULL),
+           (cs.certificate_p12_encrypted IS NOT NULL),
+           cs.certificate_subject, cs.certificate_issuer, cs.certificate_serial,
+           cs.certificate_valid_from, cs.certificate_valid_to, cs.certificate_tax_id,
+           cs.certificate_validated_at, cs.hacienda_token_tested_at,
+           cs.hacienda_token_expires_at, cs.validation_status, cs.validation_errors,
+           cs.is_active, cs.updated_at, cs.clients_managed_by_central,
+           (cs.onvo_payment_method_id IS NOT NULL),
+           cs.onvo_customer_id, cs.onvo_payment_method_id,
+           cs.onvo_card_brand, cs.onvo_card_last4, cs.onvo_card_exp_month, cs.onvo_card_exp_year,
+           cs.logo_url, cs.logo_public_id
+    FROM company_settings cs
+    WHERE cs.empresa_id = p_empresa_id AND cs.deleted_at IS NULL
+    LIMIT 1;
+END; $$;
 
 
 --
--- Name: sp_company_settings_save(bigint, character varying, character varying, character varying, character varying, character varying, character varying, character varying, text, character varying, character varying, character varying, text, text, text, text, text, text, character varying, timestamp without time zone, timestamp without time zone, character varying, timestamp without time zone, timestamp without time zone, timestamp without time zone, character varying, jsonb); Type: FUNCTION; Schema: public; Owner: -
+-- Name: sp_company_settings_save(bigint, character varying, character varying, character varying, character varying, character varying, text, character varying, text, text, text, text, text, text, character varying, timestamp without time zone, timestamp without time zone, character varying, timestamp without time zone, timestamp without time zone, timestamp without time zone, character varying, jsonb, text, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_company_settings_save(p_empresa_id bigint, p_legal_name character varying, p_commercial_name character varying, p_tax_id character varying, p_tax_id_type character varying, p_province_code character varying, p_canton_code character varying, p_district_code character varying, p_other_signs text, p_phone character varying, p_email character varying, p_hacienda_environment character varying, p_hacienda_username_encrypted text, p_hacienda_password_encrypted text, p_certificate_p12_encrypted text, p_certificate_password_encrypted text, p_certificate_subject text, p_certificate_issuer text, p_certificate_serial character varying, p_certificate_valid_from timestamp without time zone, p_certificate_valid_to timestamp without time zone, p_certificate_tax_id character varying, p_certificate_validated_at timestamp without time zone, p_hacienda_token_tested_at timestamp without time zone, p_hacienda_token_expires_at timestamp without time zone, p_validation_status character varying, p_validation_errors jsonb) RETURNS TABLE(id bigint, validation_status character varying)
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO 'public', 'pg_temp'
-    AS $$
-            BEGIN
-                RETURN QUERY
-                INSERT INTO company_settings (
-                    empresa_id, legal_name, commercial_name, tax_id, tax_id_type,
-                    province_code, canton_code, district_code, other_signs, phone, email,
-                    hacienda_environment, hacienda_username_encrypted, hacienda_password_encrypted,
-                    certificate_p12_encrypted, certificate_password_encrypted,
-                    certificate_subject, certificate_issuer, certificate_serial,
-                    certificate_valid_from, certificate_valid_to, certificate_tax_id,
-                    certificate_validated_at, hacienda_token_tested_at, hacienda_token_expires_at,
-                    validation_status, validation_errors
-                )
-                VALUES (
-                    p_empresa_id, p_legal_name, p_commercial_name, p_tax_id, p_tax_id_type,
-                    p_province_code, p_canton_code, p_district_code, p_other_signs, p_phone, p_email,
-                    p_hacienda_environment, p_hacienda_username_encrypted, p_hacienda_password_encrypted,
-                    p_certificate_p12_encrypted, p_certificate_password_encrypted,
-                    p_certificate_subject, p_certificate_issuer, p_certificate_serial,
-                    p_certificate_valid_from, p_certificate_valid_to, p_certificate_tax_id,
-                    p_certificate_validated_at, p_hacienda_token_tested_at, p_hacienda_token_expires_at,
-                    p_validation_status, COALESCE(p_validation_errors, '[]'::jsonb)
-                )
-                ON CONFLICT (empresa_id) DO UPDATE SET
-                    legal_name = EXCLUDED.legal_name,
-                    commercial_name = EXCLUDED.commercial_name,
-                    tax_id = EXCLUDED.tax_id,
-                    tax_id_type = EXCLUDED.tax_id_type,
-                    province_code = EXCLUDED.province_code,
-                    canton_code = EXCLUDED.canton_code,
-                    district_code = EXCLUDED.district_code,
-                    other_signs = EXCLUDED.other_signs,
-                    phone = EXCLUDED.phone,
-                    email = EXCLUDED.email,
-                    hacienda_environment = EXCLUDED.hacienda_environment,
-                    hacienda_username_encrypted = COALESCE(EXCLUDED.hacienda_username_encrypted, company_settings.hacienda_username_encrypted),
-                    hacienda_password_encrypted = COALESCE(EXCLUDED.hacienda_password_encrypted, company_settings.hacienda_password_encrypted),
-                    certificate_p12_encrypted = COALESCE(EXCLUDED.certificate_p12_encrypted, company_settings.certificate_p12_encrypted),
-                    certificate_password_encrypted = COALESCE(EXCLUDED.certificate_password_encrypted, company_settings.certificate_password_encrypted),
-                    certificate_subject = COALESCE(EXCLUDED.certificate_subject, company_settings.certificate_subject),
-                    certificate_issuer = COALESCE(EXCLUDED.certificate_issuer, company_settings.certificate_issuer),
-                    certificate_serial = COALESCE(EXCLUDED.certificate_serial, company_settings.certificate_serial),
-                    certificate_valid_from = COALESCE(EXCLUDED.certificate_valid_from, company_settings.certificate_valid_from),
-                    certificate_valid_to = COALESCE(EXCLUDED.certificate_valid_to, company_settings.certificate_valid_to),
-                    certificate_tax_id = COALESCE(EXCLUDED.certificate_tax_id, company_settings.certificate_tax_id),
-                    certificate_validated_at = COALESCE(EXCLUDED.certificate_validated_at, company_settings.certificate_validated_at),
-                    hacienda_token_tested_at = COALESCE(EXCLUDED.hacienda_token_tested_at, company_settings.hacienda_token_tested_at),
-                    hacienda_token_expires_at = COALESCE(EXCLUDED.hacienda_token_expires_at, company_settings.hacienda_token_expires_at),
-                    validation_status = EXCLUDED.validation_status,
-                    validation_errors = COALESCE(EXCLUDED.validation_errors, '[]'::jsonb),
-                    is_active = TRUE,
-                    deleted_at = NULL,
-                    updated_at = NOW()
-                RETURNING company_settings.id, company_settings.validation_status;
-            END; $$;
-
-
---
--- Name: sp_company_settings_save(bigint, character varying, character varying, character varying, character varying, character varying, character varying, character varying, text, character varying, character varying, character varying, text, character varying, text, text, text, text, text, text, character varying, timestamp without time zone, timestamp without time zone, character varying, timestamp without time zone, timestamp without time zone, timestamp without time zone, character varying, jsonb); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.sp_company_settings_save(p_empresa_id bigint, p_legal_name character varying, p_commercial_name character varying, p_tax_id character varying, p_tax_id_type character varying, p_province_code character varying, p_canton_code character varying, p_district_code character varying, p_other_signs text, p_phone character varying, p_email character varying, p_actividad_economica character varying, p_leyenda_tributaria text, p_hacienda_environment character varying, p_hacienda_username_encrypted text, p_hacienda_password_encrypted text, p_certificate_p12_encrypted text, p_certificate_password_encrypted text, p_certificate_subject text, p_certificate_issuer text, p_certificate_serial character varying, p_certificate_valid_from timestamp without time zone, p_certificate_valid_to timestamp without time zone, p_certificate_tax_id character varying, p_certificate_validated_at timestamp without time zone, p_hacienda_token_tested_at timestamp without time zone, p_hacienda_token_expires_at timestamp without time zone, p_validation_status character varying, p_validation_errors jsonb) RETURNS TABLE(id bigint, validation_status character varying)
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO 'public', 'pg_temp'
-    AS $$
-            BEGIN
-                RETURN QUERY
-                INSERT INTO company_settings (
-                    empresa_id, legal_name, commercial_name, tax_id, tax_id_type,
-                    province_code, canton_code, district_code, other_signs, phone, email,
-                    actividad_economica, leyenda_tributaria,
-                    hacienda_environment, hacienda_username_encrypted, hacienda_password_encrypted,
-                    certificate_p12_encrypted, certificate_password_encrypted,
-                    certificate_subject, certificate_issuer, certificate_serial,
-                    certificate_valid_from, certificate_valid_to, certificate_tax_id,
-                    certificate_validated_at, hacienda_token_tested_at, hacienda_token_expires_at,
-                    validation_status, validation_errors
-                )
-                VALUES (
-                    p_empresa_id, p_legal_name, p_commercial_name, p_tax_id, p_tax_id_type,
-                    p_province_code, p_canton_code, p_district_code, p_other_signs, p_phone, p_email,
-                    p_actividad_economica, p_leyenda_tributaria,
-                    p_hacienda_environment, p_hacienda_username_encrypted, p_hacienda_password_encrypted,
-                    p_certificate_p12_encrypted, p_certificate_password_encrypted,
-                    p_certificate_subject, p_certificate_issuer, p_certificate_serial,
-                    p_certificate_valid_from, p_certificate_valid_to, p_certificate_tax_id,
-                    p_certificate_validated_at, p_hacienda_token_tested_at, p_hacienda_token_expires_at,
-                    p_validation_status, COALESCE(p_validation_errors, '[]'::jsonb)
-                )
-                ON CONFLICT (empresa_id) DO UPDATE SET
-                    legal_name                      = EXCLUDED.legal_name,
-                    commercial_name                 = EXCLUDED.commercial_name,
-                    tax_id                          = EXCLUDED.tax_id,
-                    tax_id_type                     = EXCLUDED.tax_id_type,
-                    province_code                   = EXCLUDED.province_code,
-                    canton_code                     = EXCLUDED.canton_code,
-                    district_code                   = EXCLUDED.district_code,
-                    other_signs                     = EXCLUDED.other_signs,
-                    phone                           = EXCLUDED.phone,
-                    email                           = EXCLUDED.email,
-                    actividad_economica             = EXCLUDED.actividad_economica,
-                    leyenda_tributaria              = EXCLUDED.leyenda_tributaria,
-                    hacienda_environment            = EXCLUDED.hacienda_environment,
-                    hacienda_username_encrypted     = COALESCE(EXCLUDED.hacienda_username_encrypted, company_settings.hacienda_username_encrypted),
-                    hacienda_password_encrypted     = COALESCE(EXCLUDED.hacienda_password_encrypted, company_settings.hacienda_password_encrypted),
-                    certificate_p12_encrypted       = COALESCE(EXCLUDED.certificate_p12_encrypted, company_settings.certificate_p12_encrypted),
-                    certificate_password_encrypted  = COALESCE(EXCLUDED.certificate_password_encrypted, company_settings.certificate_password_encrypted),
-                    certificate_subject             = COALESCE(EXCLUDED.certificate_subject, company_settings.certificate_subject),
-                    certificate_issuer              = COALESCE(EXCLUDED.certificate_issuer, company_settings.certificate_issuer),
-                    certificate_serial              = COALESCE(EXCLUDED.certificate_serial, company_settings.certificate_serial),
-                    certificate_valid_from          = COALESCE(EXCLUDED.certificate_valid_from, company_settings.certificate_valid_from),
-                    certificate_valid_to            = COALESCE(EXCLUDED.certificate_valid_to, company_settings.certificate_valid_to),
-                    certificate_tax_id              = COALESCE(EXCLUDED.certificate_tax_id, company_settings.certificate_tax_id),
-                    certificate_validated_at        = COALESCE(EXCLUDED.certificate_validated_at, company_settings.certificate_validated_at),
-                    hacienda_token_tested_at        = COALESCE(EXCLUDED.hacienda_token_tested_at, company_settings.hacienda_token_tested_at),
-                    hacienda_token_expires_at       = COALESCE(EXCLUDED.hacienda_token_expires_at, company_settings.hacienda_token_expires_at),
-                    validation_status               = EXCLUDED.validation_status,
-                    validation_errors               = COALESCE(EXCLUDED.validation_errors, '[]'::jsonb),
-                    is_active                       = TRUE,
-                    deleted_at                      = NULL,
-                    updated_at                      = NOW()
-                RETURNING company_settings.id, company_settings.validation_status;
-            END; $$;
-
-
---
--- Name: sp_company_settings_save(bigint, character varying, character varying, character varying, character varying, character varying, character varying, character varying, text, character varying, character varying, character varying, text, character varying, text, text, text, text, text, text, character varying, timestamp without time zone, timestamp without time zone, character varying, timestamp without time zone, timestamp without time zone, timestamp without time zone, character varying, jsonb, text, text); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.sp_company_settings_save(p_empresa_id bigint, p_legal_name character varying, p_commercial_name character varying, p_tax_id character varying, p_tax_id_type character varying, p_province_code character varying, p_canton_code character varying, p_district_code character varying, p_other_signs text, p_phone character varying, p_email character varying, p_actividad_economica character varying, p_leyenda_tributaria text, p_hacienda_environment character varying, p_hacienda_username_encrypted text, p_hacienda_password_encrypted text, p_certificate_p12_encrypted text, p_certificate_password_encrypted text, p_certificate_subject text, p_certificate_issuer text, p_certificate_serial character varying, p_certificate_valid_from timestamp without time zone, p_certificate_valid_to timestamp without time zone, p_certificate_tax_id character varying, p_certificate_validated_at timestamp without time zone, p_hacienda_token_tested_at timestamp without time zone, p_hacienda_token_expires_at timestamp without time zone, p_validation_status character varying, p_validation_errors jsonb, p_logo_url text DEFAULT NULL::text, p_logo_public_id text DEFAULT NULL::text) RETURNS TABLE(id bigint, validation_status character varying)
+CREATE FUNCTION public.sp_company_settings_save(p_empresa_id bigint, p_legal_name character varying, p_commercial_name character varying, p_tax_id character varying, p_tax_id_type character varying, p_actividad_economica character varying, p_leyenda_tributaria text, p_hacienda_environment character varying, p_hacienda_username_encrypted text, p_hacienda_password_encrypted text, p_certificate_p12_encrypted text, p_certificate_password_encrypted text, p_certificate_subject text, p_certificate_issuer text, p_certificate_serial character varying, p_certificate_valid_from timestamp without time zone, p_certificate_valid_to timestamp without time zone, p_certificate_tax_id character varying, p_certificate_validated_at timestamp without time zone, p_hacienda_token_tested_at timestamp without time zone, p_hacienda_token_expires_at timestamp without time zone, p_validation_status character varying, p_validation_errors jsonb, p_logo_url text DEFAULT NULL::text, p_logo_public_id text DEFAULT NULL::text) RETURNS TABLE(id bigint, validation_status character varying)
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public', 'pg_temp'
     AS $$
@@ -2378,7 +2245,6 @@ BEGIN
   RETURN QUERY
   INSERT INTO company_settings (
     empresa_id, legal_name, commercial_name, tax_id, tax_id_type,
-    province_code, canton_code, district_code, other_signs, phone, email,
     actividad_economica, leyenda_tributaria,
     hacienda_environment, hacienda_username_encrypted, hacienda_password_encrypted,
     certificate_p12_encrypted, certificate_password_encrypted,
@@ -2389,7 +2255,6 @@ BEGIN
   )
   VALUES (
     p_empresa_id, p_legal_name, p_commercial_name, p_tax_id, p_tax_id_type,
-    p_province_code, p_canton_code, p_district_code, p_other_signs, p_phone, p_email,
     p_actividad_economica, p_leyenda_tributaria,
     p_hacienda_environment, p_hacienda_username_encrypted, p_hacienda_password_encrypted,
     p_certificate_p12_encrypted, p_certificate_password_encrypted,
@@ -2404,12 +2269,6 @@ BEGIN
     commercial_name                 = EXCLUDED.commercial_name,
     tax_id                          = EXCLUDED.tax_id,
     tax_id_type                     = EXCLUDED.tax_id_type,
-    province_code                   = EXCLUDED.province_code,
-    canton_code                     = EXCLUDED.canton_code,
-    district_code                   = EXCLUDED.district_code,
-    other_signs                     = EXCLUDED.other_signs,
-    phone                           = EXCLUDED.phone,
-    email                           = EXCLUDED.email,
     actividad_economica             = EXCLUDED.actividad_economica,
     leyenda_tributaria              = EXCLUDED.leyenda_tributaria,
     hacienda_environment            = EXCLUDED.hacienda_environment,
@@ -6734,6 +6593,103 @@ END; $$;
 
 
 --
+-- Name: sp_reporte_comisiones(bigint, date, date, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_reporte_comisiones(p_empresa_id bigint, p_fecha_desde date, p_fecha_hasta date, p_funcionario_id bigint DEFAULT NULL::bigint, p_sucursal_id bigint DEFAULT NULL::bigint) RETURNS TABLE(documento_id bigint, fecha_emision timestamp without time zone, tipo_documento character varying, tipo_label character varying, numero_consecutivo character varying, cliente character varying, sucursal_id bigint, funcionario_id bigint, funcionario_nombre character varying, numero_linea smallint, detalle text, moneda character varying, tipo_cambio numeric, base_documento numeric, base_crc numeric, pct numeric, origen_pct character varying, comision_crc numeric)
+    LANGUAGE plpgsql
+    AS $$
+            BEGIN
+                RETURN QUERY
+                WITH base AS (
+                    SELECT
+                        d.id AS doc_id, d.fecha_emision AS fecha, d.tipo_documento AS tipo,
+                        d.numero_consecutivo AS consecutivo,
+                        COALESCE(d.receptor_nombre, 'Consumidor Final')::VARCHAR AS receptor,
+                        d.sucursal_id AS sucursal, d.moneda AS mon, d.tipo_cambio AS tc,
+                        COALESCE(l.funcionario_id, d.funcionario_id, orig.funcionario_id) AS func_id,
+                        l.numero_linea AS num_linea, l.detalle AS det,
+                        l.producto_id AS prod_id, l.bodega_id AS bod_id,
+                        CASE WHEN d.tipo_documento = '03' THEN -l.subtotal ELSE l.subtotal END AS base_doc
+                    FROM documentos_electronicos d
+                    JOIN documento_lineas l ON l.documento_id = d.id
+                    LEFT JOIN LATERAL (
+                        SELECT o.funcionario_id
+                        FROM documento_referencias r
+                        JOIN documentos_electronicos o
+                          ON o.empresa_id = d.empresa_id AND o.deleted_at IS NULL
+                         AND (o.clave = r.numero OR o.numero_consecutivo = r.numero)
+                        WHERE r.documento_id = d.id AND d.tipo_documento = '03'
+                        LIMIT 1
+                    ) orig ON TRUE
+                    WHERE d.empresa_id = p_empresa_id
+                      AND d.deleted_at IS NULL
+                      AND d.estado = 'aceptado'
+                      AND d.tipo_documento IN ('01', '03', '04', '09')
+                      AND d.fecha_emision::DATE BETWEEN p_fecha_desde AND p_fecha_hasta
+                      AND (p_sucursal_id IS NULL OR d.sucursal_id = p_sucursal_id)
+                ),
+                resuelto AS (
+                    SELECT
+                        b.*,
+                        f.name AS func_nombre, f.commission_pct AS func_pct,
+                        p.comision_activa AS p_activa, p.comision_pct AS p_pct,
+                        s.comision_activa AS s_activa, s.comision_pct AS s_pct,
+                        CASE
+                            WHEN p.id IS NOT NULL AND s.id IS NULL THEN 'producto'
+                            WHEN s.id IS NOT NULL AND p.id IS NULL THEN 'servicio'
+                            WHEN p.id IS NOT NULL AND s.id IS NOT NULL THEN
+                                CASE
+                                    WHEN b.bod_id IS NOT NULL                THEN 'producto'
+                                    WHEN lower(s.name) = lower(b.det)        THEN 'servicio'
+                                    WHEN lower(p.name) = lower(b.det)        THEN 'producto'
+                                END
+                        END AS item
+                    FROM base b
+                    LEFT JOIN funcionarios f ON f.id = b.func_id AND f.empresa_id = p_empresa_id
+                    LEFT JOIN productos    p ON p.id = b.prod_id AND p.empresa_id = p_empresa_id
+                    LEFT JOIN servicios    s ON s.id = b.prod_id AND s.empresa_id = p_empresa_id
+                    WHERE p_funcionario_id IS NULL OR b.func_id = p_funcionario_id
+                ),
+                calculo AS (
+                    SELECT
+                        r.*,
+                        ROUND(r.base_doc * r.tc, 2) AS base_colones,
+                        CASE
+                            WHEN r.func_id IS NULL THEN 0::NUMERIC
+                            WHEN r.item = 'servicio' AND r.s_activa AND r.s_pct IS NOT NULL THEN r.s_pct
+                            WHEN r.item = 'producto' AND r.p_activa AND r.p_pct IS NOT NULL THEN r.p_pct
+                            ELSE COALESCE(r.func_pct, 0)
+                        END AS pct_aplicado,
+                        CASE
+                            WHEN r.func_id IS NULL THEN 'sin funcionario'
+                            WHEN r.item = 'servicio' AND r.s_activa AND r.s_pct IS NOT NULL THEN 'servicio'
+                            WHEN r.item = 'producto' AND r.p_activa AND r.p_pct IS NOT NULL THEN 'producto'
+                            ELSE 'funcionario'
+                        END AS origen
+                    FROM resuelto r
+                )
+                SELECT
+                    c.doc_id, c.fecha, c.tipo::VARCHAR,
+                    (CASE c.tipo
+                        WHEN '01' THEN 'Factura Electrónica'
+                        WHEN '03' THEN 'Nota de Crédito'
+                        WHEN '04' THEN 'Tiquete Electrónico'
+                        WHEN '09' THEN 'Factura de Exportación'
+                        ELSE c.tipo
+                    END)::VARCHAR,
+                    c.consecutivo::VARCHAR, c.receptor, c.sucursal, c.func_id,
+                    COALESCE(c.func_nombre, 'Sin funcionario asignado')::VARCHAR,
+                    c.num_linea, c.det::TEXT, c.mon::VARCHAR, c.tc, c.base_doc,
+                    c.base_colones, c.pct_aplicado, c.origen::VARCHAR,
+                    ROUND(c.base_colones * c.pct_aplicado / 100, 2)
+                FROM calculo c
+                ORDER BY COALESCE(c.func_nombre, 'zzz'), c.fecha, c.doc_id, c.num_linea;
+            END;
+            $$;
+
+
+--
 -- Name: sp_reporte_cxc_mora(bigint, date); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -7305,6 +7261,66 @@ BEGIN
   ON CONFLICT DO NOTHING;
 END;
 $$;
+
+
+--
+-- Name: sp_sucursal_contacto_get(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_sucursal_contacto_get(p_empresa_id bigint, p_sucursal_id bigint DEFAULT NULL::bigint) RETURNS TABLE(sucursal_id bigint, email character varying, phone character varying, province_code character varying, canton_code character varying, district_code character varying, other_signs text)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT sc.sucursal_id, sc.email, sc.phone, sc.province_code, sc.canton_code, sc.district_code, sc.other_signs
+    FROM sucursal_contacto sc
+    WHERE sc.empresa_id = p_empresa_id
+      AND (p_sucursal_id IS NULL OR sc.sucursal_id = p_sucursal_id)
+    ORDER BY sc.sucursal_id
+    LIMIT 1;
+END; $$;
+
+
+--
+-- Name: sp_sucursal_contacto_list(bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_sucursal_contacto_list(p_empresa_id bigint) RETURNS TABLE(sucursal_id bigint, email character varying, phone character varying, province_code character varying, canton_code character varying, district_code character varying, other_signs text)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT sc.sucursal_id, sc.email, sc.phone, sc.province_code, sc.canton_code, sc.district_code, sc.other_signs
+    FROM sucursal_contacto sc
+    WHERE sc.empresa_id = p_empresa_id
+    ORDER BY sc.sucursal_id;
+END; $$;
+
+
+--
+-- Name: sp_sucursal_contacto_upsert(bigint, bigint, character varying, character varying, character varying, character varying, character varying, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_sucursal_contacto_upsert(p_empresa_id bigint, p_sucursal_id bigint, p_email character varying, p_phone character varying, p_province_code character varying, p_canton_code character varying, p_district_code character varying, p_other_signs text) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    INSERT INTO sucursal_contacto (sucursal_id, empresa_id, email, phone, province_code, canton_code, district_code, other_signs)
+    VALUES (p_sucursal_id, p_empresa_id, p_email, p_phone, p_province_code, p_canton_code, p_district_code, p_other_signs)
+    ON CONFLICT (sucursal_id) DO UPDATE SET
+        email         = EXCLUDED.email,
+        phone         = EXCLUDED.phone,
+        province_code = EXCLUDED.province_code,
+        canton_code   = EXCLUDED.canton_code,
+        district_code = EXCLUDED.district_code,
+        other_signs   = EXCLUDED.other_signs,
+        updated_at    = NOW()
+    WHERE sucursal_contacto.empresa_id = EXCLUDED.empresa_id;
+    RETURN TRUE;
+END; $$;
 
 
 --
@@ -8407,12 +8423,6 @@ CREATE TABLE public.company_settings (
     commercial_name character varying(255),
     tax_id character varying(20) NOT NULL,
     tax_id_type character varying(2) DEFAULT '02'::character varying NOT NULL,
-    province_code character varying(1),
-    canton_code character varying(2),
-    district_code character varying(2),
-    other_signs text,
-    phone character varying(30),
-    email character varying(255),
     hacienda_environment character varying(10) DEFAULT 'stag'::character varying NOT NULL,
     hacienda_username_encrypted text,
     hacienda_password_encrypted text,
@@ -11099,6 +11109,81 @@ ALTER SEQUENCE public.sucursal_bodegas_auditoria_id_seq OWNED BY public.sucursal
 
 
 --
+-- Name: sucursal_contacto; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.sucursal_contacto (
+    id bigint NOT NULL,
+    sucursal_id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    email character varying(255),
+    phone character varying(30),
+    province_code character varying(1),
+    canton_code character varying(2),
+    district_code character varying(2),
+    other_signs text,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: sucursal_contacto_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.sucursal_contacto_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'sucursal_contacto'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: sucursal_contacto_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.sucursal_contacto_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: sucursal_contacto_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.sucursal_contacto_auditoria_id_seq OWNED BY public.sucursal_contacto_auditoria.id;
+
+
+--
+-- Name: sucursal_contacto_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.sucursal_contacto_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: sucursal_contacto_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.sucursal_contacto_id_seq OWNED BY public.sucursal_contacto.id;
+
+
+--
 -- Name: sucursal_horarios; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -11784,6 +11869,20 @@ ALTER TABLE ONLY public.sistema_parametros_auditoria ALTER COLUMN id SET DEFAULT
 --
 
 ALTER TABLE ONLY public.sucursal_bodegas_auditoria ALTER COLUMN id SET DEFAULT nextval('public.sucursal_bodegas_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: sucursal_contacto id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sucursal_contacto ALTER COLUMN id SET DEFAULT nextval('public.sucursal_contacto_id_seq'::regclass);
+
+
+--
+-- Name: sucursal_contacto_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sucursal_contacto_auditoria ALTER COLUMN id SET DEFAULT nextval('public.sucursal_contacto_auditoria_id_seq'::regclass);
 
 
 --
@@ -12649,6 +12748,30 @@ ALTER TABLE ONLY public.sucursal_bodegas
 
 
 --
+-- Name: sucursal_contacto_auditoria sucursal_contacto_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sucursal_contacto_auditoria
+    ADD CONSTRAINT sucursal_contacto_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: sucursal_contacto sucursal_contacto_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sucursal_contacto
+    ADD CONSTRAINT sucursal_contacto_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: sucursal_contacto sucursal_contacto_sucursal_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sucursal_contacto
+    ADD CONSTRAINT sucursal_contacto_sucursal_id_key UNIQUE (sucursal_id);
+
+
+--
 -- Name: sucursal_horarios sucursal_horarios_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -13264,6 +13387,20 @@ CREATE INDEX idx_sucursal_bodegas_auditoria_registro ON public.sucursal_bodegas_
 
 
 --
+-- Name: idx_sucursal_contacto_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_sucursal_contacto_auditoria_registro ON public.sucursal_contacto_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_sucursal_contacto_empresa; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_sucursal_contacto_empresa ON public.sucursal_contacto USING btree (empresa_id);
+
+
+--
 -- Name: uq_emp_tarifa_imp_empresa_codigo; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -13530,6 +13667,13 @@ CREATE TRIGGER trg_sucursal_bodegas_auditoria AFTER INSERT OR DELETE OR UPDATE O
 
 
 --
+-- Name: sucursal_contacto trg_sucursal_contacto_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_sucursal_contacto_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.sucursal_contacto FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
 -- Name: bodega_productos bodega_productos_bodega_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -13781,5 +13925,5 @@ ALTER TABLE ONLY public.sucursal_bodegas
 -- PostgreSQL database dump complete
 --
 
-\unrestrict XQtUcRC5Lq8RKQg3hsJm9PvCVFyBXEDcoT3FBqSSgbadqqAARB8jc5J1AHCNXHm
+\unrestrict FO4HSNKoLqP2tGrXqFoiTd1WIQJRznC2arjI4DohuF2htHY67aWBqXqXDRo48C6
 
