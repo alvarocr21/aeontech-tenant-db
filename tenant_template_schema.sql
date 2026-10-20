@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict FO4HSNKoLqP2tGrXqFoiTd1WIQJRznC2arjI4DohuF2htHY67aWBqXqXDRo48C6
+\restrict HmSEh8ZpnsPbAFw9EKzcHbR7YiFRs9iuEAasQkytCHendzLEFQQCizc6PtDIRx8
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
@@ -1139,6 +1139,36 @@ BEGIN
         p_request_headers, p_request_body, p_response_status, p_response_body,
         p_ip_address, p_user_agent, p_duracion_ms
     );
+END;
+$$;
+
+
+--
+-- Name: sp_bitacora_purge(integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_bitacora_purge(p_dias integer) RETURNS bigint
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_total BIGINT := 0;
+    v_lote  BIGINT;
+BEGIN
+    IF p_dias IS NULL OR p_dias < 1 THEN
+        RAISE EXCEPTION 'p_dias debe ser mayor o igual a 1';
+    END IF;
+    LOOP
+        DELETE FROM bitacora_api
+        WHERE id IN (
+            SELECT id FROM bitacora_api
+            WHERE created_at < NOW() - make_interval(days => p_dias)
+            LIMIT 5000
+        );
+        GET DIAGNOSTICS v_lote = ROW_COUNT;
+        v_total := v_total + v_lote;
+        EXIT WHEN v_lote = 0;
+    END LOOP;
+    RETURN v_total;
 END;
 $$;
 
@@ -13016,17 +13046,17 @@ CREATE INDEX idx_bitacora_empresa_id ON public.bitacora_api USING btree (empresa
 
 
 --
--- Name: idx_bitacora_endpoint; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_bitacora_endpoint ON public.bitacora_api USING btree (endpoint);
-
-
---
 -- Name: idx_bitacora_user_id; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX idx_bitacora_user_id ON public.bitacora_api USING btree (user_id);
+
+
+--
+-- Name: idx_bodega_productos_producto; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_bodega_productos_producto ON public.bodega_productos USING btree (producto_id);
 
 
 --
@@ -13111,6 +13141,55 @@ CREATE INDEX idx_cxc_cliente_origen ON public.cuentas_por_cobrar USING btree (cl
 --
 
 CREATE UNIQUE INDEX idx_cxc_documento ON public.cuentas_por_cobrar USING btree (documento_id);
+
+
+--
+-- Name: idx_doc_desglose_documento; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_doc_desglose_documento ON public.documento_desglose_impuesto USING btree (documento_id);
+
+
+--
+-- Name: idx_doc_linea_desc_linea; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_doc_linea_desc_linea ON public.documento_linea_descuentos USING btree (linea_id);
+
+
+--
+-- Name: idx_doc_linea_imp_linea; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_doc_linea_imp_linea ON public.documento_linea_impuestos USING btree (linea_id);
+
+
+--
+-- Name: idx_doc_linea_surt_linea; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_doc_linea_surt_linea ON public.documento_linea_surtidos USING btree (linea_id);
+
+
+--
+-- Name: idx_doc_medios_pago_documento; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_doc_medios_pago_documento ON public.documento_medios_pago USING btree (documento_id);
+
+
+--
+-- Name: idx_doc_otros_cargos_documento; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_doc_otros_cargos_documento ON public.documento_otros_cargos USING btree (documento_id);
+
+
+--
+-- Name: idx_doc_referencias_documento; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_doc_referencias_documento ON public.documento_referencias USING btree (documento_id);
 
 
 --
@@ -13205,6 +13284,13 @@ CREATE INDEX idx_empresa_tipos_impuesto_auditoria_registro ON public.empresa_tip
 
 
 --
+-- Name: idx_fact_recibidas_referencia; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_fact_recibidas_referencia ON public.facturas_recibidas USING btree (factura_referencia_id);
+
+
+--
 -- Name: idx_facturas_recibidas_auditoria_registro; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -13275,6 +13361,13 @@ CREATE INDEX idx_mercadeo_campanas_empresa ON public.mercadeo_campanas USING btr
 
 
 --
+-- Name: idx_mercadeo_campanas_plantilla; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_mercadeo_campanas_plantilla ON public.mercadeo_campanas USING btree (plantilla_id);
+
+
+--
 -- Name: idx_mercadeo_plantillas_auditoria_registro; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -13289,10 +13382,31 @@ CREATE INDEX idx_mercadeo_plantillas_empresa ON public.mercadeo_plantillas USING
 
 
 --
+-- Name: idx_mov_inv_bodega_destino; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_mov_inv_bodega_destino ON public.movimientos_inventario USING btree (bodega_destino_id);
+
+
+--
+-- Name: idx_mov_inv_bodega_origen; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_mov_inv_bodega_origen ON public.movimientos_inventario USING btree (bodega_origen_id);
+
+
+--
 -- Name: idx_mov_inv_created; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX idx_mov_inv_created ON public.movimientos_inventario USING btree (created_at DESC);
+
+
+--
+-- Name: idx_mov_inv_documento; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_mov_inv_documento ON public.movimientos_inventario USING btree (documento_id);
 
 
 --
@@ -13307,6 +13421,13 @@ CREATE INDEX idx_mov_inv_empresa ON public.movimientos_inventario USING btree (e
 --
 
 CREATE INDEX idx_mov_inv_producto ON public.movimientos_inventario USING btree (producto_id, bodega_origen_id);
+
+
+--
+-- Name: idx_mov_inv_proveedor; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_mov_inv_proveedor ON public.movimientos_inventario USING btree (proveedor_id);
 
 
 --
@@ -13335,6 +13456,13 @@ CREATE INDEX idx_ordenes_pedido_proveedor_fecha ON public.ordenes_pedido USING b
 --
 
 CREATE INDEX idx_producto_proveedor_equivalencias_auditoria_registro ON public.producto_proveedor_equivalencias_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_productos_categoria; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_productos_categoria ON public.productos USING btree (categoria_id);
 
 
 --
@@ -13384,6 +13512,13 @@ CREATE INDEX idx_recibos_adelanto_auditoria_registro ON public.recibos_adelanto_
 --
 
 CREATE INDEX idx_sucursal_bodegas_auditoria_registro ON public.sucursal_bodegas_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_sucursal_bodegas_bodega; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_sucursal_bodegas_bodega ON public.sucursal_bodegas USING btree (bodega_id);
 
 
 --
@@ -13925,5 +14060,5 @@ ALTER TABLE ONLY public.sucursal_bodegas
 -- PostgreSQL database dump complete
 --
 
-\unrestrict FO4HSNKoLqP2tGrXqFoiTd1WIQJRznC2arjI4DohuF2htHY67aWBqXqXDRo48C6
+\unrestrict HmSEh8ZpnsPbAFw9EKzcHbR7YiFRs9iuEAasQkytCHendzLEFQQCizc6PtDIRx8
 
