@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict jt5YClkTYFGB5uBm38XZ7lsGckhgXL9T3tADmcEzChwv732K7tScMTCCdiM1JC4
+\restrict rOMpX6PD3PevMWgh88HeCwZuBs5ufbYfmj1fbpFSseqHwiItLCjs3fwf2gWyBAX
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
@@ -174,6 +174,40 @@ BEGIN
   ORDER BY ecv.codigo;
 END;
 $$;
+
+
+--
+-- Name: fn_valida_espacio_libre(bigint, timestamp without time zone, timestamp without time zone, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_valida_espacio_libre(p_espacio_id bigint, p_inicio timestamp without time zone, p_fin timestamp without time zone, p_excluir_linea_id bigint DEFAULT NULL::bigint, p_excluir_evento_id bigint DEFAULT NULL::bigint) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_nombre VARCHAR;
+    v_c      RECORD;
+BEGIN
+    IF p_espacio_id IS NULL THEN RETURN; END IF;
+
+    PERFORM pg_advisory_xact_lock(hashtext('agenda_espacio'), p_espacio_id::int);
+
+    SELECT e.titulo, l.fecha_inicio, l.fecha_fin INTO v_c
+    FROM agenda_evento_lineas l
+    JOIN agenda_eventos e ON e.id = l.evento_id AND e.deleted_at IS NULL AND e.estado <> 'cancelado'
+    WHERE l.espacio_id = p_espacio_id
+      AND l.estado <> 'cancelado'
+      AND l.fecha_inicio < p_fin AND l.fecha_fin > p_inicio
+      AND (p_excluir_linea_id IS NULL OR l.id <> p_excluir_linea_id)
+      AND (p_excluir_evento_id IS NULL OR e.id <> p_excluir_evento_id)
+    ORDER BY l.fecha_inicio LIMIT 1;
+
+    IF FOUND THEN
+        SELECT nombre INTO v_nombre FROM agenda_espacios WHERE id = p_espacio_id;
+        RAISE EXCEPTION 'ESPACIO_OCUPADO: El espacio «%» ya está reservado por la cita «%» de % a %, que se traslapa con este horario.',
+            v_nombre, v_c.titulo, to_char(v_c.fecha_inicio, 'DD/MM/YYYY HH24:MI'), to_char(v_c.fecha_fin, 'HH24:MI');
+    END IF;
+END; $$;
 
 
 --
@@ -422,7 +456,9 @@ CREATE FUNCTION public.sp_agenda_avisos_pendientes_dia_antes(p_fecha_ref timesta
         RETURN QUERY
         SELECT
             e.id, e.empresa_id, e.titulo,
-            (SELECT l.ubicacion FROM agenda_evento_lineas l WHERE l.evento_id = e.id ORDER BY l.orden, l.id LIMIT 1),
+            (SELECT COALESCE(es.nombre, l.ubicacion)::VARCHAR FROM agenda_evento_lineas l
+               LEFT JOIN agenda_espacios es ON es.id = l.espacio_id
+              WHERE l.evento_id = e.id ORDER BY l.orden, l.id LIMIT 1),
             e.fecha_inicio,
             cl.name, cl.email,
             cfg.aviso_dia_antes_mensaje
@@ -454,7 +490,9 @@ CREATE FUNCTION public.sp_agenda_avisos_pendientes_discrecional(p_fecha_ref time
         RETURN QUERY
         SELECT
             e.id, e.empresa_id, e.titulo,
-            (SELECT l.ubicacion FROM agenda_evento_lineas l WHERE l.evento_id = e.id ORDER BY l.orden, l.id LIMIT 1),
+            (SELECT COALESCE(es.nombre, l.ubicacion)::VARCHAR FROM agenda_evento_lineas l
+               LEFT JOIN agenda_espacios es ON es.id = l.espacio_id
+              WHERE l.evento_id = e.id ORDER BY l.orden, l.id LIMIT 1),
             e.fecha_inicio,
             cl.name, cl.email,
             cfg.aviso_discrecional_mensaje
@@ -561,7 +599,8 @@ BEGIN
            FROM agenda_evento_lineas l
            JOIN servicios s ON s.id = l.servicio_id
           WHERE l.evento_id = e.id)::TEXT,
-        (SELECT l.ubicacion FROM agenda_evento_lineas l
+        (SELECT COALESCE(es.nombre, l.ubicacion) FROM agenda_evento_lineas l
+           LEFT JOIN agenda_espacios es ON es.id = l.espacio_id
           WHERE l.evento_id = e.id ORDER BY l.orden, l.id LIMIT 1)::VARCHAR,
         e.fecha_inicio, e.estado
     FROM agenda_avisos_tokens t
@@ -569,6 +608,132 @@ BEGIN
     WHERE t.token = p_token;
 END;
 $$;
+
+
+--
+-- Name: sp_agenda_espacio_create(bigint, character varying, character varying, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_agenda_espacio_create(p_empresa_id bigint, p_nombre character varying, p_descripcion character varying, p_sucursal_id bigint) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_id BIGINT;
+BEGIN
+    INSERT INTO agenda_espacios (empresa_id, sucursal_id, nombre, descripcion)
+    VALUES (p_empresa_id, p_sucursal_id, btrim(p_nombre), NULLIF(btrim(COALESCE(p_descripcion, '')), ''))
+    RETURNING agenda_espacios.id INTO v_id;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_agenda_espacio_get(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_agenda_espacio_get(p_id bigint, p_empresa_id bigint) RETURNS TABLE(id bigint, empresa_id bigint, sucursal_id bigint, nombre character varying, descripcion character varying, is_active boolean, deleted_at timestamp without time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT es.id, es.empresa_id, es.sucursal_id, es.nombre, es.descripcion, es.is_active, es.deleted_at
+    FROM agenda_espacios es
+    WHERE es.id = p_id AND es.empresa_id = p_empresa_id;
+END; $$;
+
+
+--
+-- Name: sp_agenda_espacio_list(bigint, boolean, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_agenda_espacio_list(p_empresa_id bigint, p_eliminados boolean DEFAULT false, p_solo_activos boolean DEFAULT false) RETURNS TABLE(id bigint, empresa_id bigint, sucursal_id bigint, nombre character varying, descripcion character varying, is_active boolean, deleted_at timestamp without time zone, citas_futuras bigint)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT es.id, es.empresa_id, es.sucursal_id, es.nombre, es.descripcion, es.is_active, es.deleted_at,
+           (SELECT COUNT(*) FROM agenda_evento_lineas l
+              JOIN agenda_eventos e ON e.id = l.evento_id AND e.deleted_at IS NULL AND e.estado <> 'cancelado'
+             WHERE l.espacio_id = es.id AND l.estado = 'pendiente' AND l.fecha_fin > NOW())
+    FROM agenda_espacios es
+    WHERE es.empresa_id = p_empresa_id
+      AND ((p_eliminados AND es.deleted_at IS NOT NULL) OR (NOT p_eliminados AND es.deleted_at IS NULL))
+      AND (NOT p_solo_activos OR es.is_active)
+    ORDER BY lower(regexp_replace(es.nombre, '[0-9]+', '', 'g')),
+             NULLIF(substring(es.nombre from '[0-9]{1,9}'), '')::int NULLS FIRST,
+             es.nombre;
+END; $$;
+
+
+--
+-- Name: sp_agenda_espacio_restore(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_agenda_espacio_restore(p_id bigint, p_empresa_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    UPDATE agenda_espacios SET deleted_at = NULL, is_active = TRUE, updated_at = NOW()
+    WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NOT NULL;
+    RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: sp_agenda_espacio_soft_delete(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_agenda_espacio_soft_delete(p_id bigint, p_empresa_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    UPDATE agenda_espacios SET is_active = FALSE, deleted_at = NOW(), updated_at = NOW()
+    WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
+    RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: sp_agenda_espacio_update(bigint, bigint, character varying, character varying, bigint, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_agenda_espacio_update(p_id bigint, p_empresa_id bigint, p_nombre character varying, p_descripcion character varying, p_sucursal_id bigint, p_is_active boolean) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    UPDATE agenda_espacios SET
+        nombre = btrim(p_nombre), descripcion = NULLIF(btrim(COALESCE(p_descripcion, '')), ''),
+        sucursal_id = p_sucursal_id, is_active = p_is_active, updated_at = NOW()
+    WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
+    RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: sp_agenda_espacios_ocupados(bigint, timestamp without time zone, timestamp without time zone, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_agenda_espacios_ocupados(p_empresa_id bigint, p_desde timestamp without time zone, p_hasta timestamp without time zone, p_excluir_evento_id bigint DEFAULT NULL::bigint) RETURNS TABLE(espacio_id bigint, evento_id bigint, linea_id bigint, titulo character varying, fecha_inicio timestamp without time zone, fecha_fin timestamp without time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT l.espacio_id, e.id, l.id, e.titulo, l.fecha_inicio, l.fecha_fin
+    FROM agenda_evento_lineas l
+    JOIN agenda_eventos e ON e.id = l.evento_id AND e.empresa_id = p_empresa_id
+                         AND e.deleted_at IS NULL AND e.estado <> 'cancelado'
+    WHERE l.espacio_id IS NOT NULL
+      AND l.estado <> 'cancelado'
+      AND l.fecha_inicio < p_hasta AND l.fecha_fin > p_desde
+      AND (p_excluir_evento_id IS NULL OR e.id <> p_excluir_evento_id)
+    ORDER BY l.fecha_inicio;
+END; $$;
 
 
 --
@@ -666,27 +831,28 @@ CREATE FUNCTION public.sp_agenda_evento_linea_cancelar(p_linea_id bigint, p_even
 
 
 --
--- Name: sp_agenda_evento_linea_create(bigint, bigint, bigint, timestamp without time zone, timestamp without time zone, text, character varying, integer); Type: FUNCTION; Schema: public; Owner: -
+-- Name: sp_agenda_evento_linea_create(bigint, bigint, bigint, timestamp without time zone, timestamp without time zone, text, character varying, integer, bigint); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_agenda_evento_linea_create(p_evento_id bigint, p_servicio_id bigint, p_funcionario_id bigint, p_fecha_inicio timestamp without time zone, p_fecha_fin timestamp without time zone, p_comentario text, p_ubicacion character varying, p_orden integer) RETURNS bigint
+CREATE FUNCTION public.sp_agenda_evento_linea_create(p_evento_id bigint, p_servicio_id bigint, p_funcionario_id bigint, p_fecha_inicio timestamp without time zone, p_fecha_fin timestamp without time zone, p_comentario text, p_ubicacion character varying, p_orden integer, p_espacio_id bigint DEFAULT NULL::bigint) RETURNS bigint
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public', 'pg_temp'
     AS $$
-            DECLARE
-                v_id          BIGINT;
-                v_todo_el_dia BOOLEAN;
-            BEGIN
-                IF p_funcionario_id IS NOT NULL THEN
-                    SELECT todo_el_dia INTO v_todo_el_dia FROM agenda_eventos WHERE id = p_evento_id;
-                    PERFORM fn_valida_horario_funcionario(p_funcionario_id, p_fecha_inicio, p_fecha_fin, v_todo_el_dia);
-                END IF;
+DECLARE
+    v_id          BIGINT;
+    v_todo_el_dia BOOLEAN;
+BEGIN
+    IF p_funcionario_id IS NOT NULL THEN
+        SELECT todo_el_dia INTO v_todo_el_dia FROM agenda_eventos WHERE id = p_evento_id;
+        PERFORM fn_valida_horario_funcionario(p_funcionario_id, p_fecha_inicio, p_fecha_fin, v_todo_el_dia);
+    END IF;
+    PERFORM fn_valida_espacio_libre(p_espacio_id, p_fecha_inicio, p_fecha_fin, NULL, p_evento_id);
 
-                INSERT INTO agenda_evento_lineas (evento_id, servicio_id, funcionario_id, fecha_inicio, fecha_fin, comentario, ubicacion, orden)
-                VALUES (p_evento_id, p_servicio_id, p_funcionario_id, p_fecha_inicio, p_fecha_fin, p_comentario, p_ubicacion, p_orden)
-                RETURNING id INTO v_id;
-                RETURN v_id;
-            END; $$;
+    INSERT INTO agenda_evento_lineas (evento_id, servicio_id, funcionario_id, fecha_inicio, fecha_fin, comentario, ubicacion, espacio_id, orden)
+    VALUES (p_evento_id, p_servicio_id, p_funcionario_id, p_fecha_inicio, p_fecha_fin, p_comentario, p_ubicacion, p_espacio_id, p_orden)
+    RETURNING id INTO v_id;
+    RETURN v_id;
+END; $$;
 
 
 --
@@ -739,83 +905,86 @@ CREATE FUNCTION public.sp_agenda_evento_linea_reagendar(p_linea_id bigint, p_eve
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public', 'pg_temp'
     AS $$
-    DECLARE
-        v_sucursal_id    BIGINT;
-        v_todo_el_dia    BOOLEAN;
-        v_estado_evento  VARCHAR;
-        v_estado         VARCHAR;
-        v_funcionario_id BIGINT;
-    BEGIN
-        SELECT sucursal_id, todo_el_dia, estado INTO v_sucursal_id, v_todo_el_dia, v_estado_evento
-          FROM agenda_eventos
-         WHERE id = p_evento_id AND empresa_id = p_empresa_id AND deleted_at IS NULL
-         FOR UPDATE;
-        IF NOT FOUND THEN
-            RETURN FALSE;
-        END IF;
+DECLARE
+    v_sucursal_id    BIGINT;
+    v_todo_el_dia    BOOLEAN;
+    v_estado_evento  VARCHAR;
+    v_estado         VARCHAR;
+    v_funcionario_id BIGINT;
+    v_espacio_id     BIGINT;
+BEGIN
+    SELECT sucursal_id, todo_el_dia, estado INTO v_sucursal_id, v_todo_el_dia, v_estado_evento
+      FROM agenda_eventos
+     WHERE id = p_evento_id AND empresa_id = p_empresa_id AND deleted_at IS NULL
+     FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN FALSE;
+    END IF;
 
-        SELECT fn_agenda_linea_estado(l.estado, l.documento_id), l.funcionario_id
-          INTO v_estado, v_funcionario_id
-          FROM agenda_evento_lineas l WHERE l.id = p_linea_id AND l.evento_id = p_evento_id;
-        IF v_estado IS NULL THEN
-            RETURN FALSE;
-        END IF;
-        IF v_estado <> 'pendiente' OR v_estado_evento = 'cancelado' THEN
-            RAISE EXCEPTION 'LINEA_NO_PENDIENTE: Solo se puede reagendar un servicio pendiente de una cita activa.';
-        END IF;
+    SELECT fn_agenda_linea_estado(l.estado, l.documento_id), l.funcionario_id, l.espacio_id
+      INTO v_estado, v_funcionario_id, v_espacio_id
+      FROM agenda_evento_lineas l WHERE l.id = p_linea_id AND l.evento_id = p_evento_id;
+    IF v_estado IS NULL THEN
+        RETURN FALSE;
+    END IF;
+    IF v_estado <> 'pendiente' OR v_estado_evento = 'cancelado' THEN
+        RAISE EXCEPTION 'LINEA_NO_PENDIENTE: Solo se puede reagendar un servicio pendiente de una cita activa.';
+    END IF;
 
-        -- Solo la NUEVA fecha debe ser futura: la anterior puede haber pasado (el cliente se fue).
-        PERFORM fn_valida_evento_no_pasado(p_fecha_inicio);
-        PERFORM fn_valida_horario_sucursal(v_sucursal_id, p_fecha_inicio, p_fecha_fin, v_todo_el_dia);
-        IF v_funcionario_id IS NOT NULL THEN
-            PERFORM fn_valida_horario_funcionario(v_funcionario_id, p_fecha_inicio, p_fecha_fin, v_todo_el_dia);
-        END IF;
+    -- Solo la NUEVA fecha debe ser futura: la anterior puede haber pasado (el cliente se fue).
+    PERFORM fn_valida_evento_no_pasado(p_fecha_inicio);
+    PERFORM fn_valida_horario_sucursal(v_sucursal_id, p_fecha_inicio, p_fecha_fin, v_todo_el_dia);
+    IF v_funcionario_id IS NOT NULL THEN
+        PERFORM fn_valida_horario_funcionario(v_funcionario_id, p_fecha_inicio, p_fecha_fin, v_todo_el_dia);
+    END IF;
+    PERFORM fn_valida_espacio_libre(v_espacio_id, p_fecha_inicio, p_fecha_fin, p_linea_id, NULL);
 
-        UPDATE agenda_evento_lineas SET
-            fecha_inicio = p_fecha_inicio, fecha_fin = p_fecha_fin, updated_at = NOW()
-        WHERE id = p_linea_id;
+    UPDATE agenda_evento_lineas SET
+        fecha_inicio = p_fecha_inicio, fecha_fin = p_fecha_fin, updated_at = NOW()
+    WHERE id = p_linea_id;
 
-        UPDATE agenda_eventos SET
-            fecha_inicio = (SELECT MIN(l.fecha_inicio) FROM agenda_evento_lineas l WHERE l.evento_id = p_evento_id AND l.estado <> 'cancelado'),
-            fecha_fin    = (SELECT MAX(l.fecha_fin)    FROM agenda_evento_lineas l WHERE l.evento_id = p_evento_id AND l.estado <> 'cancelado'),
-            updated_at   = NOW()
-        WHERE id = p_evento_id;
-        RETURN TRUE;
-    END; $$;
+    UPDATE agenda_eventos SET
+        fecha_inicio = (SELECT MIN(l.fecha_inicio) FROM agenda_evento_lineas l WHERE l.evento_id = p_evento_id AND l.estado <> 'cancelado'),
+        fecha_fin    = (SELECT MAX(l.fecha_fin)    FROM agenda_evento_lineas l WHERE l.evento_id = p_evento_id AND l.estado <> 'cancelado'),
+        updated_at   = NOW()
+    WHERE id = p_evento_id;
+    RETURN TRUE;
+END; $$;
 
 
 --
--- Name: sp_agenda_evento_linea_update(bigint, bigint, bigint, bigint, timestamp without time zone, timestamp without time zone, text, character varying, integer); Type: FUNCTION; Schema: public; Owner: -
+-- Name: sp_agenda_evento_linea_update(bigint, bigint, bigint, bigint, timestamp without time zone, timestamp without time zone, text, character varying, integer, bigint); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_agenda_evento_linea_update(p_linea_id bigint, p_evento_id bigint, p_servicio_id bigint, p_funcionario_id bigint, p_fecha_inicio timestamp without time zone, p_fecha_fin timestamp without time zone, p_comentario text, p_ubicacion character varying, p_orden integer) RETURNS boolean
+CREATE FUNCTION public.sp_agenda_evento_linea_update(p_linea_id bigint, p_evento_id bigint, p_servicio_id bigint, p_funcionario_id bigint, p_fecha_inicio timestamp without time zone, p_fecha_fin timestamp without time zone, p_comentario text, p_ubicacion character varying, p_orden integer, p_espacio_id bigint DEFAULT NULL::bigint) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public', 'pg_temp'
     AS $$
-    DECLARE
-        v_todo_el_dia BOOLEAN;
-        v_estado      VARCHAR;
-    BEGIN
-        SELECT fn_agenda_linea_estado(l.estado, l.documento_id) INTO v_estado
-          FROM agenda_evento_lineas l WHERE l.id = p_linea_id AND l.evento_id = p_evento_id;
-        IF v_estado IS NULL OR v_estado <> 'pendiente' THEN
-            RETURN FALSE;
-        END IF;
+DECLARE
+    v_todo_el_dia BOOLEAN;
+    v_estado      VARCHAR;
+BEGIN
+    SELECT fn_agenda_linea_estado(l.estado, l.documento_id) INTO v_estado
+      FROM agenda_evento_lineas l WHERE l.id = p_linea_id AND l.evento_id = p_evento_id;
+    IF v_estado IS NULL OR v_estado <> 'pendiente' THEN
+        RETURN FALSE;
+    END IF;
 
-        IF p_funcionario_id IS NOT NULL THEN
-            SELECT todo_el_dia INTO v_todo_el_dia FROM agenda_eventos WHERE id = p_evento_id;
-            PERFORM fn_valida_horario_funcionario(p_funcionario_id, p_fecha_inicio, p_fecha_fin, v_todo_el_dia);
-        END IF;
+    IF p_funcionario_id IS NOT NULL THEN
+        SELECT todo_el_dia INTO v_todo_el_dia FROM agenda_eventos WHERE id = p_evento_id;
+        PERFORM fn_valida_horario_funcionario(p_funcionario_id, p_fecha_inicio, p_fecha_fin, v_todo_el_dia);
+    END IF;
+    PERFORM fn_valida_espacio_libre(p_espacio_id, p_fecha_inicio, p_fecha_fin, NULL, p_evento_id);
 
-        DELETE FROM agenda_evento_linea_productos WHERE linea_id = p_linea_id;
-        UPDATE agenda_evento_lineas SET
-            servicio_id = p_servicio_id, funcionario_id = p_funcionario_id,
-            fecha_inicio = p_fecha_inicio, fecha_fin = p_fecha_fin,
-            comentario = p_comentario, ubicacion = p_ubicacion, orden = p_orden,
-            updated_at = NOW()
-        WHERE id = p_linea_id;
-        RETURN TRUE;
-    END; $$;
+    DELETE FROM agenda_evento_linea_productos WHERE linea_id = p_linea_id;
+    UPDATE agenda_evento_lineas SET
+        servicio_id = p_servicio_id, funcionario_id = p_funcionario_id,
+        fecha_inicio = p_fecha_inicio, fecha_fin = p_fecha_fin,
+        comentario = p_comentario, ubicacion = p_ubicacion, espacio_id = p_espacio_id, orden = p_orden,
+        updated_at = NOW()
+    WHERE id = p_linea_id;
+    RETURN TRUE;
+END; $$;
 
 
 --
@@ -837,70 +1006,74 @@ CREATE FUNCTION public.sp_agenda_evento_lineas_delete(p_evento_id bigint) RETURN
 -- Name: sp_agenda_evento_lineas_list(bigint); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_agenda_evento_lineas_list(p_evento_id bigint) RETURNS TABLE(linea_id bigint, servicio_id bigint, servicio_nombre character varying, funcionario_id bigint, funcionario_nombre character varying, funcionario_color character varying, fecha_inicio timestamp without time zone, fecha_fin timestamp without time zone, comentario text, ubicacion character varying, orden integer, productos jsonb, estado character varying, documento_id bigint, documento_numero character varying, motivo_cancelacion text, cancelado_at timestamp without time zone, cancelado_por_nombre character varying)
+CREATE FUNCTION public.sp_agenda_evento_lineas_list(p_evento_id bigint) RETURNS TABLE(linea_id bigint, servicio_id bigint, servicio_nombre character varying, funcionario_id bigint, funcionario_nombre character varying, funcionario_color character varying, fecha_inicio timestamp without time zone, fecha_fin timestamp without time zone, comentario text, ubicacion character varying, orden integer, productos jsonb, estado character varying, documento_id bigint, documento_numero character varying, motivo_cancelacion text, cancelado_at timestamp without time zone, cancelado_por_nombre character varying, espacio_id bigint, espacio_nombre character varying)
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public', 'pg_temp'
     AS $$
-    BEGIN
-        RETURN QUERY
-        SELECT l.id, l.servicio_id, s.name,
-               l.funcionario_id, f.name, f.color,
-               l.fecha_inicio, l.fecha_fin,
-               l.comentario, l.ubicacion, l.orden,
-               COALESCE((
-                   SELECT jsonb_agg(jsonb_build_object(
-                       'producto_id', p.id, 'nombre', p.name,
-                       'price', p.price, 'moneda', p.moneda,
-                       'cantidad', lp.cantidad
-                   ))
-                   FROM agenda_evento_linea_productos lp
-                   JOIN productos p ON p.id = lp.producto_id
-                   WHERE lp.linea_id = l.id
-               ), '[]'::jsonb) AS productos,
-               fn_agenda_linea_estado(l.estado, l.documento_id)::VARCHAR,
-               CASE WHEN fn_agenda_linea_estado(l.estado, l.documento_id) = 'facturado' THEN l.documento_id END,
-               CASE WHEN fn_agenda_linea_estado(l.estado, l.documento_id) = 'facturado'
-                    THEN (SELECT d.numero_consecutivo::VARCHAR FROM documentos_electronicos d WHERE d.id = l.documento_id) END,
-               l.motivo_cancelacion, l.cancelado_at, l.cancelado_por_nombre
-        FROM agenda_evento_lineas l
-        LEFT JOIN servicios    s ON s.id = l.servicio_id
-        LEFT JOIN funcionarios f ON f.id = l.funcionario_id
-        WHERE l.evento_id = p_evento_id
-        ORDER BY l.orden, l.id;
-    END; $$;
+BEGIN
+    RETURN QUERY
+    SELECT l.id, l.servicio_id, s.name,
+           l.funcionario_id, f.name, f.color,
+           l.fecha_inicio, l.fecha_fin,
+           l.comentario, l.ubicacion, l.orden,
+           COALESCE((
+               SELECT jsonb_agg(jsonb_build_object(
+                   'producto_id', p.id, 'nombre', p.name,
+                   'price', p.price, 'moneda', p.moneda,
+                   'cantidad', lp.cantidad
+               ))
+               FROM agenda_evento_linea_productos lp
+               JOIN productos p ON p.id = lp.producto_id
+               WHERE lp.linea_id = l.id
+           ), '[]'::jsonb) AS productos,
+           fn_agenda_linea_estado(l.estado, l.documento_id)::VARCHAR,
+           CASE WHEN fn_agenda_linea_estado(l.estado, l.documento_id) = 'facturado' THEN l.documento_id END,
+           CASE WHEN fn_agenda_linea_estado(l.estado, l.documento_id) = 'facturado'
+                THEN (SELECT d.numero_consecutivo::VARCHAR FROM documentos_electronicos d WHERE d.id = l.documento_id) END,
+           l.motivo_cancelacion, l.cancelado_at, l.cancelado_por_nombre,
+           l.espacio_id, es.nombre
+    FROM agenda_evento_lineas l
+    LEFT JOIN servicios        s  ON s.id  = l.servicio_id
+    LEFT JOIN funcionarios     f  ON f.id  = l.funcionario_id
+    LEFT JOIN agenda_espacios  es ON es.id = l.espacio_id
+    WHERE l.evento_id = p_evento_id
+    ORDER BY l.orden, l.id;
+END; $$;
 
 
 --
 -- Name: sp_agenda_evento_list(bigint, timestamp without time zone, timestamp without time zone, bigint[], bigint); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_agenda_evento_list(p_empresa_id bigint, p_fecha_desde timestamp without time zone, p_fecha_hasta timestamp without time zone, p_funcionario_ids bigint[] DEFAULT NULL::bigint[], p_sucursal_id bigint DEFAULT NULL::bigint) RETURNS TABLE(evento_id bigint, linea_id bigint, titulo character varying, fecha_inicio timestamp without time zone, fecha_fin timestamp without time zone, todo_el_dia boolean, cliente_id bigint, cliente_nombre character varying, cliente_telefono character varying, cliente_email character varying, color character varying, estado character varying, servicio_id bigint, servicio_nombre character varying, funcionario_id bigint, funcionario_nombre character varying, funcionario_color character varying, sucursal_id bigint, linea_estado character varying)
+CREATE FUNCTION public.sp_agenda_evento_list(p_empresa_id bigint, p_fecha_desde timestamp without time zone, p_fecha_hasta timestamp without time zone, p_funcionario_ids bigint[] DEFAULT NULL::bigint[], p_sucursal_id bigint DEFAULT NULL::bigint) RETURNS TABLE(evento_id bigint, linea_id bigint, titulo character varying, fecha_inicio timestamp without time zone, fecha_fin timestamp without time zone, todo_el_dia boolean, cliente_id bigint, cliente_nombre character varying, cliente_telefono character varying, cliente_email character varying, color character varying, estado character varying, servicio_id bigint, servicio_nombre character varying, funcionario_id bigint, funcionario_nombre character varying, funcionario_color character varying, sucursal_id bigint, linea_estado character varying, espacio_id bigint, espacio_nombre character varying)
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public', 'pg_temp'
     AS $$
-    BEGIN
-        RETURN QUERY
-        SELECT ae.id, l.id, ae.titulo,
-               l.fecha_inicio, l.fecha_fin, ae.todo_el_dia,
-               ae.cliente_id, c.name AS cliente_nombre, c.phone AS cliente_telefono, c.email AS cliente_email,
-               ae.color, ae.estado,
-               l.servicio_id, s.name AS servicio_nombre,
-               l.funcionario_id, f.name AS funcionario_nombre, f.color AS funcionario_color,
-               ae.sucursal_id,
-               fn_agenda_linea_estado(l.estado, l.documento_id)::VARCHAR AS linea_estado
-        FROM agenda_eventos ae
-        JOIN agenda_evento_lineas l ON l.evento_id = ae.id
-        LEFT JOIN clients c ON c.id = ae.cliente_id
-        LEFT JOIN servicios    s ON s.id = l.servicio_id
-        LEFT JOIN funcionarios f ON f.id = l.funcionario_id
-        WHERE ae.empresa_id = p_empresa_id
-          AND ae.deleted_at IS NULL
-          AND l.fecha_inicio < p_fecha_hasta
-          AND l.fecha_fin > p_fecha_desde
-          AND (p_funcionario_ids IS NULL OR array_length(p_funcionario_ids, 1) IS NULL OR l.funcionario_id = ANY(p_funcionario_ids))
-          AND (p_sucursal_id IS NULL OR ae.sucursal_id = p_sucursal_id)
-        ORDER BY l.fecha_inicio, l.orden;
-    END; $$;
+BEGIN
+    RETURN QUERY
+    SELECT ae.id, l.id, ae.titulo,
+           l.fecha_inicio, l.fecha_fin, ae.todo_el_dia,
+           ae.cliente_id, c.name AS cliente_nombre, c.phone AS cliente_telefono, c.email AS cliente_email,
+           ae.color, ae.estado,
+           l.servicio_id, s.name AS servicio_nombre,
+           l.funcionario_id, f.name AS funcionario_nombre, f.color AS funcionario_color,
+           ae.sucursal_id,
+           fn_agenda_linea_estado(l.estado, l.documento_id)::VARCHAR AS linea_estado,
+           l.espacio_id, es.nombre AS espacio_nombre
+    FROM agenda_eventos ae
+    JOIN agenda_evento_lineas l ON l.evento_id = ae.id
+    LEFT JOIN clients c ON c.id = ae.cliente_id
+    LEFT JOIN servicios        s  ON s.id  = l.servicio_id
+    LEFT JOIN funcionarios     f  ON f.id  = l.funcionario_id
+    LEFT JOIN agenda_espacios  es ON es.id = l.espacio_id
+    WHERE ae.empresa_id = p_empresa_id
+      AND ae.deleted_at IS NULL
+      AND l.fecha_inicio < p_fecha_hasta
+      AND l.fecha_fin > p_fecha_desde
+      AND (p_funcionario_ids IS NULL OR array_length(p_funcionario_ids, 1) IS NULL OR l.funcionario_id = ANY(p_funcionario_ids))
+      AND (p_sucursal_id IS NULL OR ae.sucursal_id = p_sucursal_id)
+    ORDER BY l.fecha_inicio, l.orden;
+END; $$;
 
 
 --
@@ -7722,6 +7895,79 @@ ALTER SEQUENCE public.agenda_avisos_tokens_id_seq OWNED BY public.agenda_avisos_
 
 
 --
+-- Name: agenda_espacios; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.agenda_espacios (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    sucursal_id bigint,
+    nombre character varying(100) NOT NULL,
+    descripcion character varying(255),
+    is_active boolean DEFAULT true NOT NULL,
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: agenda_espacios_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.agenda_espacios_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'agenda_espacios'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: agenda_espacios_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.agenda_espacios_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: agenda_espacios_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.agenda_espacios_auditoria_id_seq OWNED BY public.agenda_espacios_auditoria.id;
+
+
+--
+-- Name: agenda_espacios_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.agenda_espacios_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: agenda_espacios_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.agenda_espacios_id_seq OWNED BY public.agenda_espacios.id;
+
+
+--
 -- Name: agenda_evento_linea_productos; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -7775,6 +8021,7 @@ CREATE TABLE public.agenda_evento_lineas (
     cancelado_at timestamp without time zone,
     cancelado_por bigint,
     cancelado_por_nombre character varying(150),
+    espacio_id bigint,
     CONSTRAINT chk_agenda_linea_estado CHECK (((estado)::text = ANY ((ARRAY['pendiente'::character varying, 'facturado'::character varying, 'cancelado'::character varying])::text[])))
 );
 
@@ -11366,6 +11613,20 @@ ALTER TABLE ONLY public.agenda_avisos_tokens ALTER COLUMN id SET DEFAULT nextval
 
 
 --
+-- Name: agenda_espacios id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.agenda_espacios ALTER COLUMN id SET DEFAULT nextval('public.agenda_espacios_id_seq'::regclass);
+
+
+--
+-- Name: agenda_espacios_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.agenda_espacios_auditoria ALTER COLUMN id SET DEFAULT nextval('public.agenda_espacios_auditoria_id_seq'::regclass);
+
+
+--
 -- Name: agenda_evento_linea_productos id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -12010,6 +12271,22 @@ ALTER TABLE ONLY public.agenda_avisos_envios
 
 ALTER TABLE ONLY public.agenda_avisos_tokens
     ADD CONSTRAINT agenda_avisos_tokens_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: agenda_espacios_auditoria agenda_espacios_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.agenda_espacios_auditoria
+    ADD CONSTRAINT agenda_espacios_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: agenda_espacios agenda_espacios_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.agenda_espacios
+    ADD CONSTRAINT agenda_espacios_pkey PRIMARY KEY (id);
 
 
 --
@@ -13028,6 +13305,20 @@ CREATE INDEX idx_agenda_avisos_tokens_evento ON public.agenda_avisos_tokens USIN
 
 
 --
+-- Name: idx_agenda_espacios_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_agenda_espacios_auditoria_registro ON public.agenda_espacios_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_agenda_espacios_empresa; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_agenda_espacios_empresa ON public.agenda_espacios USING btree (empresa_id) WHERE (deleted_at IS NULL);
+
+
+--
 -- Name: idx_agenda_evento_linea_productos_linea; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -13046,6 +13337,13 @@ CREATE INDEX idx_agenda_evento_lineas_auditoria_registro ON public.agenda_evento
 --
 
 CREATE INDEX idx_agenda_evento_lineas_documento ON public.agenda_evento_lineas USING btree (documento_id);
+
+
+--
+-- Name: idx_agenda_evento_lineas_espacio; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_agenda_evento_lineas_espacio ON public.agenda_evento_lineas USING btree (espacio_id, fecha_inicio, fecha_fin) WHERE (espacio_id IS NOT NULL);
 
 
 --
@@ -13637,6 +13935,13 @@ CREATE INDEX idx_sucursal_contacto_empresa ON public.sucursal_contacto USING btr
 
 
 --
+-- Name: uq_agenda_espacios_nombre; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_agenda_espacios_nombre ON public.agenda_espacios USING btree (empresa_id, COALESCE(sucursal_id, (0)::bigint), lower((nombre)::text)) WHERE (deleted_at IS NULL);
+
+
+--
 -- Name: uq_emp_tarifa_imp_empresa_codigo; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -13662,6 +13967,13 @@ CREATE UNIQUE INDEX uq_emp_tipo_imp_empresa_codigo ON public.empresa_tipos_impue
 --
 
 CREATE UNIQUE INDEX uq_fr_clave ON public.facturas_recibidas USING btree (empresa_id, clave) WHERE (clave IS NOT NULL);
+
+
+--
+-- Name: agenda_espacios trg_agenda_espacios_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_agenda_espacios_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.agenda_espacios FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
 
 
 --
@@ -13907,6 +14219,14 @@ CREATE TRIGGER trg_sucursal_bodegas_auditoria AFTER INSERT OR DELETE OR UPDATE O
 --
 
 CREATE TRIGGER trg_sucursal_contacto_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.sucursal_contacto FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: agenda_evento_lineas agenda_evento_lineas_espacio_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.agenda_evento_lineas
+    ADD CONSTRAINT agenda_evento_lineas_espacio_id_fkey FOREIGN KEY (espacio_id) REFERENCES public.agenda_espacios(id);
 
 
 --
@@ -14161,5 +14481,5 @@ ALTER TABLE ONLY public.sucursal_bodegas
 -- PostgreSQL database dump complete
 --
 
-\unrestrict jt5YClkTYFGB5uBm38XZ7lsGckhgXL9T3tADmcEzChwv732K7tScMTCCdiM1JC4
+\unrestrict rOMpX6PD3PevMWgh88HeCwZuBs5ufbYfmj1fbpFSseqHwiItLCjs3fwf2gWyBAX
 
