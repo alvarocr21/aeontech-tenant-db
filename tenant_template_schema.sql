@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict HmSEh8ZpnsPbAFw9EKzcHbR7YiFRs9iuEAasQkytCHendzLEFQQCizc6PtDIRx8
+\restrict jt5YClkTYFGB5uBm38XZ7lsGckhgXL9T3tADmcEzChwv732K7tScMTCCdiM1JC4
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
@@ -23,6 +23,20 @@ SET row_security = off;
 --
 
 -- *not* creating schema, since initdb creates it
+
+
+--
+-- Name: pg_trgm; Type: EXTENSION; Schema: -; Owner: -
+--
+
+CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public;
+
+
+--
+-- Name: EXTENSION pg_trgm; Type: COMMENT; Schema: -; Owner: -
+--
+
+COMMENT ON EXTENSION pg_trgm IS 'text similarity measurement and index searching based on trigrams';
 
 
 --
@@ -3302,27 +3316,44 @@ CREATE FUNCTION public.sp_documento_get(p_id bigint, p_empresa_id bigint) RETURN
 CREATE FUNCTION public.sp_documento_list(p_empresa_id bigint, p_tipo_documento character varying DEFAULT NULL::character varying, p_estado character varying DEFAULT NULL::character varying, p_search text DEFAULT NULL::text, p_fecha_desde date DEFAULT NULL::date, p_fecha_hasta date DEFAULT NULL::date, p_page integer DEFAULT 1, p_per_page integer DEFAULT 20) RETURNS TABLE(id bigint, tipo_documento character varying, clave character varying, numero_consecutivo character varying, fecha_emision timestamp without time zone, receptor_nombre character varying, receptor_numero_id character varying, moneda character varying, total_comprobante numeric, estado character varying, aceptado_at timestamp without time zone, created_at timestamp without time zone, condicion_venta character varying, receptor_cliente_id bigint, total_rows bigint)
     LANGUAGE plpgsql
     AS $$
+DECLARE
+    v_total BIGINT;
 BEGIN
+    -- El total se cuenta aparte: COUNT(*) OVER() obliga a ordenar todo el conjunto antes de devolver la página.
+    SELECT COUNT(*) INTO v_total
+    FROM documentos_electronicos d
+    WHERE d.empresa_id = p_empresa_id
+      AND d.deleted_at IS NULL
+      AND (p_tipo_documento IS NULL OR d.tipo_documento = p_tipo_documento)
+      AND (p_estado IS NULL OR d.estado = p_estado)
+      AND (p_fecha_desde IS NULL OR d.fecha_emision >= p_fecha_desde)
+      AND (p_fecha_hasta IS NULL OR d.fecha_emision < p_fecha_hasta + 1)
+      AND (p_search IS NULL
+           OR d.clave ILIKE '%' || p_search || '%'
+           OR d.receptor_nombre ILIKE '%' || p_search || '%'
+           OR d.receptor_numero_id ILIKE '%' || p_search || '%'
+           OR d.numero_consecutivo ILIKE '%' || p_search || '%');
+
     RETURN QUERY
     SELECT
         d.id, d.tipo_documento, d.clave, d.numero_consecutivo,
         d.fecha_emision, d.receptor_nombre, d.receptor_numero_id,
         d.moneda, d.total_comprobante, d.estado, d.aceptado_at,
         d.created_at, d.condicion_venta, d.receptor_cliente_id,
-        COUNT(*) OVER()::BIGINT AS total_rows
+        v_total
     FROM documentos_electronicos d
     WHERE d.empresa_id = p_empresa_id
       AND d.deleted_at IS NULL
       AND (p_tipo_documento IS NULL OR d.tipo_documento = p_tipo_documento)
       AND (p_estado IS NULL OR d.estado = p_estado)
-      AND (p_fecha_desde IS NULL OR d.fecha_emision::DATE >= p_fecha_desde)
-      AND (p_fecha_hasta IS NULL OR d.fecha_emision::DATE <= p_fecha_hasta)
+      AND (p_fecha_desde IS NULL OR d.fecha_emision >= p_fecha_desde)
+      AND (p_fecha_hasta IS NULL OR d.fecha_emision < p_fecha_hasta + 1)
       AND (p_search IS NULL
            OR d.clave ILIKE '%' || p_search || '%'
            OR d.receptor_nombre ILIKE '%' || p_search || '%'
            OR d.receptor_numero_id ILIKE '%' || p_search || '%'
            OR d.numero_consecutivo ILIKE '%' || p_search || '%')
-    ORDER BY d.created_at DESC
+    ORDER BY d.created_at DESC, d.id DESC
     LIMIT p_per_page OFFSET (p_page - 1) * p_per_page;
 END;
 $$;
@@ -4735,7 +4766,18 @@ CREATE FUNCTION public.sp_inventario_kardex(p_empresa_id bigint, p_producto_id b
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public', 'pg_temp'
     AS $$
+            DECLARE
+                v_total BIGINT;
             BEGIN
+                -- Total aparte (los LEFT JOIN no cambian el conteo): evita ordenar todo el kardex para contarlo.
+                SELECT COUNT(*) INTO v_total
+                FROM movimientos_inventario m
+                WHERE m.empresa_id       = p_empresa_id
+                  AND (p_producto_id IS NULL OR m.producto_id      = p_producto_id)
+                  AND (p_bodega_id   IS NULL OR m.bodega_origen_id = p_bodega_id)
+                  AND (p_fecha_desde IS NULL OR m.created_at >= p_fecha_desde)
+                  AND (p_fecha_hasta IS NULL OR m.created_at < p_fecha_hasta + 1);
+
                 RETURN QUERY
                 SELECT
                     m.id,
@@ -4762,7 +4804,7 @@ CREATE FUNCTION public.sp_inventario_kardex(p_empresa_id bigint, p_producto_id b
                     m.stock_despues,
                     m.user_id,
                     m.notas,
-                    COUNT(*) OVER()::BIGINT AS total_rows
+                    v_total AS total_rows
                 FROM movimientos_inventario m
                 LEFT JOIN productos p ON p.id = m.producto_id
                 LEFT JOIN bodegas   bo ON bo.id = m.bodega_origen_id
@@ -4770,8 +4812,8 @@ CREATE FUNCTION public.sp_inventario_kardex(p_empresa_id bigint, p_producto_id b
                 WHERE m.empresa_id       = p_empresa_id
                   AND (p_producto_id IS NULL OR m.producto_id      = p_producto_id)
                   AND (p_bodega_id   IS NULL OR m.bodega_origen_id = p_bodega_id)
-                  AND (p_fecha_desde IS NULL OR m.created_at::date >= p_fecha_desde)
-                  AND (p_fecha_hasta IS NULL OR m.created_at::date <= p_fecha_hasta)
+                  AND (p_fecha_desde IS NULL OR m.created_at >= p_fecha_desde)
+                  AND (p_fecha_hasta IS NULL OR m.created_at < p_fecha_hasta + 1)
                 ORDER BY m.created_at DESC, m.id DESC
                 LIMIT GREATEST(p_per_page, 1) OFFSET GREATEST(p_page - 1, 0) * GREATEST(p_per_page, 1);
             END;
@@ -4805,8 +4847,8 @@ BEGIN
         WHERE m.empresa_id       = p_empresa_id
           AND (p_producto_id IS NULL OR m.producto_id      = p_producto_id)
           AND (p_bodega_id   IS NULL OR m.bodega_origen_id = p_bodega_id)
-          AND (p_fecha_desde IS NULL OR m.created_at::date >= p_fecha_desde)
-          AND (p_fecha_hasta IS NULL OR m.created_at::date <= p_fecha_hasta)
+          AND (p_fecha_desde IS NULL OR m.created_at >= p_fecha_desde)
+          AND (p_fecha_hasta IS NULL OR m.created_at < p_fecha_hasta + 1)
     )
     SELECT
         COUNT(*)::BIGINT,
@@ -4825,9 +4867,25 @@ $$;
 --
 
 CREATE FUNCTION public.sp_inventario_movimientos(p_empresa_id bigint, p_bodega_id bigint DEFAULT NULL::bigint, p_producto_id bigint DEFAULT NULL::bigint, p_tipo character varying DEFAULT NULL::character varying, p_fecha_desde date DEFAULT NULL::date, p_fecha_hasta date DEFAULT NULL::date, p_limit integer DEFAULT 100, p_offset integer DEFAULT 0) RETURNS TABLE(id bigint, fecha timestamp without time zone, tipo character varying, bodega_origen character varying, bodega_destino character varying, producto_codigo character varying, producto_nombre character varying, cantidad numeric, stock_antes numeric, stock_despues numeric, precio_base numeric, monto_total numeric, referencia character varying, notas text, documento_id bigint, user_id bigint, proveedor_nombre character varying, total_count bigint)
-    LANGUAGE sql SECURITY DEFINER
+    LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public', 'pg_temp'
     AS $$
+            DECLARE
+                v_total BIGINT;
+            BEGIN
+                -- Total aparte; los JOIN internos sí afectan el conteo y se conservan.
+                SELECT COUNT(*) INTO v_total
+                FROM movimientos_inventario m
+                JOIN bodegas bo  ON bo.id = m.bodega_origen_id
+                JOIN productos p ON p.id = m.producto_id
+                WHERE m.empresa_id = p_empresa_id
+                  AND (p_bodega_id   IS NULL OR m.bodega_origen_id = p_bodega_id)
+                  AND (p_producto_id IS NULL OR m.producto_id      = p_producto_id)
+                  AND (p_tipo        IS NULL OR m.tipo             = p_tipo)
+                  AND (p_fecha_desde IS NULL OR m.created_at >= p_fecha_desde)
+                  AND (p_fecha_hasta IS NULL OR m.created_at < p_fecha_hasta + 1);
+
+                RETURN QUERY
                 SELECT
                     m.id,
                     m.created_at,
@@ -4846,7 +4904,7 @@ CREATE FUNCTION public.sp_inventario_movimientos(p_empresa_id bigint, p_bodega_i
                     m.documento_id,
                     m.user_id,
                     prov.name AS proveedor_nombre,
-                    COUNT(*) OVER() AS total_count
+                    v_total AS total_count
                 FROM movimientos_inventario m
                 JOIN bodegas bo  ON bo.id = m.bodega_origen_id
                 LEFT JOIN bodegas bd ON bd.id = m.bodega_destino_id
@@ -4856,10 +4914,11 @@ CREATE FUNCTION public.sp_inventario_movimientos(p_empresa_id bigint, p_bodega_i
                   AND (p_bodega_id   IS NULL OR m.bodega_origen_id = p_bodega_id)
                   AND (p_producto_id IS NULL OR m.producto_id      = p_producto_id)
                   AND (p_tipo        IS NULL OR m.tipo             = p_tipo)
-                  AND (p_fecha_desde IS NULL OR m.created_at::date >= p_fecha_desde)
-                  AND (p_fecha_hasta IS NULL OR m.created_at::date <= p_fecha_hasta)
+                  AND (p_fecha_desde IS NULL OR m.created_at >= p_fecha_desde)
+                  AND (p_fecha_hasta IS NULL OR m.created_at < p_fecha_hasta + 1)
                 ORDER BY m.created_at DESC, m.id DESC
                 LIMIT p_limit OFFSET p_offset;
+            END;
             $$;
 
 
@@ -6820,8 +6879,8 @@ BEGIN
     FROM documentos_electronicos d
     WHERE d.empresa_id  = p_empresa_id
       AND d.deleted_at  IS NULL
-      AND (p_fecha_desde IS NULL OR d.fecha_emision::DATE >= p_fecha_desde)
-      AND (p_fecha_hasta IS NULL OR d.fecha_emision::DATE <= p_fecha_hasta)
+      AND (p_fecha_desde IS NULL OR d.fecha_emision >= p_fecha_desde)
+      AND (p_fecha_hasta IS NULL OR d.fecha_emision < p_fecha_hasta + 1)
     GROUP BY d.estado, d.tipo_documento, COALESCE(d.moneda, 'CRC')
     ORDER BY d.estado, d.tipo_documento, COALESCE(d.moneda, 'CRC');
 END;
@@ -6993,7 +7052,7 @@ CREATE FUNCTION public.sp_reporte_libro_ventas(p_empresa_id bigint, p_fecha_desd
                 FROM documentos_electronicos d
                 WHERE d.empresa_id  = p_empresa_id
                   AND d.deleted_at  IS NULL
-                  AND d.fecha_emision::DATE BETWEEN p_fecha_desde AND p_fecha_hasta
+                  AND d.fecha_emision >= p_fecha_desde AND d.fecha_emision < p_fecha_hasta + 1
                   AND (p_tipo_documento IS NULL OR d.tipo_documento = p_tipo_documento)
                   AND (p_estado         IS NULL OR d.estado         = p_estado)
                 ORDER BY d.fecha_emision DESC;
@@ -7024,7 +7083,7 @@ BEGIN
       AND d.deleted_at  IS NULL
       AND d.tipo_documento <> '08'
       AND COALESCE(d.moneda, 'CRC') = COALESCE(p_moneda, 'CRC')
-      AND d.fecha_emision::DATE BETWEEN p_fecha_desde AND p_fecha_hasta
+      AND d.fecha_emision >= p_fecha_desde AND d.fecha_emision < p_fecha_hasta + 1
     GROUP BY d.receptor_nombre, d.receptor_numero_id
     ORDER BY SUM(CASE WHEN d.tipo_documento = '03' THEN -d.total_comprobante ELSE d.total_comprobante END) DESC
     LIMIT p_limit;
@@ -7062,7 +7121,7 @@ BEGIN
     WHERE d.empresa_id  = p_empresa_id
       AND d.estado      = 'aceptado'
       AND d.deleted_at  IS NULL
-      AND d.fecha_emision::DATE BETWEEN p_fecha_desde AND p_fecha_hasta
+      AND d.fecha_emision >= p_fecha_desde AND d.fecha_emision < p_fecha_hasta + 1
     GROUP BY d.tipo_documento, COALESCE(d.moneda, 'CRC')
     ORDER BY COALESCE(d.moneda, 'CRC'), SUM(d.total_comprobante) DESC;
 END;
@@ -13193,10 +13252,45 @@ CREATE INDEX idx_doc_referencias_documento ON public.documento_referencias USING
 
 
 --
+-- Name: idx_docs_empresa_created; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_docs_empresa_created ON public.documentos_electronicos USING btree (empresa_id, created_at DESC, id DESC) WHERE (deleted_at IS NULL);
+
+
+--
 -- Name: idx_docs_receptor_fecha; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX idx_docs_receptor_fecha ON public.documentos_electronicos USING btree (receptor_cliente_id, fecha_emision DESC, id DESC) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_docs_trgm_clave; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_docs_trgm_clave ON public.documentos_electronicos USING gin (clave public.gin_trgm_ops) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_docs_trgm_consec; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_docs_trgm_consec ON public.documentos_electronicos USING gin (numero_consecutivo public.gin_trgm_ops) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_docs_trgm_nombre; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_docs_trgm_nombre ON public.documentos_electronicos USING gin (receptor_nombre public.gin_trgm_ops) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_docs_trgm_numid; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_docs_trgm_numid ON public.documentos_electronicos USING gin (receptor_numero_id public.gin_trgm_ops) WHERE (deleted_at IS NULL);
 
 
 --
@@ -13414,6 +13508,13 @@ CREATE INDEX idx_mov_inv_documento ON public.movimientos_inventario USING btree 
 --
 
 CREATE INDEX idx_mov_inv_empresa ON public.movimientos_inventario USING btree (empresa_id);
+
+
+--
+-- Name: idx_mov_inv_empresa_created; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_mov_inv_empresa_created ON public.movimientos_inventario USING btree (empresa_id, created_at DESC, id DESC);
 
 
 --
@@ -13651,7 +13752,7 @@ CREATE TRIGGER trg_documento_cxc_aplicaciones_auditoria AFTER INSERT OR DELETE O
 -- Name: documentos_electronicos trg_documentos_auditoria; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE TRIGGER trg_documentos_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.documentos_electronicos FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+CREATE TRIGGER trg_documentos_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.documentos_electronicos FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica('xml_firmado', 'xml_respuesta');
 
 
 --
@@ -14060,5 +14161,5 @@ ALTER TABLE ONLY public.sucursal_bodegas
 -- PostgreSQL database dump complete
 --
 
-\unrestrict HmSEh8ZpnsPbAFw9EKzcHbR7YiFRs9iuEAasQkytCHendzLEFQQCizc6PtDIRx8
+\unrestrict jt5YClkTYFGB5uBm38XZ7lsGckhgXL9T3tADmcEzChwv732K7tScMTCCdiM1JC4
 
