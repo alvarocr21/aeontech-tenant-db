@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict mkRoB9lNpS1OdrhAGgJgbaJsRVatB6qmEK23ccJNT3ufOrrpUPxpTmgFmDLwDlc
+\restrict fq3XCWg4KV8Hcmv3VLsscMZG412dGTo0vDPD0pWRYgbv8ccTwt2NYaH5VcHshJ8
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
@@ -5611,6 +5611,93 @@ CREATE FUNCTION public.sp_mercadeo_destinatarios_resolver(p_empresa_id bigint, p
 
 
 --
+-- Name: sp_mercadeo_imagen_create(bigint, character varying, character varying, character varying, integer, integer, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_mercadeo_imagen_create(p_empresa_id bigint, p_nombre character varying, p_clave character varying, p_mime character varying, p_ancho integer, p_alto integer, p_tamano bigint, p_user_id bigint) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_id BIGINT;
+BEGIN
+    INSERT INTO mercadeo_imagenes (empresa_id, nombre, clave, mime, ancho, alto, tamano_bytes, created_by)
+    VALUES (p_empresa_id, p_nombre, p_clave, p_mime, p_ancho, p_alto, p_tamano, p_user_id)
+    RETURNING mercadeo_imagenes.id INTO v_id;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_mercadeo_imagen_get(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_mercadeo_imagen_get(p_id bigint, p_empresa_id bigint) RETURNS TABLE(id bigint, nombre character varying, clave character varying, mime character varying, ancho integer, alto integer, tamano_bytes bigint, created_at timestamp without time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT i.id, i.nombre, i.clave, i.mime, i.ancho, i.alto, i.tamano_bytes, i.created_at
+    FROM mercadeo_imagenes i
+    WHERE i.id = p_id AND i.empresa_id = p_empresa_id AND i.deleted_at IS NULL;
+END; $$;
+
+
+--
+-- Name: sp_mercadeo_imagen_list(bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_mercadeo_imagen_list(p_empresa_id bigint) RETURNS TABLE(id bigint, nombre character varying, clave character varying, mime character varying, ancho integer, alto integer, tamano_bytes bigint, created_at timestamp without time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT i.id, i.nombre, i.clave, i.mime, i.ancho, i.alto, i.tamano_bytes, i.created_at
+    FROM mercadeo_imagenes i
+    WHERE i.empresa_id = p_empresa_id AND i.deleted_at IS NULL
+    ORDER BY i.id DESC
+    LIMIT 500;
+END; $$;
+
+
+--
+-- Name: sp_mercadeo_imagen_soft_delete(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_mercadeo_imagen_soft_delete(p_id bigint, p_empresa_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    UPDATE mercadeo_imagenes SET deleted_at = NOW(), updated_at = NOW()
+    WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
+    RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: sp_mercadeo_imagen_usos(bigint, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_mercadeo_imagen_usos(p_empresa_id bigint, p_clave character varying) RETURNS TABLE(plantilla_id bigint, nombre character varying, eliminada boolean)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT p.id, p.nombre, (p.deleted_at IS NOT NULL)
+    FROM mercadeo_plantillas p
+    WHERE p.empresa_id = p_empresa_id
+      AND position(p_clave in COALESCE(p.contenido_html, '')) > 0
+      AND (p.deleted_at IS NULL
+           OR EXISTS (SELECT 1 FROM mercadeo_campanas c WHERE c.plantilla_id = p.id))
+    ORDER BY p.nombre
+    LIMIT 20;
+END; $$;
+
+
+--
 -- Name: sp_mercadeo_plantilla_create(bigint, character varying, character varying, character varying, character varying, text, text, jsonb); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -10699,6 +10786,83 @@ ALTER SEQUENCE public.mercadeo_campanas_id_seq OWNED BY public.mercadeo_campanas
 
 
 --
+-- Name: mercadeo_imagenes; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.mercadeo_imagenes (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    nombre character varying(150) NOT NULL,
+    clave character varying(512) NOT NULL,
+    mime character varying(20) NOT NULL,
+    ancho integer NOT NULL,
+    alto integer NOT NULL,
+    tamano_bytes bigint NOT NULL,
+    created_by bigint,
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT chk_mercadeo_imagenes_mime CHECK (((mime)::text = ANY ((ARRAY['image/jpeg'::character varying, 'image/png'::character varying])::text[])))
+);
+
+
+--
+-- Name: mercadeo_imagenes_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.mercadeo_imagenes_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'mercadeo_imagenes'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: mercadeo_imagenes_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.mercadeo_imagenes_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: mercadeo_imagenes_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.mercadeo_imagenes_auditoria_id_seq OWNED BY public.mercadeo_imagenes_auditoria.id;
+
+
+--
+-- Name: mercadeo_imagenes_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.mercadeo_imagenes_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: mercadeo_imagenes_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.mercadeo_imagenes_id_seq OWNED BY public.mercadeo_imagenes.id;
+
+
+--
 -- Name: mercadeo_plantillas; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -12238,6 +12402,20 @@ ALTER TABLE ONLY public.mercadeo_campanas_auditoria ALTER COLUMN id SET DEFAULT 
 
 
 --
+-- Name: mercadeo_imagenes id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.mercadeo_imagenes ALTER COLUMN id SET DEFAULT nextval('public.mercadeo_imagenes_id_seq'::regclass);
+
+
+--
+-- Name: mercadeo_imagenes_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.mercadeo_imagenes_auditoria ALTER COLUMN id SET DEFAULT nextval('public.mercadeo_imagenes_auditoria_id_seq'::regclass);
+
+
+--
 -- Name: mercadeo_plantillas id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -13070,6 +13248,22 @@ ALTER TABLE ONLY public.mercadeo_campanas
 
 
 --
+-- Name: mercadeo_imagenes_auditoria mercadeo_imagenes_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.mercadeo_imagenes_auditoria
+    ADD CONSTRAINT mercadeo_imagenes_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: mercadeo_imagenes mercadeo_imagenes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.mercadeo_imagenes
+    ADD CONSTRAINT mercadeo_imagenes_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: mercadeo_plantillas_auditoria mercadeo_plantillas_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -13395,6 +13589,14 @@ ALTER TABLE ONLY public.empresa_condicion_ventas
 
 ALTER TABLE ONLY public.documento_lineas
     ADD CONSTRAINT uq_linea_doc UNIQUE (documento_id, numero_linea);
+
+
+--
+-- Name: mercadeo_imagenes uq_mercadeo_imagenes_clave; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.mercadeo_imagenes
+    ADD CONSTRAINT uq_mercadeo_imagenes_clave UNIQUE (clave);
 
 
 --
@@ -13954,6 +14156,20 @@ CREATE INDEX idx_mercadeo_campanas_plantilla ON public.mercadeo_campanas USING b
 
 
 --
+-- Name: idx_mercadeo_imagenes_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_mercadeo_imagenes_auditoria_registro ON public.mercadeo_imagenes_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_mercadeo_imagenes_empresa; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_mercadeo_imagenes_empresa ON public.mercadeo_imagenes USING btree (empresa_id, id DESC) WHERE (deleted_at IS NULL);
+
+
+--
 -- Name: idx_mercadeo_plantillas_auditoria_registro; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -14346,6 +14562,13 @@ CREATE TRIGGER trg_mercadeo_campanas_auditoria AFTER INSERT OR DELETE OR UPDATE 
 
 
 --
+-- Name: mercadeo_imagenes trg_mercadeo_imagenes_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_mercadeo_imagenes_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.mercadeo_imagenes FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
 -- Name: mercadeo_plantillas trg_mercadeo_plantillas_auditoria; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -14682,5 +14905,5 @@ ALTER TABLE ONLY public.sucursal_bodegas
 -- PostgreSQL database dump complete
 --
 
-\unrestrict mkRoB9lNpS1OdrhAGgJgbaJsRVatB6qmEK23ccJNT3ufOrrpUPxpTmgFmDLwDlc
+\unrestrict fq3XCWg4KV8Hcmv3VLsscMZG412dGTo0vDPD0pWRYgbv8ccTwt2NYaH5VcHshJ8
 
