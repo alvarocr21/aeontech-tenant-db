@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict rOMpX6PD3PevMWgh88HeCwZuBs5ufbYfmj1fbpFSseqHwiItLCjs3fwf2gWyBAX
+\restrict mkRoB9lNpS1OdrhAGgJgbaJsRVatB6qmEK23ccJNT3ufOrrpUPxpTmgFmDLwDlc
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
@@ -3065,6 +3065,72 @@ BEGIN
     ) RETURNING id INTO v_id;
 
     RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_doc_adjunto_create(bigint, character varying, bigint, character varying, character varying, bigint, character varying, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_doc_adjunto_create(p_empresa_id bigint, p_entidad character varying, p_entidad_id bigint, p_nombre character varying, p_clave character varying, p_tamano bigint, p_sha256 character varying, p_user_id bigint) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_id BIGINT;
+BEGIN
+    INSERT INTO documentos_adjuntos (empresa_id, entidad, entidad_id, nombre, clave, tamano_bytes, sha256, created_by)
+    VALUES (p_empresa_id, p_entidad, p_entidad_id, p_nombre, p_clave, p_tamano, p_sha256, p_user_id)
+    RETURNING documentos_adjuntos.id INTO v_id;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_doc_adjunto_get(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_doc_adjunto_get(p_id bigint, p_empresa_id bigint) RETURNS TABLE(id bigint, entidad character varying, entidad_id bigint, nombre character varying, clave character varying, tamano_bytes bigint, created_at timestamp without time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT d.id, d.entidad, d.entidad_id, d.nombre, d.clave, d.tamano_bytes, d.created_at
+    FROM documentos_adjuntos d
+    WHERE d.id = p_id AND d.empresa_id = p_empresa_id AND d.deleted_at IS NULL;
+END; $$;
+
+
+--
+-- Name: sp_doc_adjunto_list(bigint, character varying, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_doc_adjunto_list(p_empresa_id bigint, p_entidad character varying, p_entidad_id bigint) RETURNS TABLE(id bigint, entidad character varying, entidad_id bigint, nombre character varying, tamano_bytes bigint, created_by bigint, created_at timestamp without time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT d.id, d.entidad, d.entidad_id, d.nombre, d.tamano_bytes, d.created_by, d.created_at
+    FROM documentos_adjuntos d
+    WHERE d.empresa_id = p_empresa_id AND d.entidad = p_entidad AND d.entidad_id = p_entidad_id
+      AND d.deleted_at IS NULL
+    ORDER BY d.id DESC;
+END; $$;
+
+
+--
+-- Name: sp_doc_adjunto_soft_delete(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_doc_adjunto_soft_delete(p_id bigint, p_empresa_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    UPDATE documentos_adjuntos SET deleted_at = NOW(), updated_at = NOW()
+    WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
+    RETURN FOUND;
 END; $$;
 
 
@@ -9575,6 +9641,82 @@ ALTER SEQUENCE public.documento_referencias_id_seq OWNED BY public.documento_ref
 
 
 --
+-- Name: documentos_adjuntos; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.documentos_adjuntos (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    entidad character varying(40) NOT NULL,
+    entidad_id bigint NOT NULL,
+    nombre character varying(200) NOT NULL,
+    clave character varying(512) NOT NULL,
+    tamano_bytes bigint NOT NULL,
+    sha256 character(64) NOT NULL,
+    created_by bigint,
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: documentos_adjuntos_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.documentos_adjuntos_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'documentos_adjuntos'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: documentos_adjuntos_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.documentos_adjuntos_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: documentos_adjuntos_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.documentos_adjuntos_auditoria_id_seq OWNED BY public.documentos_adjuntos_auditoria.id;
+
+
+--
+-- Name: documentos_adjuntos_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.documentos_adjuntos_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: documentos_adjuntos_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.documentos_adjuntos_id_seq OWNED BY public.documentos_adjuntos.id;
+
+
+--
 -- Name: documentos_electronicos_auditoria; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -11886,6 +12028,20 @@ ALTER TABLE ONLY public.documento_referencias ALTER COLUMN id SET DEFAULT nextva
 
 
 --
+-- Name: documentos_adjuntos id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.documentos_adjuntos ALTER COLUMN id SET DEFAULT nextval('public.documentos_adjuntos_id_seq'::regclass);
+
+
+--
+-- Name: documentos_adjuntos_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.documentos_adjuntos_auditoria ALTER COLUMN id SET DEFAULT nextval('public.documentos_adjuntos_auditoria_id_seq'::regclass);
+
+
+--
 -- Name: documentos_electronicos id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -12642,6 +12798,22 @@ ALTER TABLE ONLY public.documento_referencias
 
 
 --
+-- Name: documentos_adjuntos_auditoria documentos_adjuntos_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.documentos_adjuntos_auditoria
+    ADD CONSTRAINT documentos_adjuntos_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: documentos_adjuntos documentos_adjuntos_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.documentos_adjuntos
+    ADD CONSTRAINT documentos_adjuntos_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: documentos_electronicos_auditoria documentos_electronicos_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -13194,6 +13366,14 @@ ALTER TABLE ONLY public.cotizacion_consecutivos
 
 
 --
+-- Name: documentos_adjuntos uq_documentos_adjuntos_clave; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.documentos_adjuntos
+    ADD CONSTRAINT uq_documentos_adjuntos_clave UNIQUE (clave);
+
+
+--
 -- Name: empresa_tipo_cambios uq_emp_tipo_cambio; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -13596,6 +13776,20 @@ CREATE INDEX idx_docs_trgm_numid ON public.documentos_electronicos USING gin (re
 --
 
 CREATE INDEX idx_documento_cxc_aplicaciones_auditoria_registro ON public.documento_cxc_aplicaciones_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_documentos_adjuntos_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_documentos_adjuntos_auditoria_registro ON public.documentos_adjuntos_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_documentos_adjuntos_entidad; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_documentos_adjuntos_entidad ON public.documentos_adjuntos USING btree (empresa_id, entidad, entidad_id, id DESC) WHERE (deleted_at IS NULL);
 
 
 --
@@ -14061,6 +14255,13 @@ CREATE TRIGGER trg_documento_cxc_aplicaciones_auditoria AFTER INSERT OR DELETE O
 
 
 --
+-- Name: documentos_adjuntos trg_documentos_adjuntos_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_documentos_adjuntos_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.documentos_adjuntos FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
 -- Name: documentos_electronicos trg_documentos_auditoria; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -14481,5 +14682,5 @@ ALTER TABLE ONLY public.sucursal_bodegas
 -- PostgreSQL database dump complete
 --
 
-\unrestrict rOMpX6PD3PevMWgh88HeCwZuBs5ufbYfmj1fbpFSseqHwiItLCjs3fwf2gWyBAX
+\unrestrict mkRoB9lNpS1OdrhAGgJgbaJsRVatB6qmEK23ccJNT3ufOrrpUPxpTmgFmDLwDlc
 
