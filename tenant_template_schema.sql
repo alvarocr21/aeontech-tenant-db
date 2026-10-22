@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict fq3XCWg4KV8Hcmv3VLsscMZG412dGTo0vDPD0pWRYgbv8ccTwt2NYaH5VcHshJ8
+\restrict fRJHuJ5yg2HBKc79gFpMOQTRF520sIUKB10hiUk6jgfGsLIZIOoa8syuIvGcpwx
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
@@ -2416,6 +2416,41 @@ CREATE FUNCTION public.sp_clientes_con_adelantos(p_empresa_id bigint) RETURNS TA
                   AND ra.saldo_disponible > 0
                 GROUP BY c.id, c.name, c.tax_id, c.tax_id_type, c.email, ra.moneda
                 ORDER BY c.name, ra.moneda;
+            END; $$;
+
+
+--
+-- Name: sp_company_impresion_get(bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_company_impresion_get(p_empresa_id bigint) RETURNS TABLE(formato_impresion_factura character varying, formato_impresion_tiquete character varying)
+    LANGUAGE plpgsql SECURITY DEFINER
+    AS $$
+            BEGIN
+                RETURN QUERY
+                SELECT cs.formato_impresion_factura, cs.formato_impresion_tiquete
+                FROM company_settings cs
+                WHERE cs.empresa_id = p_empresa_id AND cs.deleted_at IS NULL
+                LIMIT 1;
+            END; $$;
+
+
+--
+-- Name: sp_company_impresion_save(bigint, character varying, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_company_impresion_save(p_empresa_id bigint, p_factura character varying, p_tiquete character varying) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    AS $$
+            DECLARE v_rows INT;
+            BEGIN
+                UPDATE company_settings SET
+                    formato_impresion_factura = p_factura,
+                    formato_impresion_tiquete = p_tiquete,
+                    updated_at = NOW()
+                WHERE empresa_id = p_empresa_id AND deleted_at IS NULL;
+                GET DIAGNOSTICS v_rows = ROW_COUNT;
+                RETURN v_rows > 0;
             END; $$;
 
 
@@ -8945,6 +8980,9 @@ CREATE TABLE public.company_settings (
     onvo_card_last4 character varying(4),
     onvo_card_exp_month smallint,
     onvo_card_exp_year smallint,
+    formato_impresion_factura character varying(10) DEFAULT 'carta'::character varying NOT NULL,
+    formato_impresion_tiquete character varying(10) DEFAULT 'tiquete80'::character varying NOT NULL,
+    CONSTRAINT company_settings_formato_impresion_chk CHECK ((((formato_impresion_factura)::text = ANY ((ARRAY['carta'::character varying, 'tiquete80'::character varying])::text[])) AND ((formato_impresion_tiquete)::text = ANY ((ARRAY['carta'::character varying, 'tiquete80'::character varying])::text[])))),
     CONSTRAINT company_settings_hacienda_environment_check CHECK (((hacienda_environment)::text = ANY (ARRAY[('stag'::character varying)::text, ('prod'::character varying)::text]))),
     CONSTRAINT company_settings_validation_status_check CHECK (((validation_status)::text = ANY (ARRAY[('pending'::character varying)::text, ('valid'::character varying)::text, ('invalid'::character varying)::text])))
 );
@@ -14905,5 +14943,5 @@ ALTER TABLE ONLY public.sucursal_bodegas
 -- PostgreSQL database dump complete
 --
 
-\unrestrict fq3XCWg4KV8Hcmv3VLsscMZG412dGTo0vDPD0pWRYgbv8ccTwt2NYaH5VcHshJ8
+\unrestrict fRJHuJ5yg2HBKc79gFpMOQTRF520sIUKB10hiUk6jgfGsLIZIOoa8syuIvGcpwx
 
