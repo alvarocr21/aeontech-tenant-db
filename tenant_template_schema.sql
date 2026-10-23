@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict Y3rmd3xJuU2ujwWMSSGIAlOgJicnwLdVkeDePp1fPs4tXxY0a4H2vtWbtZEPbXa
+\restrict IcfyJeqR2QcHgkJy3LL1nmDsF6IPcr75D5btShTrPBt8ezLWcM8GEv2gIzXhIP6
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
@@ -3193,7 +3193,7 @@ CREATE FUNCTION public.sp_documento_ajustar_inventario(p_documento_id bigint) RE
                     RETURN;
                 END IF;
 
-                SELECT id, empresa_id, tipo_documento, clave, numero_consecutivo, user_id
+                SELECT id, empresa_id, tipo_documento, clave, numero_consecutivo, user_id, afecta_inventario
                   INTO v_doc
                   FROM documentos_electronicos
                  WHERE id = p_documento_id;
@@ -3211,7 +3211,7 @@ CREATE FUNCTION public.sp_documento_ajustar_inventario(p_documento_id bigint) RE
                     ELSE NULL
                 END;
 
-                IF v_tipo_mov IS NULL THEN
+                IF v_tipo_mov IS NULL OR (v_doc.tipo_documento = '02' AND NOT COALESCE(v_doc.afecta_inventario, TRUE)) THEN
                     RETURN;
                 END IF;
 
@@ -3378,6 +3378,7 @@ CREATE TABLE public.documentos_electronicos (
     adelanto_recibo_id bigint,
     adelanto_error text,
     postproceso_error text,
+    afecta_inventario boolean DEFAULT true NOT NULL,
     CONSTRAINT chk_doc_estado CHECK (((estado)::text = ANY (ARRAY['borrador'::text, 'procesando'::text, 'aceptado'::text, 'rechazado'::text, 'error'::text, 'pendiente_manual'::text]))),
     CONSTRAINT documentos_electronicos_estado_check CHECK (((estado)::text = ANY (ARRAY[('borrador'::character varying)::text, ('procesando'::character varying)::text, ('aceptado'::character varying)::text, ('rechazado'::character varying)::text, ('anulado'::character varying)::text, ('error'::character varying)::text, ('pendiente_manual'::character varying)::text])))
 );
@@ -14946,5 +14947,5 @@ ALTER TABLE ONLY public.sucursal_bodegas
 -- PostgreSQL database dump complete
 --
 
-\unrestrict Y3rmd3xJuU2ujwWMSSGIAlOgJicnwLdVkeDePp1fPs4tXxY0a4H2vtWbtZEPbXa
+\unrestrict IcfyJeqR2QcHgkJy3LL1nmDsF6IPcr75D5btShTrPBt8ezLWcM8GEv2gIzXhIP6
 
