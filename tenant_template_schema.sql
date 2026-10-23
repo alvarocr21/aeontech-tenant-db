@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict IcfyJeqR2QcHgkJy3LL1nmDsF6IPcr75D5btShTrPBt8ezLWcM8GEv2gIzXhIP6
+\restrict k2b14o6M4h9Et1l4P4dHQeMvTbEhfI0gEOvh5impdVJrC97zsOmXA0UKptd02Sy
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
@@ -2345,13 +2345,13 @@ BEGIN
         (SELECT COALESCE(SUM(CASE WHEN d.tipo_documento = '03' THEN -d.total_comprobante ELSE d.total_comprobante END), 0)
            FROM documentos_electronicos d
            WHERE d.receptor_cliente_id = p_cliente_id AND d.empresa_id = p_empresa_id AND d.deleted_at IS NULL
-             AND d.tipo_documento IN ('01','02','03') AND d.estado = 'aceptado'),
+             AND d.tipo_documento IN ('01','02','03','04','09') AND d.estado = 'aceptado'),
         (SELECT COALESCE(json_object_agg(t.moneda, t.total), '{}'::json) FROM (
             SELECT COALESCE(d.moneda, 'CRC') AS moneda,
                    SUM(CASE WHEN d.tipo_documento = '03' THEN -d.total_comprobante ELSE d.total_comprobante END) AS total
             FROM documentos_electronicos d
             WHERE d.receptor_cliente_id = p_cliente_id AND d.empresa_id = p_empresa_id AND d.deleted_at IS NULL
-              AND d.tipo_documento IN ('01','02','03') AND d.estado = 'aceptado'
+              AND d.tipo_documento IN ('01','02','03','04','09') AND d.estado = 'aceptado'
             GROUP BY COALESCE(d.moneda, 'CRC')
         ) t),
         (SELECT COUNT(*) FROM documentos_electronicos d
@@ -14947,5 +14947,5 @@ ALTER TABLE ONLY public.sucursal_bodegas
 -- PostgreSQL database dump complete
 --
 
-\unrestrict IcfyJeqR2QcHgkJy3LL1nmDsF6IPcr75D5btShTrPBt8ezLWcM8GEv2gIzXhIP6
+\unrestrict k2b14o6M4h9Et1l4P4dHQeMvTbEhfI0gEOvh5impdVJrC97zsOmXA0UKptd02Sy
 
