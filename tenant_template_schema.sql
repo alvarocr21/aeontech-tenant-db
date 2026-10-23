@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict S4AwWs2c0EmEUxOtmI4GUq8VGbKe5sTQ73Dpe2K1ucxmIDdtEGTsPpqQrEqbdO1
+\restrict TVrCVA9biMVdIffWRLnMiN4dXxDvkKcU4LAmvSzwb5jYSwYoxnx6X6EJbCBV7D6
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
@@ -8518,6 +8518,135 @@ END; $$;
 
 
 --
+-- Name: sp_rrhh_cargas_list(bigint, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_cargas_list(p_empresa_id bigint, p_anio integer) RETURNS TABLE(rubro character varying, parte character varying, porcentaje numeric, orden integer)
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+    SELECT c.rubro::VARCHAR, c.parte::VARCHAR, c.porcentaje, c.orden FROM rrhh_cargas_sociales c
+     WHERE c.empresa_id = p_empresa_id AND c.anio = p_anio ORDER BY c.parte, c.orden, c.id;
+$$;
+
+
+--
+-- Name: sp_rrhh_concepto_cargar(bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_concepto_cargar(p_empresa_id bigint) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_n INTEGER;
+BEGIN
+    WITH sug (cod, nom, tp, ccss, renta) AS (
+        VALUES ('BONO', 'Bonificación', 'ingreso', TRUE, TRUE),
+               ('COMIS', 'Comisiones', 'ingreso', TRUE, TRUE),
+               ('ALIM', 'Alimentación', 'ingreso', FALSE, FALSE),
+               ('TRANSP', 'Transporte', 'ingreso', FALSE, FALSE),
+               ('PRESTAMO', 'Cuota de préstamo', 'deduccion', FALSE, FALSE),
+               ('PENSION', 'Pensión alimentaria', 'deduccion', FALSE, FALSE),
+               ('ASOC', 'Asociación solidarista', 'deduccion', FALSE, FALSE),
+               ('POLIZA', 'Póliza de seguro', 'deduccion', FALSE, FALSE)
+    ), ins AS (
+        INSERT INTO rrhh_conceptos (empresa_id, codigo, nombre, tipo, afecta_ccss, afecta_renta)
+        SELECT p_empresa_id, s.cod, s.nom, s.tp, s.ccss, s.renta FROM sug s
+         WHERE NOT EXISTS (SELECT 1 FROM rrhh_conceptos c WHERE c.empresa_id = p_empresa_id AND lower(c.codigo) = lower(s.cod) AND c.deleted_at IS NULL)
+        RETURNING 1
+    )
+    SELECT COUNT(*)::INTEGER INTO v_n FROM ins;
+    RETURN v_n;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_concepto_create(bigint, character varying, character varying, character varying, boolean, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_concepto_create(p_empresa_id bigint, p_codigo character varying, p_nombre character varying, p_tipo character varying, p_afecta_ccss boolean, p_afecta_renta boolean) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_id BIGINT; v_cod VARCHAR := btrim(COALESCE(p_codigo, '')); v_nom VARCHAR := btrim(COALESCE(p_nombre, ''));
+BEGIN
+    IF v_cod = '' OR v_nom = '' THEN RAISE EXCEPTION 'CONCEPTO_INVALIDO: Indique el código y el nombre del concepto.'; END IF;
+    IF p_tipo NOT IN ('ingreso', 'deduccion') THEN RAISE EXCEPTION 'CONCEPTO_INVALIDO: El tipo debe ser ingreso o deducción.'; END IF;
+    IF EXISTS (SELECT 1 FROM rrhh_conceptos c WHERE c.empresa_id = p_empresa_id AND lower(c.codigo) = lower(v_cod) AND c.deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'CONCEPTO_INVALIDO: Ya existe un concepto con ese código.';
+    END IF;
+    INSERT INTO rrhh_conceptos (empresa_id, codigo, nombre, tipo, afecta_ccss, afecta_renta)
+    VALUES (p_empresa_id, v_cod, v_nom, p_tipo, p_tipo = 'ingreso' AND COALESCE(p_afecta_ccss, FALSE), p_tipo = 'ingreso' AND COALESCE(p_afecta_renta, FALSE))
+    RETURNING rrhh_conceptos.id INTO v_id;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_concepto_delete(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_concepto_delete(p_empresa_id bigint, p_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_n INTEGER;
+BEGIN
+    IF EXISTS (SELECT 1 FROM rrhh_empleado_conceptos ec WHERE ec.concepto_id = p_id AND ec.empresa_id = p_empresa_id AND ec.deleted_at IS NULL)
+       OR EXISTS (SELECT 1 FROM rrhh_planilla_lineas l WHERE l.concepto_id = p_id) THEN
+        RAISE EXCEPTION 'CONCEPTO_INVALIDO: Este concepto ya se usa; en lugar de eliminarlo, desactívelo.';
+    END IF;
+    UPDATE rrhh_conceptos SET deleted_at = NOW(), updated_at = NOW() WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
+    GET DIAGNOSTICS v_n = ROW_COUNT;
+    RETURN v_n > 0;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_concepto_list(bigint, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_concepto_list(p_empresa_id bigint, p_solo_activos boolean DEFAULT false) RETURNS TABLE(id bigint, codigo character varying, nombre character varying, tipo character varying, afecta_ccss boolean, afecta_renta boolean, is_active boolean, usos bigint)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT c.id, c.codigo::VARCHAR, c.nombre::VARCHAR, c.tipo::VARCHAR, c.afecta_ccss, c.afecta_renta, c.is_active,
+           ((SELECT COUNT(*) FROM rrhh_empleado_conceptos ec WHERE ec.concepto_id = c.id AND ec.deleted_at IS NULL)
+            + (SELECT COUNT(*) FROM rrhh_planilla_lineas l WHERE l.concepto_id = c.id))
+      FROM rrhh_conceptos c
+     WHERE c.empresa_id = p_empresa_id AND c.deleted_at IS NULL AND (NOT p_solo_activos OR c.is_active)
+     ORDER BY c.tipo DESC, lower(c.nombre);
+END; $$;
+
+
+--
+-- Name: sp_rrhh_concepto_update(bigint, bigint, character varying, character varying, boolean, boolean, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_concepto_update(p_empresa_id bigint, p_id bigint, p_codigo character varying, p_nombre character varying, p_afecta_ccss boolean, p_afecta_renta boolean, p_is_active boolean) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_c RECORD; v_cod VARCHAR := btrim(COALESCE(p_codigo, '')); v_nom VARCHAR := btrim(COALESCE(p_nombre, ''));
+BEGIN
+    SELECT * INTO v_c FROM rrhh_conceptos c WHERE c.id = p_id AND c.empresa_id = p_empresa_id AND c.deleted_at IS NULL;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    IF v_cod = '' OR v_nom = '' THEN RAISE EXCEPTION 'CONCEPTO_INVALIDO: Indique el código y el nombre del concepto.'; END IF;
+    IF EXISTS (SELECT 1 FROM rrhh_conceptos c WHERE c.empresa_id = p_empresa_id AND lower(c.codigo) = lower(v_cod) AND c.deleted_at IS NULL AND c.id <> p_id) THEN
+        RAISE EXCEPTION 'CONCEPTO_INVALIDO: Ya existe un concepto con ese código.';
+    END IF;
+    UPDATE rrhh_conceptos
+       SET codigo = v_cod, nombre = v_nom, is_active = COALESCE(p_is_active, is_active),
+           afecta_ccss = v_c.tipo = 'ingreso' AND COALESCE(p_afecta_ccss, FALSE),
+           afecta_renta = v_c.tipo = 'ingreso' AND COALESCE(p_afecta_renta, FALSE), updated_at = NOW()
+     WHERE id = p_id;
+    RETURN TRUE;
+END; $$;
+
+
+--
 -- Name: sp_rrhh_departamento_create(bigint, character varying, character varying, character varying, bigint, bigint, character varying); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -8805,6 +8934,89 @@ BEGIN
       JOIN rrhh_empleados e ON e.id = u.empleado_id
      WHERE u.dispositivo_id = p_dispositivo_id AND u.empresa_id = p_empresa_id
      ORDER BY u.id_en_dispositivo::TEXT;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_emp_concepto_create(bigint, bigint, bigint, numeric, date, date, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_emp_concepto_create(p_empresa_id bigint, p_empleado_id bigint, p_concepto_id bigint, p_monto numeric, p_desde date, p_hasta date, p_nota character varying) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_id BIGINT;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM rrhh_empleados e WHERE e.id = p_empleado_id AND e.empresa_id = p_empresa_id AND e.deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'REF_INVALIDA: El empleado no existe.';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM rrhh_conceptos c WHERE c.id = p_concepto_id AND c.empresa_id = p_empresa_id AND c.deleted_at IS NULL AND c.is_active) THEN
+        RAISE EXCEPTION 'CONCEPTO_INVALIDO: El concepto no existe o está inactivo.';
+    END IF;
+    IF COALESCE(p_monto, 0) <= 0 THEN RAISE EXCEPTION 'CONCEPTO_INVALIDO: El monto debe ser mayor que cero.'; END IF;
+    IF p_desde IS NULL THEN RAISE EXCEPTION 'FECHA_INVALIDA: Indique desde cuándo aplica.'; END IF;
+    IF p_hasta IS NOT NULL AND p_hasta < p_desde THEN RAISE EXCEPTION 'FECHA_INVALIDA: La fecha final es anterior a la inicial.'; END IF;
+    INSERT INTO rrhh_empleado_conceptos (empresa_id, empleado_id, concepto_id, monto, desde, hasta, nota)
+    VALUES (p_empresa_id, p_empleado_id, p_concepto_id, p_monto, p_desde, p_hasta, NULLIF(btrim(COALESCE(p_nota, '')), ''))
+    RETURNING rrhh_empleado_conceptos.id INTO v_id;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_emp_concepto_delete(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_emp_concepto_delete(p_empresa_id bigint, p_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_n INTEGER;
+BEGIN
+    UPDATE rrhh_empleado_conceptos SET deleted_at = NOW(), updated_at = NOW() WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
+    GET DIAGNOSTICS v_n = ROW_COUNT;
+    RETURN v_n > 0;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_emp_concepto_list(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_emp_concepto_list(p_empresa_id bigint, p_empleado_id bigint DEFAULT NULL::bigint) RETURNS TABLE(id bigint, empleado_id bigint, empleado_codigo character varying, empleado_nombre character varying, concepto_id bigint, concepto_codigo character varying, concepto_nombre character varying, tipo character varying, monto numeric, desde date, hasta date, nota character varying)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT ec.id, ec.empleado_id, e.codigo::VARCHAR, btrim(e.nombre || ' ' || e.apellido1 || ' ' || COALESCE(e.apellido2, ''))::VARCHAR,
+           ec.concepto_id, c.codigo::VARCHAR, c.nombre::VARCHAR, c.tipo::VARCHAR, ec.monto, ec.desde, ec.hasta, ec.nota::VARCHAR
+      FROM rrhh_empleado_conceptos ec
+      JOIN rrhh_empleados e ON e.id = ec.empleado_id
+      JOIN rrhh_conceptos c ON c.id = ec.concepto_id
+     WHERE ec.empresa_id = p_empresa_id AND ec.deleted_at IS NULL AND (p_empleado_id IS NULL OR ec.empleado_id = p_empleado_id)
+     ORDER BY e.nombre, e.apellido1, c.nombre, ec.desde;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_emp_concepto_update(bigint, bigint, numeric, date, date, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_emp_concepto_update(p_empresa_id bigint, p_id bigint, p_monto numeric, p_desde date, p_hasta date, p_nota character varying) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_n INTEGER;
+BEGIN
+    IF COALESCE(p_monto, 0) <= 0 THEN RAISE EXCEPTION 'CONCEPTO_INVALIDO: El monto debe ser mayor que cero.'; END IF;
+    IF p_desde IS NULL THEN RAISE EXCEPTION 'FECHA_INVALIDA: Indique desde cuándo aplica.'; END IF;
+    IF p_hasta IS NOT NULL AND p_hasta < p_desde THEN RAISE EXCEPTION 'FECHA_INVALIDA: La fecha final es anterior a la inicial.'; END IF;
+    UPDATE rrhh_empleado_conceptos
+       SET monto = p_monto, desde = p_desde, hasta = p_hasta, nota = NULLIF(btrim(COALESCE(p_nota, '')), ''), updated_at = NOW()
+     WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
+    GET DIAGNOSTICS v_n = ROW_COUNT;
+    RETURN v_n > 0;
 END; $$;
 
 
@@ -10164,6 +10376,487 @@ END; $$;
 
 
 --
+-- Name: sp_rrhh_planilla_calcular(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_planilla_calcular(p_empresa_id bigint, p_id bigint) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_p        RECORD;
+    v_e        RECORD;
+    v_i        RECORD;
+    v_s        RECORD;
+    v_anio     INTEGER;
+    v_validado BOOLEAN;
+    v_cr_hijo  NUMERIC;
+    v_cr_cony  NUMERIC;
+    v_pct_ob   NUMERIC;
+    v_pct_pa   NUMERIC;
+    v_div_cal  NUMERIC;
+    v_div_lab  NUMERIC;
+    v_dias_per INTEGER;
+    v_ini      DATE;
+    v_fin      DATE;
+    v_vin      INTEGER;
+    v_sal      NUMERIC;
+    v_sal_per  NUMERIC;
+    v_vdia     NUMERIC;
+    v_vhora    NUMERIC;
+    v_aus_d    INTEGER;
+    v_tard_m   INTEGER;
+    v_perm_d   NUMERIC;
+    v_perm_h   NUMERIC;
+    v_inc_d    INTEGER;
+    v_ov_ini   DATE;
+    v_ov_fin   DATE;
+    v_prev     INTEGER;
+    v_pago_raw NUMERIC;
+    v_x        NUMERIC;
+    v_d_inc    NUMERIC;
+    v_d_aus    NUMERIC;
+    v_d_perm   NUMERIC;
+    v_d_tard   NUMERIC;
+    v_rem      NUMERIC;
+    v_pago_inc NUMERIC;
+    v_hx       NUMERIC;
+    v_hx_min   INTEGER;
+    v_hx_pend  INTEGER;
+    v_vac      NUMERIC;
+    v_ing      NUMERIC;
+    v_ing_ccss NUMERIC;
+    v_ing_rta  NUMERIC;
+    v_ded      NUMERIC;
+    v_neto_sal NUMERIC;
+    v_dev      NUMERIC;
+    v_b_ccss   NUMERIC;
+    v_b_rta    NUMERIC;
+    v_ccss_ob  NUMERIC;
+    v_ccss_pa  NUMERIC;
+    v_mes      DATE;
+    v_ac_base  NUMERIC;
+    v_ac_rta   NUMERIC;
+    v_cum      NUMERIC;
+    v_tax      NUMERIC;
+    v_renta    NUMERIC;
+    v_neto     NUMERIC;
+    v_adv      TEXT[];
+    v_n        INTEGER := 0;
+BEGIN
+    SELECT * INTO v_p FROM rrhh_planillas pl WHERE pl.id = p_id AND pl.empresa_id = p_empresa_id AND pl.deleted_at IS NULL FOR UPDATE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'PLANILLA_INVALIDA: La planilla no existe.'; END IF;
+    IF v_p.estado NOT IN ('borrador', 'calculada') THEN RAISE EXCEPTION 'PLANILLA_INVALIDA: Solo se puede calcular una planilla en borrador o calculada.'; END IF;
+
+    v_anio := EXTRACT(YEAR FROM v_p.fecha_fin)::INTEGER;
+    PERFORM sp_rrhh_tasas_cargar(p_empresa_id, v_anio);
+    SELECT t.validado, t.credito_hijo, t.credito_conyuge INTO v_validado, v_cr_hijo, v_cr_cony
+      FROM rrhh_tasas_anio t WHERE t.empresa_id = p_empresa_id AND t.anio = v_anio;
+    SELECT COALESCE(SUM(c.porcentaje) FILTER (WHERE c.parte = 'obrero'), 0), COALESCE(SUM(c.porcentaje) FILTER (WHERE c.parte = 'patronal'), 0)
+      INTO v_pct_ob, v_pct_pa FROM rrhh_cargas_sociales c WHERE c.empresa_id = p_empresa_id AND c.anio = v_anio;
+    IF NOT EXISTS (SELECT 1 FROM rrhh_renta_tramos r WHERE r.empresa_id = p_empresa_id AND r.anio = v_anio) THEN
+        RAISE EXCEPTION 'PLANILLA_INVALIDA: No hay tramos de renta para %.', v_anio;
+    END IF;
+
+    v_div_cal  := CASE v_p.periodicidad WHEN 'mensual' THEN 30 WHEN 'quincenal' THEN 15 ELSE 7 END;
+    v_div_lab  := CASE v_p.periodicidad WHEN 'mensual' THEN 30 WHEN 'quincenal' THEN 15 ELSE 6 END;
+    v_dias_per := v_p.fecha_fin - v_p.fecha_inicio + 1;
+    v_mes      := date_trunc('month', v_p.fecha_fin)::DATE;
+
+    DELETE FROM rrhh_planilla_empleados WHERE planilla_id = p_id;
+    DELETE FROM rrhh_planilla_lineas WHERE planilla_id = p_id AND origen = 'recurrente';
+
+    FOR v_e IN
+        SELECT e.*, d.nombre AS depto, pu.nombre AS puesto_nombre
+          FROM rrhh_empleados e
+          LEFT JOIN rrhh_departamentos d ON d.id = e.departamento_id
+          LEFT JOIN rrhh_puestos pu ON pu.id = e.puesto_id
+         WHERE e.empresa_id = p_empresa_id AND e.deleted_at IS NULL AND e.periodo_pago = v_p.periodicidad AND e.moneda = v_p.moneda
+           AND e.fecha_ingreso <= v_p.fecha_fin AND (e.fecha_salida IS NULL OR e.fecha_salida >= v_p.fecha_inicio)
+           AND (e.estado = 'activo' OR (e.estado = 'liquidado' AND e.fecha_salida IS NOT NULL))
+         ORDER BY e.codigo
+    LOOP
+        v_adv := ARRAY[]::TEXT[];
+        v_ini := GREATEST(v_p.fecha_inicio, v_e.fecha_ingreso);
+        v_fin := LEAST(v_p.fecha_fin, COALESCE(v_e.fecha_salida, v_p.fecha_fin));
+        v_vin := v_fin - v_ini + 1;
+        v_sal := v_e.salario_base;
+        IF v_sal <= 0 THEN v_adv := array_append(v_adv, 'El expediente no tiene salario.'::TEXT); END IF;
+
+        v_sal_per := CASE WHEN v_vin >= v_dias_per THEN v_sal ELSE round(v_sal * LEAST(v_vin, v_div_cal) / v_div_cal, 2) END;
+        v_vdia    := v_sal / v_div_lab;
+        v_vhora   := v_vdia / (CASE v_e.jornada WHEN 'mixta' THEN 7 WHEN 'nocturna' THEN 6 ELSE 8 END);
+
+        -- Asistencia: faltas y tardanzas
+        SELECT COUNT(*) FILTER (WHERE r.estado = 'ausente')::INTEGER,
+               COALESCE(SUM(COALESCE(r.minutos_tarde, 0) + COALESCE(r.minutos_salida_anticipada, 0)), 0)::INTEGER
+          INTO v_aus_d, v_tard_m
+          FROM sp_rrhh_asistencia_resumen(p_empresa_id, v_ini, v_fin, v_e.id, NULL, NULL) r;
+        v_d_aus  := round(v_aus_d * v_vdia, 2);
+        v_d_tard := CASE WHEN v_p.descontar_tardanzas THEN round(v_tard_m / 60.0 * v_vhora, 2) ELSE 0 END;
+
+        -- Permisos sin goce
+        v_perm_d := 0; v_perm_h := 0;
+        FOR v_s IN
+            SELECT s.* FROM rrhh_permiso_solicitudes s
+             WHERE s.empleado_id = v_e.id AND s.deleted_at IS NULL AND s.estado = 'aprobada' AND NOT s.con_goce
+               AND s.fecha_inicio <= v_fin AND s.fecha_fin >= v_ini
+        LOOP
+            IF v_s.unidad = 'dias' THEN
+                v_perm_d := v_perm_d + fn_rrhh_dias_habiles(p_empresa_id, v_e.id, GREATEST(v_s.fecha_inicio, v_ini), LEAST(v_s.fecha_fin, v_fin));
+            ELSE
+                v_perm_h := v_perm_h + v_s.cantidad;
+            END IF;
+        END LOOP;
+        v_d_perm := round(v_perm_d * v_vdia + v_perm_h * v_vhora, 2);
+
+        -- Incapacidades: se descuenta el día natural y el patrono paga su parte (y el complemento si lo cubre)
+        v_inc_d := 0; v_d_inc := 0; v_pago_raw := 0;
+        FOR v_i IN
+            SELECT i.* FROM rrhh_incapacidades i
+             WHERE i.empleado_id = v_e.id AND i.deleted_at IS NULL AND i.estado = 'registrada'
+               AND i.fecha_inicio <= v_fin AND i.fecha_fin >= v_ini
+             ORDER BY i.fecha_inicio
+        LOOP
+            v_ov_ini := GREATEST(v_i.fecha_inicio, v_ini);
+            v_ov_fin := LEAST(v_i.fecha_fin, v_fin);
+            v_prev   := fn_rrhh_inc_dias_previos(v_e.id, v_i.tipo, v_i.fecha_inicio, v_i.id);
+            v_inc_d  := v_inc_d + (v_ov_fin - v_ov_ini + 1);
+            v_d_inc  := v_d_inc + (v_ov_fin - v_ov_ini + 1) * v_i.valor_dia;
+            SELECT COALESCE(SUM(v_i.valor_dia * (CASE WHEN v_i.patrono_completa
+                                                      THEN 100 - (CASE WHEN v_i.tipo = 'maternidad' THEN 50 WHEN q.n <= 3 THEN 0 ELSE 60 END)
+                                                      ELSE (CASE WHEN v_i.tipo = 'maternidad' THEN 50 WHEN q.n <= 3 THEN 50 ELSE 0 END) END) / 100), 0)
+              INTO v_x
+              FROM generate_series(v_ov_ini::TIMESTAMP, v_ov_fin::TIMESTAMP, INTERVAL '1 day') g
+              CROSS JOIN LATERAL (SELECT v_prev + (g::DATE - v_i.fecha_inicio) + 1 AS n) q;
+            v_pago_raw := v_pago_raw + v_x;
+        END LOOP;
+        IF v_inc_d >= v_vin AND v_vin > 0 THEN
+            -- todo el período con incapacidad: el salario completo se sustituye por el subsidio, ajustado al divisor
+            v_d_inc := v_sal_per;
+            v_pago_raw := v_pago_raw * v_sal_per / NULLIF(v_sal / v_div_cal * v_vin, 0);
+        END IF;
+        v_pago_inc := round(COALESCE(v_pago_raw, 0), 2);
+        v_d_inc    := round(v_d_inc, 2);
+
+        -- Los descuentos nunca dejan el salario del período por debajo de cero
+        v_rem := v_sal_per;
+        v_d_inc  := LEAST(v_d_inc, v_rem);  v_rem := v_rem - v_d_inc;
+        v_d_aus  := LEAST(v_d_aus, v_rem);  v_rem := v_rem - v_d_aus;
+        v_d_perm := LEAST(v_d_perm, v_rem); v_rem := v_rem - v_d_perm;
+        v_d_tard := LEAST(v_d_tard, v_rem); v_rem := v_rem - v_d_tard;
+        v_neto_sal := v_rem;
+
+        -- Horas extra aprobadas y extras de vacaciones
+        SELECT COALESCE(SUM(x.monto_aprobado), 0), COALESCE(SUM(x.minutos_aprobados), 0)::INTEGER, COALESCE(SUM(x.minutos_pendientes), 0)::INTEGER
+          INTO v_hx, v_hx_min, v_hx_pend FROM sp_rrhh_horas_extra(p_empresa_id, v_ini, v_fin, v_e.id, NULL) x;
+        IF v_hx_pend > 0 THEN v_adv := array_append(v_adv, ('Hay ' || v_hx_pend || ' minutos de horas extra pendientes de aprobar que no se pagan.')::TEXT); END IF;
+        SELECT COALESCE(SUM(x.monto_extras), 0) INTO v_vac FROM sp_rrhh_vac_pagos(p_empresa_id, v_ini, v_fin, v_e.id) x;
+
+        -- Conceptos recurrentes del empleado
+        INSERT INTO rrhh_planilla_lineas (planilla_id, empleado_id, concepto_id, codigo, descripcion, tipo, monto, origen, afecta_ccss, afecta_renta)
+        SELECT p_id, v_e.id, c.id, c.codigo, c.nombre, c.tipo, ec.monto, 'recurrente', c.afecta_ccss, c.afecta_renta
+          FROM rrhh_empleado_conceptos ec JOIN rrhh_conceptos c ON c.id = ec.concepto_id
+         WHERE ec.empleado_id = v_e.id AND ec.deleted_at IS NULL AND c.deleted_at IS NULL AND c.is_active
+           AND ec.desde <= v_p.fecha_fin AND (ec.hasta IS NULL OR ec.hasta >= v_p.fecha_inicio);
+        SELECT COALESCE(SUM(l.monto) FILTER (WHERE l.tipo = 'ingreso'), 0),
+               COALESCE(SUM(l.monto) FILTER (WHERE l.tipo = 'ingreso' AND l.afecta_ccss), 0),
+               COALESCE(SUM(l.monto) FILTER (WHERE l.tipo = 'ingreso' AND l.afecta_renta), 0),
+               COALESCE(SUM(l.monto) FILTER (WHERE l.tipo = 'deduccion'), 0)
+          INTO v_ing, v_ing_ccss, v_ing_rta, v_ded
+          FROM rrhh_planilla_lineas l WHERE l.planilla_id = p_id AND l.empleado_id = v_e.id;
+
+        v_dev    := v_neto_sal + v_pago_inc + v_hx + v_vac + v_ing;
+        v_b_ccss := v_neto_sal + v_pago_inc + v_hx + v_vac + v_ing_ccss;
+        v_b_rta  := v_neto_sal + v_pago_inc + v_hx + v_vac + v_ing_rta;
+        v_ccss_ob := round(v_b_ccss * v_pct_ob / 100, 2);
+        v_ccss_pa := round(v_b_ccss * v_pct_pa / 100, 2);
+
+        -- Renta: acumulado del mes calendario (de la fecha final) con las planillas anteriores del mismo empleado
+        SELECT COALESCE(SUM(pe.base_renta), 0), COALESCE(SUM(pe.renta), 0) INTO v_ac_base, v_ac_rta
+          FROM rrhh_planilla_empleados pe JOIN rrhh_planillas pl ON pl.id = pe.planilla_id
+         WHERE pe.empleado_id = v_e.id AND pl.empresa_id = p_empresa_id AND pl.id <> p_id AND pl.estado <> 'anulada' AND pl.deleted_at IS NULL
+           AND date_trunc('month', pl.fecha_fin)::DATE = v_mes
+           AND (pl.fecha_fin < v_p.fecha_fin OR (pl.fecha_fin = v_p.fecha_fin AND pl.id < p_id));
+        v_cum := v_ac_base + v_b_rta;
+        SELECT COALESCE(SUM(GREATEST(LEAST(v_cum, COALESCE(t.hasta, 1e15)) - t.desde, 0) * t.porcentaje / 100), 0) INTO v_tax
+          FROM rrhh_renta_tramos t WHERE t.empresa_id = p_empresa_id AND t.anio = v_anio;
+        IF v_tax > 0 THEN
+            v_tax := GREATEST(v_tax - (v_e.cantidad_hijos * v_cr_hijo + CASE WHEN v_e.tiene_conyuge THEN v_cr_cony ELSE 0 END), 0);
+        END IF;
+        v_renta := GREATEST(round(v_tax - v_ac_rta, 2), 0);
+
+        v_neto := v_dev - v_ccss_ob - v_renta - v_ded;
+        IF v_neto < 0 THEN v_adv := array_append(v_adv, 'El neto es negativo: las deducciones superan lo devengado.'::TEXT); END IF;
+        IF v_e.banco IS NULL OR v_e.iban IS NULL THEN v_adv := array_append(v_adv, 'Sin banco o cuenta IBAN para el pago.'::TEXT); END IF;
+        IF v_e.numero_ccss IS NULL THEN v_adv := array_append(v_adv, 'Sin número de asegurado de la CCSS.'::TEXT); END IF;
+
+        INSERT INTO rrhh_planilla_empleados (
+            planilla_id, empleado_id, codigo, nombre, tipo_identificacion, identificacion, departamento, puesto, banco, iban, numero_ccss,
+            dias_vinculo, dias_ausente, minutos_tardanza, dias_permiso_sg, dias_incapacidad, minutos_extra,
+            salario_base, salario_periodo, desc_ausencias, desc_tardanzas, desc_permisos, desc_incapacidad, pago_incapacidad,
+            horas_extra, vac_extras, otros_ingresos, devengado, base_ccss, ccss_obrero, base_renta, renta, otras_deducciones, neto,
+            ccss_patronal, advertencias
+        ) VALUES (
+            p_id, v_e.id, v_e.codigo, btrim(v_e.nombre || ' ' || v_e.apellido1 || ' ' || COALESCE(v_e.apellido2, '')), v_e.tipo_identificacion,
+            v_e.identificacion, v_e.depto, v_e.puesto_nombre, v_e.banco, v_e.iban, v_e.numero_ccss,
+            v_vin, v_aus_d, v_tard_m, v_perm_d + v_perm_h / 8.0, v_inc_d, v_hx_min,
+            v_sal, v_sal_per, v_d_aus, v_d_tard, v_d_perm, v_d_inc, v_pago_inc,
+            v_hx, v_vac, v_ing, v_dev, v_b_ccss, v_ccss_ob, v_b_rta, v_renta, v_ded, v_neto,
+            v_ccss_pa, to_jsonb(v_adv)
+        );
+        v_n := v_n + 1;
+    END LOOP;
+
+    -- Líneas manuales de empleados que ya no entran en la planilla
+    DELETE FROM rrhh_planilla_lineas l
+     WHERE l.planilla_id = p_id AND NOT EXISTS (SELECT 1 FROM rrhh_planilla_empleados pe WHERE pe.planilla_id = p_id AND pe.empleado_id = l.empleado_id);
+
+    UPDATE rrhh_planillas pl
+       SET estado = 'calculada', calculada_at = NOW(), tasas_validadas = COALESCE(v_validado, FALSE), updated_at = NOW(),
+           total_empleados = v_n,
+           total_devengado = COALESCE((SELECT SUM(pe.devengado) FROM rrhh_planilla_empleados pe WHERE pe.planilla_id = p_id), 0),
+           total_ccss_obrero = COALESCE((SELECT SUM(pe.ccss_obrero) FROM rrhh_planilla_empleados pe WHERE pe.planilla_id = p_id), 0),
+           total_renta = COALESCE((SELECT SUM(pe.renta) FROM rrhh_planilla_empleados pe WHERE pe.planilla_id = p_id), 0),
+           total_otras_ded = COALESCE((SELECT SUM(pe.otras_deducciones) FROM rrhh_planilla_empleados pe WHERE pe.planilla_id = p_id), 0),
+           total_neto = COALESCE((SELECT SUM(pe.neto) FROM rrhh_planilla_empleados pe WHERE pe.planilla_id = p_id), 0),
+           total_ccss_patronal = COALESCE((SELECT SUM(pe.ccss_patronal) FROM rrhh_planilla_empleados pe WHERE pe.planilla_id = p_id), 0)
+     WHERE pl.id = p_id;
+    RETURN v_n;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_planilla_create(bigint, character varying, character varying, date, date, date, character varying, boolean, character varying, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_planilla_create(p_empresa_id bigint, p_nombre character varying, p_periodicidad character varying, p_inicio date, p_fin date, p_pago date, p_moneda character varying, p_descontar_tardanzas boolean, p_notas character varying, p_user_id bigint) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_id BIGINT; v_nom VARCHAR := btrim(COALESCE(p_nombre, ''));
+BEGIN
+    IF v_nom = '' THEN RAISE EXCEPTION 'PLANILLA_INVALIDA: Indique el nombre de la planilla.'; END IF;
+    IF p_periodicidad NOT IN ('mensual', 'quincenal', 'semanal') THEN RAISE EXCEPTION 'PLANILLA_INVALIDA: Periodicidad inválida.'; END IF;
+    IF p_inicio IS NULL OR p_fin IS NULL OR p_pago IS NULL THEN RAISE EXCEPTION 'FECHA_INVALIDA: Indique el período y la fecha de pago.'; END IF;
+    IF p_fin < p_inicio THEN RAISE EXCEPTION 'FECHA_INVALIDA: La fecha final es anterior a la inicial.'; END IF;
+    IF p_fin - p_inicio > 31 THEN RAISE EXCEPTION 'FECHA_INVALIDA: El período no puede pasar de 32 días.'; END IF;
+    IF p_pago < p_inicio THEN RAISE EXCEPTION 'FECHA_INVALIDA: La fecha de pago es anterior al inicio del período.'; END IF;
+    IF EXISTS (SELECT 1 FROM rrhh_planillas pl WHERE pl.empresa_id = p_empresa_id AND pl.deleted_at IS NULL AND pl.estado <> 'anulada'
+                  AND pl.periodicidad = p_periodicidad AND pl.moneda = COALESCE(p_moneda, 'CRC')
+                  AND pl.fecha_inicio <= p_fin AND pl.fecha_fin >= p_inicio) THEN
+        RAISE EXCEPTION 'PLANILLA_INVALIDA: Ya existe una planilla % en % que se traslapa con ese período.', p_periodicidad, COALESCE(p_moneda, 'CRC');
+    END IF;
+    INSERT INTO rrhh_planillas (empresa_id, nombre, periodicidad, fecha_inicio, fecha_fin, fecha_pago, moneda, descontar_tardanzas, notas, creada_por)
+    VALUES (p_empresa_id, v_nom, p_periodicidad, p_inicio, p_fin, p_pago, COALESCE(p_moneda, 'CRC'), COALESCE(p_descontar_tardanzas, TRUE),
+            NULLIF(btrim(COALESCE(p_notas, '')), ''), p_user_id)
+    RETURNING rrhh_planillas.id INTO v_id;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_planilla_delete(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_planilla_delete(p_empresa_id bigint, p_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_estado VARCHAR;
+BEGIN
+    SELECT pl.estado INTO v_estado FROM rrhh_planillas pl WHERE pl.id = p_id AND pl.empresa_id = p_empresa_id AND pl.deleted_at IS NULL;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    IF v_estado NOT IN ('borrador', 'calculada', 'anulada') THEN RAISE EXCEPTION 'PLANILLA_INVALIDA: Una planilla aprobada o pagada no se elimina; anúlela si corresponde.'; END IF;
+    DELETE FROM rrhh_planilla_lineas WHERE planilla_id = p_id;
+    DELETE FROM rrhh_planilla_empleados WHERE planilla_id = p_id;
+    UPDATE rrhh_planillas SET deleted_at = NOW(), updated_at = NOW() WHERE id = p_id;
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_planilla_empleados(bigint, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_planilla_empleados(p_empresa_id bigint, p_id bigint, p_empleado_id bigint DEFAULT NULL::bigint) RETURNS TABLE(empleado_id bigint, codigo character varying, nombre character varying, tipo_identificacion character varying, identificacion character varying, departamento character varying, puesto character varying, banco character varying, iban character varying, numero_ccss character varying, dias_vinculo integer, dias_ausente integer, minutos_tardanza integer, dias_permiso_sg numeric, dias_incapacidad integer, minutos_extra integer, salario_base numeric, salario_periodo numeric, desc_ausencias numeric, desc_tardanzas numeric, desc_permisos numeric, desc_incapacidad numeric, pago_incapacidad numeric, horas_extra numeric, vac_extras numeric, otros_ingresos numeric, devengado numeric, base_ccss numeric, ccss_obrero numeric, base_renta numeric, renta numeric, otras_deducciones numeric, neto numeric, ccss_patronal numeric, advertencias jsonb)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT pe.empleado_id, pe.codigo::VARCHAR, pe.nombre::VARCHAR, pe.tipo_identificacion::VARCHAR, pe.identificacion::VARCHAR, pe.departamento::VARCHAR,
+           pe.puesto::VARCHAR, pe.banco::VARCHAR, pe.iban::VARCHAR, pe.numero_ccss::VARCHAR, pe.dias_vinculo, pe.dias_ausente, pe.minutos_tardanza,
+           pe.dias_permiso_sg, pe.dias_incapacidad, pe.minutos_extra, pe.salario_base, pe.salario_periodo, pe.desc_ausencias, pe.desc_tardanzas,
+           pe.desc_permisos, pe.desc_incapacidad, pe.pago_incapacidad, pe.horas_extra, pe.vac_extras, pe.otros_ingresos, pe.devengado, pe.base_ccss,
+           pe.ccss_obrero, pe.base_renta, pe.renta, pe.otras_deducciones, pe.neto, pe.ccss_patronal, pe.advertencias
+      FROM rrhh_planilla_empleados pe JOIN rrhh_planillas pl ON pl.id = pe.planilla_id
+     WHERE pl.id = p_id AND pl.empresa_id = p_empresa_id AND pl.deleted_at IS NULL AND (p_empleado_id IS NULL OR pe.empleado_id = p_empleado_id)
+     ORDER BY pe.codigo;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_planilla_estado(bigint, bigint, character varying, bigint, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_planilla_estado(p_empresa_id bigint, p_id bigint, p_accion character varying, p_user_id bigint, p_nota character varying DEFAULT NULL::character varying) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_p RECORD;
+BEGIN
+    SELECT * INTO v_p FROM rrhh_planillas pl WHERE pl.id = p_id AND pl.empresa_id = p_empresa_id AND pl.deleted_at IS NULL FOR UPDATE;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+
+    IF p_accion = 'aprobar' THEN
+        IF v_p.estado <> 'calculada' THEN RAISE EXCEPTION 'PLANILLA_INVALIDA: Solo se puede aprobar una planilla calculada.'; END IF;
+        IF v_p.total_empleados = 0 THEN RAISE EXCEPTION 'PLANILLA_INVALIDA: La planilla no tiene empleados.'; END IF;
+        UPDATE rrhh_planillas SET estado = 'aprobada', aprobada_por = p_user_id, aprobada_at = NOW(), updated_at = NOW() WHERE id = p_id;
+    ELSIF p_accion = 'reabrir' THEN
+        IF v_p.estado <> 'aprobada' THEN RAISE EXCEPTION 'PLANILLA_INVALIDA: Solo se puede reabrir una planilla aprobada.'; END IF;
+        UPDATE rrhh_planillas SET estado = 'calculada', aprobada_por = NULL, aprobada_at = NULL, updated_at = NOW() WHERE id = p_id;
+    ELSIF p_accion = 'pagar' THEN
+        IF v_p.estado <> 'aprobada' THEN RAISE EXCEPTION 'PLANILLA_INVALIDA: Solo se puede marcar como pagada una planilla aprobada.'; END IF;
+        UPDATE rrhh_planillas SET estado = 'pagada', pagada_por = p_user_id, pagada_at = NOW(), updated_at = NOW() WHERE id = p_id;
+    ELSIF p_accion = 'anular' THEN
+        IF v_p.estado NOT IN ('borrador', 'calculada', 'aprobada') THEN RAISE EXCEPTION 'PLANILLA_INVALIDA: No se puede anular una planilla %.', v_p.estado; END IF;
+        IF btrim(COALESCE(p_nota, '')) = '' THEN RAISE EXCEPTION 'PLANILLA_INVALIDA: Indique el motivo de la anulación.'; END IF;
+        UPDATE rrhh_planillas SET estado = 'anulada', anulada_por = p_user_id, anulada_at = NOW(), anulada_nota = btrim(p_nota), updated_at = NOW() WHERE id = p_id;
+    ELSE
+        RAISE EXCEPTION 'PLANILLA_INVALIDA: Acción desconocida.';
+    END IF;
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_planilla_get(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_planilla_get(p_empresa_id bigint, p_id bigint) RETURNS TABLE(id bigint, nombre character varying, periodicidad character varying, fecha_inicio date, fecha_fin date, fecha_pago date, moneda character varying, descontar_tardanzas boolean, estado character varying, notas character varying, tasas_validadas boolean, total_empleados integer, total_devengado numeric, total_ccss_obrero numeric, total_renta numeric, total_otras_ded numeric, total_neto numeric, total_ccss_patronal numeric, calculada_at timestamp without time zone, aprobada_at timestamp without time zone, pagada_at timestamp without time zone, anulada_nota character varying, created_at timestamp without time zone)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT pl.id, pl.nombre::VARCHAR, pl.periodicidad::VARCHAR, pl.fecha_inicio, pl.fecha_fin, pl.fecha_pago, pl.moneda::VARCHAR, pl.descontar_tardanzas, pl.estado::VARCHAR, pl.notas::VARCHAR, pl.tasas_validadas, pl.total_empleados, pl.total_devengado, pl.total_ccss_obrero, pl.total_renta, pl.total_otras_ded, pl.total_neto, pl.total_ccss_patronal, pl.calculada_at, pl.aprobada_at, pl.pagada_at, pl.anulada_nota::VARCHAR, pl.created_at FROM rrhh_planillas pl WHERE pl.empresa_id = p_empresa_id AND pl.id = p_id AND pl.deleted_at IS NULL;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_planilla_linea_create(bigint, bigint, bigint, bigint, character varying, character varying, numeric, boolean, boolean, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_planilla_linea_create(p_empresa_id bigint, p_id bigint, p_empleado_id bigint, p_concepto_id bigint, p_descripcion character varying, p_tipo character varying, p_monto numeric, p_afecta_ccss boolean, p_afecta_renta boolean, p_user_id bigint) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_estado VARCHAR; v_c RECORD; v_id BIGINT; v_desc VARCHAR := btrim(COALESCE(p_descripcion, '')); v_tipo VARCHAR := p_tipo; v_cod VARCHAR := NULL;
+        v_ccss BOOLEAN := COALESCE(p_afecta_ccss, FALSE); v_rta BOOLEAN := COALESCE(p_afecta_renta, FALSE);
+BEGIN
+    SELECT pl.estado INTO v_estado FROM rrhh_planillas pl WHERE pl.id = p_id AND pl.empresa_id = p_empresa_id AND pl.deleted_at IS NULL FOR UPDATE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'PLANILLA_INVALIDA: La planilla no existe.'; END IF;
+    IF v_estado NOT IN ('borrador', 'calculada') THEN RAISE EXCEPTION 'PLANILLA_INVALIDA: Solo se pueden agregar líneas a una planilla en borrador o calculada.'; END IF;
+    IF NOT EXISTS (SELECT 1 FROM rrhh_planilla_empleados pe WHERE pe.planilla_id = p_id AND pe.empleado_id = p_empleado_id) THEN
+        RAISE EXCEPTION 'PLANILLA_INVALIDA: El empleado no está en la planilla; calcúlela primero.';
+    END IF;
+    IF COALESCE(p_monto, 0) <= 0 THEN RAISE EXCEPTION 'PLANILLA_INVALIDA: El monto debe ser mayor que cero.'; END IF;
+    IF p_concepto_id IS NOT NULL THEN
+        SELECT * INTO v_c FROM rrhh_conceptos c WHERE c.id = p_concepto_id AND c.empresa_id = p_empresa_id AND c.deleted_at IS NULL AND c.is_active;
+        IF NOT FOUND THEN RAISE EXCEPTION 'CONCEPTO_INVALIDO: El concepto no existe o está inactivo.'; END IF;
+        v_tipo := v_c.tipo; v_cod := v_c.codigo; v_ccss := v_c.afecta_ccss; v_rta := v_c.afecta_renta;
+        IF v_desc = '' THEN v_desc := v_c.nombre; END IF;
+    END IF;
+    IF v_tipo NOT IN ('ingreso', 'deduccion') THEN RAISE EXCEPTION 'PLANILLA_INVALIDA: El tipo debe ser ingreso o deducción.'; END IF;
+    IF v_desc = '' THEN RAISE EXCEPTION 'PLANILLA_INVALIDA: Indique la descripción de la línea.'; END IF;
+    IF v_tipo = 'deduccion' THEN v_ccss := FALSE; v_rta := FALSE; END IF;
+    INSERT INTO rrhh_planilla_lineas (planilla_id, empleado_id, concepto_id, codigo, descripcion, tipo, monto, origen, afecta_ccss, afecta_renta, creada_por)
+    VALUES (p_id, p_empleado_id, p_concepto_id, v_cod, v_desc, v_tipo, p_monto, 'manual', v_ccss, v_rta, p_user_id)
+    RETURNING rrhh_planilla_lineas.id INTO v_id;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_planilla_linea_delete(bigint, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_planilla_linea_delete(p_empresa_id bigint, p_id bigint, p_linea_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_estado VARCHAR; v_n INTEGER;
+BEGIN
+    SELECT pl.estado INTO v_estado FROM rrhh_planillas pl WHERE pl.id = p_id AND pl.empresa_id = p_empresa_id AND pl.deleted_at IS NULL FOR UPDATE;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    IF v_estado NOT IN ('borrador', 'calculada') THEN RAISE EXCEPTION 'PLANILLA_INVALIDA: Solo se pueden quitar líneas de una planilla en borrador o calculada.'; END IF;
+    DELETE FROM rrhh_planilla_lineas WHERE id = p_linea_id AND planilla_id = p_id AND origen = 'manual';
+    GET DIAGNOSTICS v_n = ROW_COUNT;
+    RETURN v_n > 0;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_planilla_lineas(bigint, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_planilla_lineas(p_empresa_id bigint, p_id bigint, p_empleado_id bigint DEFAULT NULL::bigint) RETURNS TABLE(id bigint, empleado_id bigint, concepto_id bigint, codigo character varying, descripcion character varying, tipo character varying, monto numeric, origen character varying, afecta_ccss boolean, afecta_renta boolean)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT l.id, l.empleado_id, l.concepto_id, l.codigo::VARCHAR, l.descripcion::VARCHAR, l.tipo::VARCHAR, l.monto, l.origen::VARCHAR, l.afecta_ccss, l.afecta_renta
+      FROM rrhh_planilla_lineas l JOIN rrhh_planillas pl ON pl.id = l.planilla_id
+     WHERE pl.id = p_id AND pl.empresa_id = p_empresa_id AND pl.deleted_at IS NULL AND (p_empleado_id IS NULL OR l.empleado_id = p_empleado_id)
+     ORDER BY l.empleado_id, l.tipo DESC, l.id;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_planilla_list(bigint, character varying, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_planilla_list(p_empresa_id bigint, p_estado character varying DEFAULT NULL::character varying, p_anio integer DEFAULT NULL::integer) RETURNS TABLE(id bigint, nombre character varying, periodicidad character varying, fecha_inicio date, fecha_fin date, fecha_pago date, moneda character varying, descontar_tardanzas boolean, estado character varying, notas character varying, tasas_validadas boolean, total_empleados integer, total_devengado numeric, total_ccss_obrero numeric, total_renta numeric, total_otras_ded numeric, total_neto numeric, total_ccss_patronal numeric, calculada_at timestamp without time zone, aprobada_at timestamp without time zone, pagada_at timestamp without time zone, anulada_nota character varying, created_at timestamp without time zone)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT pl.id, pl.nombre::VARCHAR, pl.periodicidad::VARCHAR, pl.fecha_inicio, pl.fecha_fin, pl.fecha_pago, pl.moneda::VARCHAR, pl.descontar_tardanzas, pl.estado::VARCHAR, pl.notas::VARCHAR, pl.tasas_validadas, pl.total_empleados, pl.total_devengado, pl.total_ccss_obrero, pl.total_renta, pl.total_otras_ded, pl.total_neto, pl.total_ccss_patronal, pl.calculada_at, pl.aprobada_at, pl.pagada_at, pl.anulada_nota::VARCHAR, pl.created_at FROM rrhh_planillas pl
+     WHERE pl.empresa_id = p_empresa_id AND pl.deleted_at IS NULL
+       AND (p_estado IS NULL OR pl.estado = p_estado)
+       AND (p_anio IS NULL OR EXTRACT(YEAR FROM pl.fecha_fin) = p_anio)
+     ORDER BY pl.fecha_inicio DESC, pl.id DESC;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_planilla_update(bigint, bigint, character varying, date, boolean, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_planilla_update(p_empresa_id bigint, p_id bigint, p_nombre character varying, p_pago date, p_descontar_tardanzas boolean, p_notas character varying) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_p RECORD; v_nom VARCHAR := btrim(COALESCE(p_nombre, ''));
+BEGIN
+    SELECT * INTO v_p FROM rrhh_planillas pl WHERE pl.id = p_id AND pl.empresa_id = p_empresa_id AND pl.deleted_at IS NULL FOR UPDATE;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    IF v_p.estado NOT IN ('borrador', 'calculada') THEN RAISE EXCEPTION 'PLANILLA_INVALIDA: Solo se puede editar una planilla en borrador o calculada.'; END IF;
+    IF v_nom = '' THEN RAISE EXCEPTION 'PLANILLA_INVALIDA: Indique el nombre de la planilla.'; END IF;
+    IF p_pago IS NULL OR p_pago < v_p.fecha_inicio THEN RAISE EXCEPTION 'FECHA_INVALIDA: La fecha de pago es anterior al inicio del período.'; END IF;
+    UPDATE rrhh_planillas
+       SET nombre = v_nom, fecha_pago = p_pago, notas = NULLIF(btrim(COALESCE(p_notas, '')), ''), updated_at = NOW(),
+           descontar_tardanzas = COALESCE(p_descontar_tardanzas, descontar_tardanzas),
+           estado = CASE WHEN descontar_tardanzas IS DISTINCT FROM COALESCE(p_descontar_tardanzas, descontar_tardanzas) THEN 'borrador' ELSE estado END
+     WHERE id = p_id;
+    RETURN TRUE;
+END; $$;
+
+
+--
 -- Name: sp_rrhh_puesto_create(bigint, character varying, character varying, bigint, character varying, numeric, numeric); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -10279,6 +10972,143 @@ BEGIN
         is_active = p_is_active, updated_at = NOW()
     WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
     RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_renta_tramos_list(bigint, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_renta_tramos_list(p_empresa_id bigint, p_anio integer) RETURNS TABLE(orden integer, desde numeric, hasta numeric, porcentaje numeric)
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+    SELECT r.orden, r.desde, r.hasta, r.porcentaje FROM rrhh_renta_tramos r
+     WHERE r.empresa_id = p_empresa_id AND r.anio = p_anio ORDER BY r.orden;
+$$;
+
+
+--
+-- Name: sp_rrhh_tasas_anios(bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_tasas_anios(p_empresa_id bigint) RETURNS TABLE(anio integer, credito_hijo numeric, credito_conyuge numeric, fuente character varying, validado boolean, obrero_pct numeric, patronal_pct numeric)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT t.anio, t.credito_hijo, t.credito_conyuge, t.fuente::VARCHAR, t.validado,
+           COALESCE((SELECT SUM(c.porcentaje) FROM rrhh_cargas_sociales c WHERE c.empresa_id = t.empresa_id AND c.anio = t.anio AND c.parte = 'obrero'), 0)::NUMERIC,
+           COALESCE((SELECT SUM(c.porcentaje) FROM rrhh_cargas_sociales c WHERE c.empresa_id = t.empresa_id AND c.anio = t.anio AND c.parte = 'patronal'), 0)::NUMERIC
+      FROM rrhh_tasas_anio t WHERE t.empresa_id = p_empresa_id ORDER BY t.anio DESC;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_tasas_cargar(bigint, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_tasas_cargar(p_empresa_id bigint, p_anio integer) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_prev INTEGER;
+BEGIN
+    IF p_anio IS NULL OR p_anio < 2000 OR p_anio > 2100 THEN RAISE EXCEPTION 'TASAS_INVALIDAS: Año inválido.'; END IF;
+    IF EXISTS (SELECT 1 FROM rrhh_tasas_anio t WHERE t.empresa_id = p_empresa_id AND t.anio = p_anio) THEN RETURN FALSE; END IF;
+
+    SELECT MAX(t.anio) INTO v_prev FROM rrhh_tasas_anio t WHERE t.empresa_id = p_empresa_id AND t.anio < p_anio;
+    IF v_prev IS NOT NULL THEN
+        INSERT INTO rrhh_tasas_anio (empresa_id, anio, credito_hijo, credito_conyuge, fuente, validado)
+        SELECT p_empresa_id, p_anio, t.credito_hijo, t.credito_conyuge, 'Copiado de ' || v_prev || ': verifique los valores del año', FALSE
+          FROM rrhh_tasas_anio t WHERE t.empresa_id = p_empresa_id AND t.anio = v_prev;
+        INSERT INTO rrhh_cargas_sociales (empresa_id, anio, rubro, parte, porcentaje, orden)
+        SELECT p_empresa_id, p_anio, c.rubro, c.parte, c.porcentaje, c.orden FROM rrhh_cargas_sociales c WHERE c.empresa_id = p_empresa_id AND c.anio = v_prev;
+        INSERT INTO rrhh_renta_tramos (empresa_id, anio, orden, desde, hasta, porcentaje)
+        SELECT p_empresa_id, p_anio, r.orden, r.desde, r.hasta, r.porcentaje FROM rrhh_renta_tramos r WHERE r.empresa_id = p_empresa_id AND r.anio = v_prev;
+        RETURN TRUE;
+    END IF;
+
+    INSERT INTO rrhh_tasas_anio (empresa_id, anio, credito_hijo, credito_conyuge, fuente, validado)
+    VALUES (p_empresa_id, p_anio, 1710, 2590,
+            'Valores 2026: Decreto 45333-H (renta salarios) y tasas CCSS vigentes. Validar con el contador.', FALSE);
+
+    INSERT INTO rrhh_cargas_sociales (empresa_id, anio, rubro, parte, porcentaje, orden)
+    VALUES (p_empresa_id, p_anio, 'SEM (Enfermedad y Maternidad)', 'obrero', 5.50, 1),
+           (p_empresa_id, p_anio, 'IVM (Invalidez, Vejez y Muerte)', 'obrero', 4.33, 2),
+           (p_empresa_id, p_anio, 'Banco Popular (aporte obrero)', 'obrero', 1.00, 3),
+           (p_empresa_id, p_anio, 'SEM (Enfermedad y Maternidad)', 'patronal', 9.25, 1),
+           (p_empresa_id, p_anio, 'IVM (Invalidez, Vejez y Muerte)', 'patronal', 5.58, 2),
+           (p_empresa_id, p_anio, 'Cuota Banco Popular', 'patronal', 0.25, 3),
+           (p_empresa_id, p_anio, 'Asignaciones Familiares (FODESAF)', 'patronal', 5.00, 4),
+           (p_empresa_id, p_anio, 'IMAS', 'patronal', 0.50, 5),
+           (p_empresa_id, p_anio, 'INA', 'patronal', 1.50, 6),
+           (p_empresa_id, p_anio, 'Aporte Banco Popular', 'patronal', 0.25, 7),
+           (p_empresa_id, p_anio, 'Fondo de Capitalización Laboral', 'patronal', 1.50, 8),
+           (p_empresa_id, p_anio, 'Operadora de Pensiones (ROP)', 'patronal', 2.00, 9),
+           (p_empresa_id, p_anio, 'INS (Riesgos del Trabajo)', 'patronal', 1.00, 10);
+
+    INSERT INTO rrhh_renta_tramos (empresa_id, anio, orden, desde, hasta, porcentaje)
+    VALUES (p_empresa_id, p_anio, 1, 0, 918000, 0),
+           (p_empresa_id, p_anio, 2, 918000, 1347000, 10),
+           (p_empresa_id, p_anio, 3, 1347000, 2364000, 15),
+           (p_empresa_id, p_anio, 4, 2364000, 4727000, 20),
+           (p_empresa_id, p_anio, 5, 4727000, NULL, 25);
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_tasas_guardar(bigint, integer, numeric, numeric, character varying, boolean, jsonb, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_tasas_guardar(p_empresa_id bigint, p_anio integer, p_credito_hijo numeric, p_credito_conyuge numeric, p_fuente character varying, p_validado boolean, p_cargas jsonb, p_tramos jsonb) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_prev NUMERIC := NULL; v_r RECORD; v_n INTEGER := 0;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM rrhh_tasas_anio t WHERE t.empresa_id = p_empresa_id AND t.anio = p_anio) THEN
+        RAISE EXCEPTION 'TASAS_INVALIDAS: Las tasas de ese año no existen.';
+    END IF;
+    IF COALESCE(p_credito_hijo, 0) < 0 OR COALESCE(p_credito_conyuge, 0) < 0 THEN RAISE EXCEPTION 'TASAS_INVALIDAS: Los créditos no pueden ser negativos.'; END IF;
+    IF jsonb_typeof(p_cargas) <> 'array' OR jsonb_typeof(p_tramos) <> 'array' THEN RAISE EXCEPTION 'TASAS_INVALIDAS: Datos incompletos.'; END IF;
+
+    -- tramos: contiguos y ascendentes, el último sin tope
+    FOR v_r IN SELECT x.desde, x.hasta, x.porcentaje FROM jsonb_to_recordset(p_tramos) AS x(desde NUMERIC, hasta NUMERIC, porcentaje NUMERIC) LOOP
+        v_n := v_n + 1;
+        IF v_r.desde IS NULL OR v_r.porcentaje IS NULL OR v_r.porcentaje < 0 OR v_r.porcentaje > 100 THEN RAISE EXCEPTION 'TASAS_INVALIDAS: Tramo de renta %: datos inválidos.', v_n; END IF;
+        IF v_prev IS NULL AND v_r.desde <> 0 THEN RAISE EXCEPTION 'TASAS_INVALIDAS: El primer tramo debe empezar en 0.'; END IF;
+        IF v_prev IS NOT NULL AND v_r.desde <> v_prev THEN RAISE EXCEPTION 'TASAS_INVALIDAS: El tramo % debe empezar donde termina el anterior.', v_n; END IF;
+        IF v_r.hasta IS NOT NULL AND v_r.hasta <= v_r.desde THEN RAISE EXCEPTION 'TASAS_INVALIDAS: Tramo de renta %: el límite superior debe ser mayor que el inferior.', v_n; END IF;
+        v_prev := v_r.hasta;
+        IF v_r.hasta IS NULL THEN EXIT; END IF;
+    END LOOP;
+    IF v_n = 0 THEN RAISE EXCEPTION 'TASAS_INVALIDAS: Indique al menos un tramo de renta.'; END IF;
+    IF v_prev IS NOT NULL THEN RAISE EXCEPTION 'TASAS_INVALIDAS: El último tramo de renta debe quedar sin tope.'; END IF;
+
+    FOR v_r IN SELECT x.rubro, x.parte, x.porcentaje FROM jsonb_to_recordset(p_cargas) AS x(rubro TEXT, parte TEXT, porcentaje NUMERIC) LOOP
+        IF btrim(COALESCE(v_r.rubro, '')) = '' OR v_r.parte NOT IN ('obrero', 'patronal') OR v_r.porcentaje IS NULL OR v_r.porcentaje < 0 OR v_r.porcentaje > 100 THEN
+            RAISE EXCEPTION 'TASAS_INVALIDAS: Hay una carga social con datos inválidos.';
+        END IF;
+    END LOOP;
+
+    UPDATE rrhh_tasas_anio
+       SET credito_hijo = COALESCE(p_credito_hijo, 0), credito_conyuge = COALESCE(p_credito_conyuge, 0),
+           fuente = NULLIF(btrim(COALESCE(p_fuente, '')), ''), validado = COALESCE(p_validado, FALSE), updated_at = NOW()
+     WHERE empresa_id = p_empresa_id AND anio = p_anio;
+
+    DELETE FROM rrhh_cargas_sociales WHERE empresa_id = p_empresa_id AND anio = p_anio;
+    INSERT INTO rrhh_cargas_sociales (empresa_id, anio, rubro, parte, porcentaje, orden)
+    SELECT p_empresa_id, p_anio, btrim(x.rubro), x.parte, x.porcentaje, (row_number() OVER ())::INTEGER
+      FROM jsonb_to_recordset(p_cargas) AS x(rubro TEXT, parte TEXT, porcentaje NUMERIC);
+
+    DELETE FROM rrhh_renta_tramos WHERE empresa_id = p_empresa_id AND anio = p_anio;
+    INSERT INTO rrhh_renta_tramos (empresa_id, anio, orden, desde, hasta, porcentaje)
+    SELECT p_empresa_id, p_anio, (row_number() OVER ())::INTEGER, x.desde, x.hasta, x.porcentaje
+      FROM jsonb_to_recordset(p_tramos) AS x(desde NUMERIC, hasta NUMERIC, porcentaje NUMERIC);
+    RETURN TRUE;
 END; $$;
 
 
@@ -14879,6 +15709,157 @@ ALTER SEQUENCE public.rrhh_asistencia_ajustes_id_seq OWNED BY public.rrhh_asiste
 
 
 --
+-- Name: rrhh_cargas_sociales; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_cargas_sociales (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    anio integer NOT NULL,
+    rubro character varying(60) NOT NULL,
+    parte character varying(10) NOT NULL,
+    porcentaje numeric(6,3) NOT NULL,
+    orden integer DEFAULT 0 NOT NULL,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rrhh_cargas_sociales_parte_check CHECK (((parte)::text = ANY ((ARRAY['obrero'::character varying, 'patronal'::character varying])::text[]))),
+    CONSTRAINT rrhh_cargas_sociales_porcentaje_check CHECK (((porcentaje >= (0)::numeric) AND (porcentaje <= (100)::numeric)))
+);
+
+
+--
+-- Name: rrhh_cargas_sociales_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_cargas_sociales_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'rrhh_cargas_sociales'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rrhh_cargas_sociales_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_cargas_sociales_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_cargas_sociales_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_cargas_sociales_auditoria_id_seq OWNED BY public.rrhh_cargas_sociales_auditoria.id;
+
+
+--
+-- Name: rrhh_cargas_sociales_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_cargas_sociales_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_cargas_sociales_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_cargas_sociales_id_seq OWNED BY public.rrhh_cargas_sociales.id;
+
+
+--
+-- Name: rrhh_conceptos; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_conceptos (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    codigo character varying(20) NOT NULL,
+    nombre character varying(80) NOT NULL,
+    tipo character varying(10) NOT NULL,
+    afecta_ccss boolean DEFAULT false NOT NULL,
+    afecta_renta boolean DEFAULT false NOT NULL,
+    is_active boolean DEFAULT true NOT NULL,
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rrhh_conceptos_tipo_check CHECK (((tipo)::text = ANY ((ARRAY['ingreso'::character varying, 'deduccion'::character varying])::text[])))
+);
+
+
+--
+-- Name: rrhh_conceptos_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_conceptos_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'rrhh_conceptos'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rrhh_conceptos_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_conceptos_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_conceptos_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_conceptos_auditoria_id_seq OWNED BY public.rrhh_conceptos_auditoria.id;
+
+
+--
+-- Name: rrhh_conceptos_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_conceptos_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_conceptos_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_conceptos_id_seq OWNED BY public.rrhh_conceptos.id;
+
+
+--
 -- Name: rrhh_departamentos; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -15108,6 +16089,83 @@ CREATE SEQUENCE public.rrhh_dispositivos_id_seq
 --
 
 ALTER SEQUENCE public.rrhh_dispositivos_id_seq OWNED BY public.rrhh_dispositivos.id;
+
+
+--
+-- Name: rrhh_empleado_conceptos; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_empleado_conceptos (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    empleado_id bigint NOT NULL,
+    concepto_id bigint NOT NULL,
+    monto numeric(14,2) NOT NULL,
+    desde date NOT NULL,
+    hasta date,
+    nota character varying(255),
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rrhh_empleado_conceptos_check CHECK (((hasta IS NULL) OR (hasta >= desde))),
+    CONSTRAINT rrhh_empleado_conceptos_monto_check CHECK ((monto > (0)::numeric))
+);
+
+
+--
+-- Name: rrhh_empleado_conceptos_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_empleado_conceptos_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'rrhh_empleado_conceptos'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rrhh_empleado_conceptos_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_empleado_conceptos_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_empleado_conceptos_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_empleado_conceptos_auditoria_id_seq OWNED BY public.rrhh_empleado_conceptos_auditoria.id;
+
+
+--
+-- Name: rrhh_empleado_conceptos_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_empleado_conceptos_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_empleado_conceptos_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_empleado_conceptos_id_seq OWNED BY public.rrhh_empleado_conceptos.id;
 
 
 --
@@ -15909,6 +16967,211 @@ ALTER SEQUENCE public.rrhh_permiso_tipos_id_seq OWNED BY public.rrhh_permiso_tip
 
 
 --
+-- Name: rrhh_planilla_empleados; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_planilla_empleados (
+    id bigint NOT NULL,
+    planilla_id bigint NOT NULL,
+    empleado_id bigint NOT NULL,
+    codigo character varying(20) NOT NULL,
+    nombre character varying(260) NOT NULL,
+    tipo_identificacion character varying(10) NOT NULL,
+    identificacion character varying(30) NOT NULL,
+    departamento character varying(100),
+    puesto character varying(100),
+    banco character varying(60),
+    iban character varying(34),
+    numero_ccss character varying(30),
+    dias_vinculo integer DEFAULT 0 NOT NULL,
+    dias_ausente integer DEFAULT 0 NOT NULL,
+    minutos_tardanza integer DEFAULT 0 NOT NULL,
+    dias_permiso_sg numeric(6,2) DEFAULT 0 NOT NULL,
+    dias_incapacidad integer DEFAULT 0 NOT NULL,
+    minutos_extra integer DEFAULT 0 NOT NULL,
+    salario_base numeric(14,2) DEFAULT 0 NOT NULL,
+    salario_periodo numeric(14,2) DEFAULT 0 NOT NULL,
+    desc_ausencias numeric(14,2) DEFAULT 0 NOT NULL,
+    desc_tardanzas numeric(14,2) DEFAULT 0 NOT NULL,
+    desc_permisos numeric(14,2) DEFAULT 0 NOT NULL,
+    desc_incapacidad numeric(14,2) DEFAULT 0 NOT NULL,
+    pago_incapacidad numeric(14,2) DEFAULT 0 NOT NULL,
+    horas_extra numeric(14,2) DEFAULT 0 NOT NULL,
+    vac_extras numeric(14,2) DEFAULT 0 NOT NULL,
+    otros_ingresos numeric(14,2) DEFAULT 0 NOT NULL,
+    devengado numeric(14,2) DEFAULT 0 NOT NULL,
+    base_ccss numeric(14,2) DEFAULT 0 NOT NULL,
+    ccss_obrero numeric(14,2) DEFAULT 0 NOT NULL,
+    base_renta numeric(14,2) DEFAULT 0 NOT NULL,
+    renta numeric(14,2) DEFAULT 0 NOT NULL,
+    otras_deducciones numeric(14,2) DEFAULT 0 NOT NULL,
+    neto numeric(14,2) DEFAULT 0 NOT NULL,
+    ccss_patronal numeric(14,2) DEFAULT 0 NOT NULL,
+    advertencias jsonb DEFAULT '[]'::jsonb NOT NULL
+);
+
+
+--
+-- Name: rrhh_planilla_empleados_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_planilla_empleados_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_planilla_empleados_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_planilla_empleados_id_seq OWNED BY public.rrhh_planilla_empleados.id;
+
+
+--
+-- Name: rrhh_planilla_lineas; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_planilla_lineas (
+    id bigint NOT NULL,
+    planilla_id bigint NOT NULL,
+    empleado_id bigint NOT NULL,
+    concepto_id bigint,
+    codigo character varying(20),
+    descripcion character varying(120) NOT NULL,
+    tipo character varying(10) NOT NULL,
+    monto numeric(14,2) NOT NULL,
+    origen character varying(10) NOT NULL,
+    afecta_ccss boolean DEFAULT false NOT NULL,
+    afecta_renta boolean DEFAULT false NOT NULL,
+    creada_por bigint,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rrhh_planilla_lineas_monto_check CHECK ((monto > (0)::numeric)),
+    CONSTRAINT rrhh_planilla_lineas_origen_check CHECK (((origen)::text = ANY ((ARRAY['recurrente'::character varying, 'manual'::character varying])::text[]))),
+    CONSTRAINT rrhh_planilla_lineas_tipo_check CHECK (((tipo)::text = ANY ((ARRAY['ingreso'::character varying, 'deduccion'::character varying])::text[])))
+);
+
+
+--
+-- Name: rrhh_planilla_lineas_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_planilla_lineas_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_planilla_lineas_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_planilla_lineas_id_seq OWNED BY public.rrhh_planilla_lineas.id;
+
+
+--
+-- Name: rrhh_planillas; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_planillas (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    nombre character varying(100) NOT NULL,
+    periodicidad character varying(10) NOT NULL,
+    fecha_inicio date NOT NULL,
+    fecha_fin date NOT NULL,
+    fecha_pago date NOT NULL,
+    moneda character varying(3) DEFAULT 'CRC'::character varying NOT NULL,
+    descontar_tardanzas boolean DEFAULT true NOT NULL,
+    estado character varying(10) DEFAULT 'borrador'::character varying NOT NULL,
+    notas character varying(255),
+    tasas_validadas boolean DEFAULT false NOT NULL,
+    total_empleados integer DEFAULT 0 NOT NULL,
+    total_devengado numeric(16,2) DEFAULT 0 NOT NULL,
+    total_ccss_obrero numeric(16,2) DEFAULT 0 NOT NULL,
+    total_renta numeric(16,2) DEFAULT 0 NOT NULL,
+    total_otras_ded numeric(16,2) DEFAULT 0 NOT NULL,
+    total_neto numeric(16,2) DEFAULT 0 NOT NULL,
+    total_ccss_patronal numeric(16,2) DEFAULT 0 NOT NULL,
+    calculada_at timestamp without time zone,
+    aprobada_por bigint,
+    aprobada_at timestamp without time zone,
+    pagada_por bigint,
+    pagada_at timestamp without time zone,
+    anulada_por bigint,
+    anulada_at timestamp without time zone,
+    anulada_nota character varying(255),
+    creada_por bigint,
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rrhh_planillas_check CHECK (((fecha_fin >= fecha_inicio) AND ((fecha_fin - fecha_inicio) <= 31))),
+    CONSTRAINT rrhh_planillas_estado_check CHECK (((estado)::text = ANY ((ARRAY['borrador'::character varying, 'calculada'::character varying, 'aprobada'::character varying, 'pagada'::character varying, 'anulada'::character varying])::text[]))),
+    CONSTRAINT rrhh_planillas_periodicidad_check CHECK (((periodicidad)::text = ANY ((ARRAY['mensual'::character varying, 'quincenal'::character varying, 'semanal'::character varying])::text[])))
+);
+
+
+--
+-- Name: rrhh_planillas_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_planillas_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'rrhh_planillas'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rrhh_planillas_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_planillas_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_planillas_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_planillas_auditoria_id_seq OWNED BY public.rrhh_planillas_auditoria.id;
+
+
+--
+-- Name: rrhh_planillas_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_planillas_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_planillas_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_planillas_id_seq OWNED BY public.rrhh_planillas.id;
+
+
+--
 -- Name: rrhh_puestos; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -15986,6 +17249,156 @@ CREATE SEQUENCE public.rrhh_puestos_id_seq
 --
 
 ALTER SEQUENCE public.rrhh_puestos_id_seq OWNED BY public.rrhh_puestos.id;
+
+
+--
+-- Name: rrhh_renta_tramos; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_renta_tramos (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    anio integer NOT NULL,
+    orden integer NOT NULL,
+    desde numeric(14,2) NOT NULL,
+    hasta numeric(14,2),
+    porcentaje numeric(6,3) NOT NULL,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rrhh_renta_tramos_check CHECK (((hasta IS NULL) OR (hasta > desde))),
+    CONSTRAINT rrhh_renta_tramos_desde_check CHECK ((desde >= (0)::numeric)),
+    CONSTRAINT rrhh_renta_tramos_porcentaje_check CHECK (((porcentaje >= (0)::numeric) AND (porcentaje <= (100)::numeric)))
+);
+
+
+--
+-- Name: rrhh_renta_tramos_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_renta_tramos_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'rrhh_renta_tramos'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rrhh_renta_tramos_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_renta_tramos_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_renta_tramos_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_renta_tramos_auditoria_id_seq OWNED BY public.rrhh_renta_tramos_auditoria.id;
+
+
+--
+-- Name: rrhh_renta_tramos_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_renta_tramos_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_renta_tramos_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_renta_tramos_id_seq OWNED BY public.rrhh_renta_tramos.id;
+
+
+--
+-- Name: rrhh_tasas_anio; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_tasas_anio (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    anio integer NOT NULL,
+    credito_hijo numeric(14,2) DEFAULT 0 NOT NULL,
+    credito_conyuge numeric(14,2) DEFAULT 0 NOT NULL,
+    fuente character varying(255),
+    validado boolean DEFAULT false NOT NULL,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rrhh_tasas_anio_anio_check CHECK (((anio >= 2000) AND (anio <= 2100)))
+);
+
+
+--
+-- Name: rrhh_tasas_anio_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_tasas_anio_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'rrhh_tasas_anio'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rrhh_tasas_anio_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_tasas_anio_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_tasas_anio_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_tasas_anio_auditoria_id_seq OWNED BY public.rrhh_tasas_anio_auditoria.id;
+
+
+--
+-- Name: rrhh_tasas_anio_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_tasas_anio_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_tasas_anio_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_tasas_anio_id_seq OWNED BY public.rrhh_tasas_anio.id;
 
 
 --
@@ -17194,6 +18607,34 @@ ALTER TABLE ONLY public.rrhh_asistencia_ajustes_auditoria ALTER COLUMN id SET DE
 
 
 --
+-- Name: rrhh_cargas_sociales id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_cargas_sociales ALTER COLUMN id SET DEFAULT nextval('public.rrhh_cargas_sociales_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_cargas_sociales_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_cargas_sociales_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rrhh_cargas_sociales_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_conceptos id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_conceptos ALTER COLUMN id SET DEFAULT nextval('public.rrhh_conceptos_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_conceptos_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_conceptos_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rrhh_conceptos_auditoria_id_seq'::regclass);
+
+
+--
 -- Name: rrhh_departamentos id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -17233,6 +18674,20 @@ ALTER TABLE ONLY public.rrhh_dispositivos ALTER COLUMN id SET DEFAULT nextval('p
 --
 
 ALTER TABLE ONLY public.rrhh_dispositivos_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rrhh_dispositivos_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_empleado_conceptos id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_empleado_conceptos ALTER COLUMN id SET DEFAULT nextval('public.rrhh_empleado_conceptos_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_empleado_conceptos_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_empleado_conceptos_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rrhh_empleado_conceptos_auditoria_id_seq'::regclass);
 
 
 --
@@ -17362,6 +18817,34 @@ ALTER TABLE ONLY public.rrhh_permiso_tipos_auditoria ALTER COLUMN id SET DEFAULT
 
 
 --
+-- Name: rrhh_planilla_empleados id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_planilla_empleados ALTER COLUMN id SET DEFAULT nextval('public.rrhh_planilla_empleados_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_planilla_lineas id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_planilla_lineas ALTER COLUMN id SET DEFAULT nextval('public.rrhh_planilla_lineas_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_planillas id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_planillas ALTER COLUMN id SET DEFAULT nextval('public.rrhh_planillas_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_planillas_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_planillas_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rrhh_planillas_auditoria_id_seq'::regclass);
+
+
+--
 -- Name: rrhh_puestos id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -17373,6 +18856,34 @@ ALTER TABLE ONLY public.rrhh_puestos ALTER COLUMN id SET DEFAULT nextval('public
 --
 
 ALTER TABLE ONLY public.rrhh_puestos_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rrhh_puestos_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_renta_tramos id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_renta_tramos ALTER COLUMN id SET DEFAULT nextval('public.rrhh_renta_tramos_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_renta_tramos_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_renta_tramos_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rrhh_renta_tramos_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_tasas_anio id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_tasas_anio ALTER COLUMN id SET DEFAULT nextval('public.rrhh_tasas_anio_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_tasas_anio_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_tasas_anio_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rrhh_tasas_anio_auditoria_id_seq'::regclass);
 
 
 --
@@ -18330,6 +19841,38 @@ ALTER TABLE ONLY public.rrhh_asistencia_ajustes
 
 
 --
+-- Name: rrhh_cargas_sociales_auditoria rrhh_cargas_sociales_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_cargas_sociales_auditoria
+    ADD CONSTRAINT rrhh_cargas_sociales_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_cargas_sociales rrhh_cargas_sociales_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_cargas_sociales
+    ADD CONSTRAINT rrhh_cargas_sociales_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_conceptos_auditoria rrhh_conceptos_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_conceptos_auditoria
+    ADD CONSTRAINT rrhh_conceptos_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_conceptos rrhh_conceptos_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_conceptos
+    ADD CONSTRAINT rrhh_conceptos_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: rrhh_departamentos_auditoria rrhh_departamentos_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -18391,6 +19934,22 @@ ALTER TABLE ONLY public.rrhh_dispositivos_auditoria
 
 ALTER TABLE ONLY public.rrhh_dispositivos
     ADD CONSTRAINT rrhh_dispositivos_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_empleado_conceptos_auditoria rrhh_empleado_conceptos_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_empleado_conceptos_auditoria
+    ADD CONSTRAINT rrhh_empleado_conceptos_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_empleado_conceptos rrhh_empleado_conceptos_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_empleado_conceptos
+    ADD CONSTRAINT rrhh_empleado_conceptos_pkey PRIMARY KEY (id);
 
 
 --
@@ -18554,6 +20113,46 @@ ALTER TABLE ONLY public.rrhh_permiso_tipos
 
 
 --
+-- Name: rrhh_planilla_empleados rrhh_planilla_empleados_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_planilla_empleados
+    ADD CONSTRAINT rrhh_planilla_empleados_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_planilla_empleados rrhh_planilla_empleados_planilla_id_empleado_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_planilla_empleados
+    ADD CONSTRAINT rrhh_planilla_empleados_planilla_id_empleado_id_key UNIQUE (planilla_id, empleado_id);
+
+
+--
+-- Name: rrhh_planilla_lineas rrhh_planilla_lineas_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_planilla_lineas
+    ADD CONSTRAINT rrhh_planilla_lineas_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_planillas_auditoria rrhh_planillas_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_planillas_auditoria
+    ADD CONSTRAINT rrhh_planillas_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_planillas rrhh_planillas_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_planillas
+    ADD CONSTRAINT rrhh_planillas_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: rrhh_puestos_auditoria rrhh_puestos_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -18567,6 +20166,46 @@ ALTER TABLE ONLY public.rrhh_puestos_auditoria
 
 ALTER TABLE ONLY public.rrhh_puestos
     ADD CONSTRAINT rrhh_puestos_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_renta_tramos_auditoria rrhh_renta_tramos_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_renta_tramos_auditoria
+    ADD CONSTRAINT rrhh_renta_tramos_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_renta_tramos rrhh_renta_tramos_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_renta_tramos
+    ADD CONSTRAINT rrhh_renta_tramos_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_tasas_anio_auditoria rrhh_tasas_anio_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_tasas_anio_auditoria
+    ADD CONSTRAINT rrhh_tasas_anio_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_tasas_anio rrhh_tasas_anio_empresa_id_anio_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_tasas_anio
+    ADD CONSTRAINT rrhh_tasas_anio_empresa_id_anio_key UNIQUE (empresa_id, anio);
+
+
+--
+-- Name: rrhh_tasas_anio rrhh_tasas_anio_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_tasas_anio
+    ADD CONSTRAINT rrhh_tasas_anio_pkey PRIMARY KEY (id);
 
 
 --
@@ -19532,6 +21171,27 @@ CREATE INDEX idx_rrhh_asistencia_ajustes_auditoria_registro ON public.rrhh_asist
 
 
 --
+-- Name: idx_rrhh_cargas_anio; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_cargas_anio ON public.rrhh_cargas_sociales USING btree (empresa_id, anio);
+
+
+--
+-- Name: idx_rrhh_cargas_sociales_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_cargas_sociales_auditoria_registro ON public.rrhh_cargas_sociales_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_rrhh_conceptos_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_conceptos_auditoria_registro ON public.rrhh_conceptos_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
 -- Name: idx_rrhh_departamentos_auditoria_registro; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -19560,6 +21220,13 @@ CREATE INDEX idx_rrhh_dispositivos_auditoria_registro ON public.rrhh_dispositivo
 
 
 --
+-- Name: idx_rrhh_emp_conceptos_empleado; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_emp_conceptos_empleado ON public.rrhh_empleado_conceptos USING btree (empleado_id) WHERE (deleted_at IS NULL);
+
+
+--
 -- Name: idx_rrhh_emp_horarios_empleado; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -19571,6 +21238,13 @@ CREATE INDEX idx_rrhh_emp_horarios_empleado ON public.rrhh_empleado_horarios USI
 --
 
 CREATE INDEX idx_rrhh_emp_horarios_horario ON public.rrhh_empleado_horarios USING btree (horario_id) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_rrhh_empleado_conceptos_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_empleado_conceptos_auditoria_registro ON public.rrhh_empleado_conceptos_auditoria USING btree (registro_id, created_at DESC);
 
 
 --
@@ -19721,10 +21395,59 @@ CREATE INDEX idx_rrhh_permiso_tipos_auditoria_registro ON public.rrhh_permiso_ti
 
 
 --
+-- Name: idx_rrhh_planilla_emp_empleado; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_planilla_emp_empleado ON public.rrhh_planilla_empleados USING btree (empleado_id);
+
+
+--
+-- Name: idx_rrhh_planilla_lineas; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_planilla_lineas ON public.rrhh_planilla_lineas USING btree (planilla_id, empleado_id);
+
+
+--
+-- Name: idx_rrhh_planillas_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_planillas_auditoria_registro ON public.rrhh_planillas_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_rrhh_planillas_empresa; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_planillas_empresa ON public.rrhh_planillas USING btree (empresa_id, fecha_inicio DESC) WHERE (deleted_at IS NULL);
+
+
+--
 -- Name: idx_rrhh_puestos_auditoria_registro; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX idx_rrhh_puestos_auditoria_registro ON public.rrhh_puestos_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_rrhh_renta_tramos_anio; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_renta_tramos_anio ON public.rrhh_renta_tramos USING btree (empresa_id, anio, orden);
+
+
+--
+-- Name: idx_rrhh_renta_tramos_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_renta_tramos_auditoria_registro ON public.rrhh_renta_tramos_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_rrhh_tasas_anio_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_tasas_anio_auditoria_registro ON public.rrhh_tasas_anio_auditoria USING btree (registro_id, created_at DESC);
 
 
 --
@@ -19851,6 +21574,13 @@ CREATE UNIQUE INDEX uq_rrhh_agentes_token ON public.rrhh_agentes USING btree (to
 --
 
 CREATE UNIQUE INDEX uq_rrhh_ajustes ON public.rrhh_asistencia_ajustes USING btree (empleado_id, fecha, tipo) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: uq_rrhh_conceptos_codigo; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_rrhh_conceptos_codigo ON public.rrhh_conceptos USING btree (empresa_id, lower((codigo)::text)) WHERE (deleted_at IS NULL);
 
 
 --
@@ -20183,6 +21913,20 @@ CREATE TRIGGER trg_rrhh_asistencia_ajustes_auditoria AFTER INSERT OR DELETE OR U
 
 
 --
+-- Name: rrhh_cargas_sociales trg_rrhh_cargas_sociales_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_rrhh_cargas_sociales_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rrhh_cargas_sociales FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: rrhh_conceptos trg_rrhh_conceptos_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_rrhh_conceptos_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rrhh_conceptos FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
 -- Name: rrhh_departamentos trg_rrhh_departamentos_auditoria; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -20201,6 +21945,13 @@ CREATE TRIGGER trg_rrhh_dispositivo_usuarios_auditoria AFTER INSERT OR DELETE OR
 --
 
 CREATE TRIGGER trg_rrhh_dispositivos_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rrhh_dispositivos FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: rrhh_empleado_conceptos trg_rrhh_empleado_conceptos_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_rrhh_empleado_conceptos_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rrhh_empleado_conceptos FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
 
 
 --
@@ -20267,10 +22018,31 @@ CREATE TRIGGER trg_rrhh_permiso_tipos_auditoria AFTER INSERT OR DELETE OR UPDATE
 
 
 --
+-- Name: rrhh_planillas trg_rrhh_planillas_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_rrhh_planillas_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rrhh_planillas FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
 -- Name: rrhh_puestos trg_rrhh_puestos_auditoria; Type: TRIGGER; Schema: public; Owner: -
 --
 
 CREATE TRIGGER trg_rrhh_puestos_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rrhh_puestos FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: rrhh_renta_tramos trg_rrhh_renta_tramos_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_rrhh_renta_tramos_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rrhh_renta_tramos FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: rrhh_tasas_anio trg_rrhh_tasas_anio_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_rrhh_tasas_anio_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rrhh_tasas_anio FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
 
 
 --
@@ -20612,6 +22384,22 @@ ALTER TABLE ONLY public.rrhh_dispositivos
 
 
 --
+-- Name: rrhh_empleado_conceptos rrhh_empleado_conceptos_concepto_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_empleado_conceptos
+    ADD CONSTRAINT rrhh_empleado_conceptos_concepto_id_fkey FOREIGN KEY (concepto_id) REFERENCES public.rrhh_conceptos(id);
+
+
+--
+-- Name: rrhh_empleado_conceptos rrhh_empleado_conceptos_empleado_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_empleado_conceptos
+    ADD CONSTRAINT rrhh_empleado_conceptos_empleado_id_fkey FOREIGN KEY (empleado_id) REFERENCES public.rrhh_empleados(id);
+
+
+--
 -- Name: rrhh_empleado_horarios rrhh_empleado_horarios_empleado_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -20740,6 +22528,46 @@ ALTER TABLE ONLY public.rrhh_permiso_solicitudes
 
 
 --
+-- Name: rrhh_planilla_empleados rrhh_planilla_empleados_empleado_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_planilla_empleados
+    ADD CONSTRAINT rrhh_planilla_empleados_empleado_id_fkey FOREIGN KEY (empleado_id) REFERENCES public.rrhh_empleados(id);
+
+
+--
+-- Name: rrhh_planilla_empleados rrhh_planilla_empleados_planilla_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_planilla_empleados
+    ADD CONSTRAINT rrhh_planilla_empleados_planilla_id_fkey FOREIGN KEY (planilla_id) REFERENCES public.rrhh_planillas(id) ON DELETE CASCADE;
+
+
+--
+-- Name: rrhh_planilla_lineas rrhh_planilla_lineas_concepto_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_planilla_lineas
+    ADD CONSTRAINT rrhh_planilla_lineas_concepto_id_fkey FOREIGN KEY (concepto_id) REFERENCES public.rrhh_conceptos(id);
+
+
+--
+-- Name: rrhh_planilla_lineas rrhh_planilla_lineas_empleado_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_planilla_lineas
+    ADD CONSTRAINT rrhh_planilla_lineas_empleado_id_fkey FOREIGN KEY (empleado_id) REFERENCES public.rrhh_empleados(id);
+
+
+--
+-- Name: rrhh_planilla_lineas rrhh_planilla_lineas_planilla_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_planilla_lineas
+    ADD CONSTRAINT rrhh_planilla_lineas_planilla_id_fkey FOREIGN KEY (planilla_id) REFERENCES public.rrhh_planillas(id) ON DELETE CASCADE;
+
+
+--
 -- Name: rrhh_puestos rrhh_puestos_departamento_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -20783,5 +22611,5 @@ ALTER TABLE ONLY public.sucursal_bodegas
 -- PostgreSQL database dump complete
 --
 
-\unrestrict S4AwWs2c0EmEUxOtmI4GUq8VGbKe5sTQ73Dpe2K1ucxmIDdtEGTsPpqQrEqbdO1
+\unrestrict TVrCVA9biMVdIffWRLnMiN4dXxDvkKcU4LAmvSzwb5jYSwYoxnx6X6EJbCBV7D6
 
