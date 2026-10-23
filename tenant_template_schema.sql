@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict k2b14o6M4h9Et1l4P4dHQeMvTbEhfI0gEOvh5impdVJrC97zsOmXA0UKptd02Sy
+\restrict S4AwWs2c0EmEUxOtmI4GUq8VGbKe5sTQ73Dpe2K1ucxmIDdtEGTsPpqQrEqbdO1
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
@@ -174,6 +174,670 @@ BEGIN
   ORDER BY ecv.codigo;
 END;
 $$;
+
+
+--
+-- Name: fn_rrhh_dias_habiles(bigint, bigint, date, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_rrhh_dias_habiles(p_empresa_id bigint, p_empleado_id bigint, p_desde date, p_hasta date) RETURNS integer
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_horas NUMERIC;
+    v_n     INTEGER;
+BEGIN
+    IF p_hasta < p_desde THEN RETURN 0; END IF;
+    IF p_hasta - p_desde > 400 THEN RAISE EXCEPTION 'FECHA_INVALIDA: El rango de fechas es demasiado grande.'; END IF;
+    SELECT e.horas_semanales INTO v_horas FROM rrhh_empleados e WHERE e.id = p_empleado_id AND e.empresa_id = p_empresa_id;
+
+    SELECT COUNT(*)::INTEGER INTO v_n
+      FROM generate_series(p_desde::TIMESTAMP, p_hasta::TIMESTAMP, INTERVAL '1 day') gs
+      CROSS JOIN LATERAL (SELECT gs::DATE AS dia, EXTRACT(ISODOW FROM gs)::INTEGER AS dow) x
+      LEFT JOIN LATERAL (
+          SELECT a.horario_id FROM rrhh_empleado_horarios a
+           WHERE a.empleado_id = p_empleado_id AND a.deleted_at IS NULL AND a.vigente_desde <= x.dia
+             AND (a.vigente_hasta IS NULL OR a.vigente_hasta >= x.dia)
+           ORDER BY a.vigente_desde DESC LIMIT 1) h ON TRUE
+     WHERE NOT EXISTS (SELECT 1 FROM rrhh_feriados f WHERE f.empresa_id = p_empresa_id AND f.fecha = x.dia
+                          AND f.pago_obligatorio AND f.deleted_at IS NULL)
+       AND (CASE WHEN h.horario_id IS NOT NULL
+                 THEN EXISTS (SELECT 1 FROM rrhh_horario_dias d WHERE d.horario_id = h.horario_id AND d.dia_semana = x.dow)
+                 ELSE x.dow <= (CASE WHEN COALESCE(v_horas, 48) > 40 THEN 6 ELSE 5 END) END);
+    RETURN v_n;
+END; $$;
+
+
+--
+-- Name: fn_rrhh_horario_guardar_dias(bigint, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_rrhh_horario_guardar_dias(p_horario_id bigint, p_dias jsonb) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    DELETE FROM rrhh_horario_dias WHERE horario_id = p_horario_id;
+    INSERT INTO rrhh_horario_dias (horario_id, dia_semana, hora_entrada, hora_salida, minutos_descanso)
+    SELECT p_horario_id, (x->>'dia_semana')::SMALLINT, (x->>'hora_entrada')::TIME, (x->>'hora_salida')::TIME,
+           COALESCE((x->>'minutos_descanso')::SMALLINT, 0)
+      FROM jsonb_array_elements(p_dias) x;
+END; $$;
+
+
+--
+-- Name: fn_rrhh_inc_dias_previos(bigint, character varying, date, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_rrhh_inc_dias_previos(p_empleado_id bigint, p_tipo character varying, p_inicio date, p_excluir_id bigint) RETURNS integer
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_cursor DATE := p_inicio;
+    v_total  INTEGER := 0;
+    v_r      RECORD;
+BEGIN
+    LOOP
+        SELECT i.fecha_inicio, i.fecha_fin INTO v_r FROM rrhh_incapacidades i
+         WHERE i.empleado_id = p_empleado_id AND i.tipo = p_tipo AND i.estado = 'registrada' AND i.deleted_at IS NULL
+           AND i.id <> COALESCE(p_excluir_id, 0) AND i.fecha_fin = v_cursor - 1
+         LIMIT 1;
+        EXIT WHEN NOT FOUND;
+        v_total := v_total + (v_r.fecha_fin - v_r.fecha_inicio + 1);
+        v_cursor := v_r.fecha_inicio;
+        EXIT WHEN v_total > 3650;
+    END LOOP;
+    RETURN v_total;
+END; $$;
+
+
+--
+-- Name: fn_rrhh_inc_tramos(bigint, character varying, date, date, numeric, boolean, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_rrhh_inc_tramos(p_empleado_id bigint, p_tipo character varying, p_inicio date, p_fin date, p_valor_dia numeric, p_completa boolean, p_excluir_id bigint) RETURNS TABLE(desde date, hasta date, dias integer, patrono_pct numeric, entidad_pct numeric, complemento_pct numeric, monto_patrono numeric, monto_entidad numeric, monto_complemento numeric)
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+    WITH prev AS (
+        SELECT fn_rrhh_inc_dias_previos(p_empleado_id, p_tipo, p_inicio, p_excluir_id) AS p
+    ),
+    d AS (
+        SELECT gs::DATE AS dia, prev.p + (gs::DATE - p_inicio) + 1 AS n
+          FROM prev, generate_series(p_inicio::TIMESTAMP, p_fin::TIMESTAMP, INTERVAL '1 day') gs
+    ),
+    q AS (
+        SELECT d.dia,
+               (CASE WHEN p_tipo = 'maternidad' THEN 50 WHEN d.n <= 3 THEN 50 ELSE 0 END)::NUMERIC AS pat,
+               (CASE WHEN p_tipo = 'maternidad' THEN 50 WHEN d.n <= 3 THEN 0 ELSE 60 END)::NUMERIC AS ent
+          FROM d
+    ),
+    r AS (
+        SELECT q.dia, q.pat, q.ent, (CASE WHEN p_completa THEN 100 - q.pat - q.ent ELSE 0 END)::NUMERIC AS comp FROM q
+    )
+    SELECT MIN(r.dia), MAX(r.dia), COUNT(*)::INTEGER, r.pat, r.ent, r.comp,
+           round(COUNT(*) * p_valor_dia * r.pat / 100, 2),
+           round(COUNT(*) * p_valor_dia * r.ent / 100, 2),
+           round(COUNT(*) * p_valor_dia * r.comp / 100, 2)
+      FROM r GROUP BY r.pat, r.ent, r.comp ORDER BY MIN(r.dia);
+$$;
+
+
+--
+-- Name: fn_rrhh_inc_vac_traslape(bigint, bigint, date, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_rrhh_inc_vac_traslape(p_empresa_id bigint, p_empleado_id bigint, p_inicio date, p_fin date) RETURNS numeric
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+    SELECT COALESCE(SUM(fn_rrhh_dias_habiles(p_empresa_id, p_empleado_id, GREATEST(s.fecha_inicio, p_inicio), LEAST(s.fecha_fin, p_fin))), 0)::NUMERIC
+      FROM rrhh_vacaciones_solicitudes s
+     WHERE s.empleado_id = p_empleado_id AND s.deleted_at IS NULL AND s.estado = 'aprobada'
+       AND s.fecha_inicio <= p_fin AND s.fecha_fin >= p_inicio;
+$$;
+
+
+--
+-- Name: fn_rrhh_inc_validar(bigint, bigint, character varying, date, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_rrhh_inc_validar(p_empresa_id bigint, p_empleado_id bigint, p_tipo character varying, p_inicio date, p_fin date) RETURNS void
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_e RECORD;
+BEGIN
+    SELECT e.fecha_ingreso, e.fecha_salida, e.estado INTO v_e
+      FROM rrhh_empleados e WHERE e.id = p_empleado_id AND e.empresa_id = p_empresa_id AND e.deleted_at IS NULL;
+    IF NOT FOUND THEN RAISE EXCEPTION 'REF_INVALIDA: El empleado no existe.'; END IF;
+    IF v_e.estado = 'liquidado' THEN RAISE EXCEPTION 'INCAPACIDAD_INVALIDA: El empleado ya fue liquidado.'; END IF;
+    IF p_tipo IS NULL OR p_tipo NOT IN ('enfermedad', 'maternidad', 'riesgo_trabajo') THEN
+        RAISE EXCEPTION 'INCAPACIDAD_INVALIDA: Tipo de incapacidad desconocido.';
+    END IF;
+    IF p_inicio IS NULL OR p_fin IS NULL THEN RAISE EXCEPTION 'FECHA_INVALIDA: Indique las fechas de la incapacidad.'; END IF;
+    IF p_fin < p_inicio THEN RAISE EXCEPTION 'FECHA_INVALIDA: La fecha final es anterior a la inicial.'; END IF;
+    IF p_fin - p_inicio > 730 THEN RAISE EXCEPTION 'INCAPACIDAD_INVALIDA: Una incapacidad no puede pasar de 731 días; divídala en prórrogas.'; END IF;
+    IF p_inicio < v_e.fecha_ingreso THEN RAISE EXCEPTION 'INCAPACIDAD_INVALIDA: La incapacidad es anterior a la fecha de ingreso del empleado.'; END IF;
+    IF v_e.fecha_salida IS NOT NULL AND p_inicio > v_e.fecha_salida THEN
+        RAISE EXCEPTION 'INCAPACIDAD_INVALIDA: La incapacidad empieza después de la fecha de salida del empleado.';
+    END IF;
+    IF EXISTS (SELECT 1 FROM rrhh_incapacidades i WHERE i.empleado_id = p_empleado_id AND i.deleted_at IS NULL AND i.estado = 'registrada'
+                  AND i.fecha_inicio <= p_fin AND i.fecha_fin >= p_inicio) THEN
+        RAISE EXCEPTION 'INCAPACIDAD_INVALIDA: El empleado ya tiene una incapacidad registrada que se cruza con esas fechas.';
+    END IF;
+    IF EXISTS (SELECT 1 FROM rrhh_permiso_solicitudes s WHERE s.empleado_id = p_empleado_id AND s.deleted_at IS NULL
+                  AND s.estado IN ('pendiente_jefe', 'pendiente_rrhh', 'aprobada') AND s.fecha_inicio <= p_fin AND s.fecha_fin >= p_inicio) THEN
+        RAISE EXCEPTION 'INCAPACIDAD_INVALIDA: El empleado tiene un permiso pedido o aprobado que se cruza con esas fechas; cancélelo primero.';
+    END IF;
+END; $$;
+
+
+--
+-- Name: fn_rrhh_inc_valor_dia(bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_rrhh_inc_valor_dia(p_empleado_id bigint) RETURNS numeric
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+    SELECT round(e.salario_base / (CASE e.periodo_pago WHEN 'mensual' THEN 30 WHEN 'quincenal' THEN 15 ELSE 7 END), 2)
+      FROM rrhh_empleados e WHERE e.id = p_empleado_id;
+$$;
+
+
+--
+-- Name: fn_rrhh_minutos_dia(time without time zone, time without time zone, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_rrhh_minutos_dia(p_entrada time without time zone, p_salida time without time zone, p_descanso integer) RETURNS integer
+    LANGUAGE sql IMMUTABLE
+    AS $$
+    SELECT (EXTRACT(EPOCH FROM (CASE WHEN p_salida > p_entrada THEN p_salida - p_entrada
+                                     ELSE p_salida - p_entrada + INTERVAL '24 hours' END)) / 60)::INTEGER - COALESCE(p_descanso, 0);
+$$;
+
+
+--
+-- Name: fn_rrhh_movimiento(bigint, bigint, character varying, text, jsonb, jsonb, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_rrhh_movimiento(p_empresa_id bigint, p_empleado_id bigint, p_tipo character varying, p_descripcion text, p_anterior jsonb DEFAULT NULL::jsonb, p_nuevo jsonb DEFAULT NULL::jsonb, p_fecha date DEFAULT CURRENT_DATE) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    INSERT INTO rrhh_empleado_movimientos (empresa_id, empleado_id, tipo, fecha, descripcion, valor_anterior, valor_nuevo, usuario_id)
+    VALUES (p_empresa_id, p_empleado_id, p_tipo, p_fecha, p_descripcion, p_anterior, p_nuevo,
+            NULLIF(current_setting('app.current_user_id', true), '')::BIGINT);
+END; $$;
+
+
+--
+-- Name: fn_rrhh_permiso_validar(bigint, bigint, bigint, date, date, time without time zone, time without time zone, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_rrhh_permiso_validar(p_empresa_id bigint, p_empleado_id bigint, p_tipo_id bigint, p_inicio date, p_fin date, p_hi time without time zone, p_hf time without time zone, p_excluir_id bigint) RETURNS numeric
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_e     RECORD;
+    v_t     RECORD;
+    v_cant  NUMERIC;
+    v_usado NUMERIC;
+BEGIN
+    SELECT e.fecha_ingreso, e.fecha_salida, e.estado INTO v_e
+      FROM rrhh_empleados e WHERE e.id = p_empleado_id AND e.empresa_id = p_empresa_id AND e.deleted_at IS NULL;
+    IF NOT FOUND THEN RAISE EXCEPTION 'REF_INVALIDA: El empleado no existe.'; END IF;
+    IF v_e.estado <> 'activo' THEN RAISE EXCEPTION 'PERMISO_INVALIDO: Solo los empleados activos pueden pedir permisos.'; END IF;
+
+    SELECT t.* INTO v_t FROM rrhh_permiso_tipos t WHERE t.id = p_tipo_id AND t.empresa_id = p_empresa_id AND t.deleted_at IS NULL;
+    IF NOT FOUND OR NOT v_t.is_active THEN RAISE EXCEPTION 'PERMISO_INVALIDO: El tipo de permiso no existe o está inactivo.'; END IF;
+
+    IF p_fin < p_inicio THEN RAISE EXCEPTION 'FECHA_INVALIDA: La fecha final es anterior a la inicial.'; END IF;
+    IF p_fin - p_inicio > 60 THEN RAISE EXCEPTION 'PERMISO_INVALIDO: Un permiso no puede pasar de 60 días; divídalo en dos.'; END IF;
+    IF p_inicio < v_e.fecha_ingreso THEN RAISE EXCEPTION 'PERMISO_INVALIDO: El permiso es anterior a la fecha de ingreso del empleado.'; END IF;
+    IF v_e.fecha_salida IS NOT NULL AND p_fin > v_e.fecha_salida THEN
+        RAISE EXCEPTION 'PERMISO_INVALIDO: Las fechas pasan de la fecha de salida del empleado.';
+    END IF;
+
+    IF v_t.unidad = 'horas' THEN
+        IF p_inicio <> p_fin THEN RAISE EXCEPTION 'PERMISO_INVALIDO: Un permiso por horas se pide para un solo día.'; END IF;
+        IF p_hi IS NULL OR p_hf IS NULL OR p_hf <= p_hi THEN
+            RAISE EXCEPTION 'PERMISO_INVALIDO: Indique la hora de inicio y la de fin (la final debe ser posterior a la inicial).';
+        END IF;
+        v_cant := round(EXTRACT(EPOCH FROM (p_hf - p_hi)) / 3600.0, 2);
+    ELSE
+        v_cant := fn_rrhh_dias_habiles(p_empresa_id, p_empleado_id, p_inicio, p_fin);
+        IF v_cant = 0 THEN RAISE EXCEPTION 'PERMISO_INVALIDO: El rango no incluye días laborales (los descansos y feriados no cuentan).'; END IF;
+    END IF;
+
+    IF v_t.max_por_solicitud IS NOT NULL AND v_cant > v_t.max_por_solicitud THEN
+        RAISE EXCEPTION 'PERMISO_INVALIDO: «%» permite como máximo % % por solicitud y se piden %.',
+            v_t.nombre, trim(trailing '.' FROM trim(trailing '0' FROM v_t.max_por_solicitud::TEXT)), CASE v_t.unidad WHEN 'horas' THEN 'hora(s)' ELSE 'día(s)' END,
+            trim(trailing '.' FROM trim(trailing '0' FROM v_cant::TEXT));
+    END IF;
+    IF v_t.max_por_anio IS NOT NULL THEN
+        SELECT COALESCE(SUM(s.cantidad), 0) INTO v_usado FROM rrhh_permiso_solicitudes s
+         WHERE s.empleado_id = p_empleado_id AND s.tipo_id = p_tipo_id AND s.deleted_at IS NULL AND s.id <> COALESCE(p_excluir_id, 0)
+           AND s.estado IN ('pendiente_jefe', 'pendiente_rrhh', 'aprobada')
+           AND EXTRACT(YEAR FROM s.fecha_inicio) = EXTRACT(YEAR FROM p_inicio);
+        IF v_usado + v_cant > v_t.max_por_anio THEN
+            RAISE EXCEPTION 'PERMISO_INVALIDO: «%» permite % % por año y el empleado ya tiene % entre aprobados y pendientes.',
+                v_t.nombre, trim(trailing '.' FROM trim(trailing '0' FROM v_t.max_por_anio::TEXT)), CASE v_t.unidad WHEN 'horas' THEN 'hora(s)' ELSE 'día(s)' END,
+                trim(trailing '.' FROM trim(trailing '0' FROM v_usado::TEXT));
+        END IF;
+    END IF;
+
+    IF EXISTS (SELECT 1 FROM rrhh_vacaciones_solicitudes s
+                WHERE s.empleado_id = p_empleado_id AND s.deleted_at IS NULL AND s.estado IN ('pendiente_jefe', 'pendiente_rrhh', 'aprobada')
+                  AND s.fecha_inicio <= p_fin AND s.fecha_fin >= p_inicio) THEN
+        RAISE EXCEPTION 'PERMISO_INVALIDO: El empleado tiene vacaciones que se cruzan con esas fechas.';
+    END IF;
+    IF EXISTS (SELECT 1 FROM rrhh_incapacidades i
+                WHERE i.empleado_id = p_empleado_id AND i.deleted_at IS NULL AND i.estado = 'registrada'
+                  AND i.fecha_inicio <= p_fin AND i.fecha_fin >= p_inicio) THEN
+        RAISE EXCEPTION 'PERMISO_INVALIDO: El empleado tiene una incapacidad registrada que se cruza con esas fechas.';
+    END IF;
+    IF EXISTS (SELECT 1 FROM rrhh_permiso_solicitudes s
+                WHERE s.empleado_id = p_empleado_id AND s.deleted_at IS NULL AND s.id <> COALESCE(p_excluir_id, 0)
+                  AND s.estado IN ('pendiente_jefe', 'pendiente_rrhh', 'aprobada')
+                  AND s.fecha_inicio <= p_fin AND s.fecha_fin >= p_inicio
+                  AND (v_t.unidad = 'dias' OR s.unidad = 'dias' OR (s.hora_inicio < p_hf AND s.hora_fin > p_hi))) THEN
+        RAISE EXCEPTION 'PERMISO_INVALIDO: El empleado ya tiene otro permiso, pedido o aprobado, que se cruza con esas fechas u horas.';
+    END IF;
+    RETURN v_cant;
+END; $$;
+
+
+--
+-- Name: fn_rrhh_sesiones(bigint, bigint, timestamp without time zone, timestamp without time zone); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_rrhh_sesiones(p_empresa_id bigint, p_empleado_id bigint, p_desde timestamp without time zone, p_hasta timestamp without time zone) RETURNS TABLE(s_empleado_id bigint, s_entrada_id bigint, s_entrada timestamp without time zone, s_salida_id bigint, s_salida timestamp without time zone)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    r        RECORD;
+    v_emp    BIGINT := NULL;
+    v_ent_id BIGINT := NULL;
+    v_ent    TIMESTAMP := NULL;
+BEGIN
+    FOR r IN
+        SELECT m.id, m.empleado_id AS emp, m.fecha_hora
+          FROM rrhh_marcas m
+         WHERE m.empresa_id = p_empresa_id AND m.estado = 'valida' AND m.deleted_at IS NULL AND m.empleado_id IS NOT NULL
+           AND (p_empleado_id IS NULL OR m.empleado_id = p_empleado_id)
+           AND m.fecha_hora BETWEEN p_desde AND p_hasta
+         ORDER BY m.empleado_id, m.fecha_hora, m.id
+    LOOP
+        IF v_emp IS DISTINCT FROM r.emp THEN
+            IF v_ent_id IS NOT NULL THEN
+                s_empleado_id := v_emp; s_entrada_id := v_ent_id; s_entrada := v_ent; s_salida_id := NULL; s_salida := NULL;
+                RETURN NEXT;
+            END IF;
+            v_emp := r.emp; v_ent_id := NULL; v_ent := NULL;
+        END IF;
+
+        IF v_ent_id IS NULL THEN
+            v_ent_id := r.id; v_ent := r.fecha_hora;
+        ELSIF r.fecha_hora - v_ent <= INTERVAL '14 hours' THEN
+            s_empleado_id := v_emp; s_entrada_id := v_ent_id; s_entrada := v_ent; s_salida_id := r.id; s_salida := r.fecha_hora;
+            RETURN NEXT;
+            v_ent_id := NULL; v_ent := NULL;
+        ELSE
+            s_empleado_id := v_emp; s_entrada_id := v_ent_id; s_entrada := v_ent; s_salida_id := NULL; s_salida := NULL;
+            RETURN NEXT;
+            v_ent_id := r.id; v_ent := r.fecha_hora;
+        END IF;
+    END LOOP;
+
+    IF v_ent_id IS NOT NULL THEN
+        s_empleado_id := v_emp; s_entrada_id := v_ent_id; s_entrada := v_ent; s_salida_id := NULL; s_salida := NULL;
+        RETURN NEXT;
+    END IF;
+END; $$;
+
+
+--
+-- Name: fn_rrhh_vac_devengado(bigint, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_rrhh_vac_devengado(p_empleado_id bigint, p_fecha date) RETURNS numeric
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_e     RECORD;
+    v_hasta DATE;
+    v_edad  INTERVAL;
+BEGIN
+    SELECT e.fecha_ingreso, e.fecha_salida INTO v_e FROM rrhh_empleados e WHERE e.id = p_empleado_id;
+    IF NOT FOUND THEN RETURN 0; END IF;
+    v_hasta := LEAST(p_fecha, COALESCE(v_e.fecha_salida, p_fecha));
+    IF v_hasta < v_e.fecha_ingreso THEN RETURN 0; END IF;
+    v_edad := age(v_hasta, v_e.fecha_ingreso);
+    RETURN (EXTRACT(YEAR FROM v_edad) * 12 + EXTRACT(MONTH FROM v_edad))::NUMERIC;
+END; $$;
+
+
+--
+-- Name: fn_rrhh_vac_movimientos(bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_rrhh_vac_movimientos(p_empleado_id bigint) RETURNS numeric
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+    SELECT COALESCE(SUM(m.dias), 0) FROM rrhh_vacaciones_movimientos m WHERE m.empleado_id = p_empleado_id AND m.deleted_at IS NULL;
+$$;
+
+
+--
+-- Name: fn_rrhh_vac_reservado(bigint, bigint, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_rrhh_vac_reservado(p_empleado_id bigint, p_excluir_id bigint, p_solo_aprobadas boolean DEFAULT false) RETURNS numeric
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+    SELECT COALESCE(SUM(s.dias), 0)::NUMERIC FROM rrhh_vacaciones_solicitudes s
+     WHERE s.empleado_id = p_empleado_id AND s.deleted_at IS NULL AND s.id <> COALESCE(p_excluir_id, 0)
+       AND (s.estado = 'aprobada' OR (NOT p_solo_aprobadas AND s.estado IN ('pendiente_jefe', 'pendiente_rrhh')));
+$$;
+
+
+--
+-- Name: fn_rrhh_vac_tarifa(bigint, bigint, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_rrhh_vac_tarifa(p_empresa_id bigint, p_empleado_id bigint, p_fecha date) RETURNS TABLE(valor_dia numeric, extras_50sem numeric, extras_dia numeric, promedio_dia numeric)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_e      RECORD;
+    v_ref    DATE := LEAST(p_fecha, CURRENT_DATE);
+    v_ini    DATE;
+    v_cur    DATE;
+    v_hasta  DATE;
+    v_ext    NUMERIC := 0;
+    v_vd     NUMERIC;
+    v_win    NUMERIC;
+    v_ed     NUMERIC;
+BEGIN
+    SELECT e.salario_base, e.periodo_pago, e.fecha_ingreso INTO v_e
+      FROM rrhh_empleados e WHERE e.id = p_empleado_id AND e.empresa_id = p_empresa_id;
+    IF NOT FOUND THEN RETURN; END IF;
+
+    v_vd  := v_e.salario_base / (CASE v_e.periodo_pago WHEN 'mensual' THEN 30 WHEN 'quincenal' THEN 15 ELSE 6 END);
+    v_ini := GREATEST(v_e.fecha_ingreso, v_ref - 349);
+    v_win := GREATEST(v_ref - v_ini + 1, 1);
+    v_cur := v_ini;
+    WHILE v_cur <= v_ref LOOP
+        v_hasta := LEAST(v_cur + 89, v_ref);   -- el resumen de asistencia acepta como máximo 93 días por consulta
+        SELECT v_ext + COALESCE(SUM(x.monto_aprobado), 0) INTO v_ext FROM sp_rrhh_horas_extra(p_empresa_id, v_cur, v_hasta, p_empleado_id, NULL) x;
+        v_cur := v_hasta + 1;
+    END LOOP;
+    v_ed := v_ext / (CASE WHEN v_e.periodo_pago = 'semanal' THEN v_win * 6 / 7 ELSE v_win END);
+
+    valor_dia := round(v_vd, 2); extras_50sem := round(v_ext, 2); extras_dia := round(v_ed, 2); promedio_dia := round(v_vd + v_ed, 2);
+    RETURN NEXT;
+END; $$;
+
+
+--
+-- Name: fn_rrhh_vac_validar(bigint, bigint, date, date, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_rrhh_vac_validar(p_empresa_id bigint, p_empleado_id bigint, p_inicio date, p_fin date, p_excluir_id bigint) RETURNS integer
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_e         RECORD;
+    v_dias      INTEGER;
+    v_disp      NUMERIC;
+    v_elegible  DATE;
+BEGIN
+    SELECT e.fecha_ingreso, e.fecha_salida, e.estado INTO v_e
+      FROM rrhh_empleados e WHERE e.id = p_empleado_id AND e.empresa_id = p_empresa_id AND e.deleted_at IS NULL;
+    IF NOT FOUND THEN RAISE EXCEPTION 'REF_INVALIDA: El empleado no existe.'; END IF;
+    IF v_e.estado <> 'activo' THEN RAISE EXCEPTION 'VACACIONES_INVALIDAS: Solo los empleados activos pueden tomar vacaciones.'; END IF;
+    IF p_fin < p_inicio THEN RAISE EXCEPTION 'FECHA_INVALIDA: La fecha final es anterior a la inicial.'; END IF;
+    IF p_fin - p_inicio > 60 THEN RAISE EXCEPTION 'VACACIONES_INVALIDAS: Una solicitud no puede pasar de 60 días; divídala en dos.'; END IF;
+
+    v_elegible := v_e.fecha_ingreso + 350;   -- 50 semanas
+    IF p_inicio < v_elegible THEN
+        RAISE EXCEPTION 'VACACIONES_INVALIDAS: El empleado cumple las 50 semanas de servicio el %; puede disfrutar vacaciones desde esa fecha.', to_char(v_elegible, 'DD/MM/YYYY');
+    END IF;
+    IF v_e.fecha_salida IS NOT NULL AND p_fin > v_e.fecha_salida THEN
+        RAISE EXCEPTION 'VACACIONES_INVALIDAS: Las fechas pasan de la fecha de salida del empleado.';
+    END IF;
+
+    v_dias := fn_rrhh_dias_habiles(p_empresa_id, p_empleado_id, p_inicio, p_fin);
+    IF v_dias = 0 THEN RAISE EXCEPTION 'VACACIONES_INVALIDAS: El rango no incluye días laborales (los descansos y feriados no cuentan).'; END IF;
+
+    IF EXISTS (SELECT 1 FROM rrhh_vacaciones_solicitudes s
+                WHERE s.empleado_id = p_empleado_id AND s.deleted_at IS NULL AND s.id <> COALESCE(p_excluir_id, 0)
+                  AND s.estado IN ('pendiente_jefe', 'pendiente_rrhh', 'aprobada')
+                  AND s.fecha_inicio <= p_fin AND s.fecha_fin >= p_inicio) THEN
+        RAISE EXCEPTION 'VACACIONES_INVALIDAS: Ya hay una solicitud de vacaciones de este empleado que se cruza con esas fechas.';
+    END IF;
+    IF EXISTS (SELECT 1 FROM rrhh_incapacidades i
+                WHERE i.empleado_id = p_empleado_id AND i.deleted_at IS NULL AND i.estado = 'registrada'
+                  AND i.fecha_inicio <= p_fin AND i.fecha_fin >= p_inicio) THEN
+        RAISE EXCEPTION 'VACACIONES_INVALIDAS: El empleado tiene una incapacidad registrada que se cruza con esas fechas.';
+    END IF;
+    IF EXISTS (SELECT 1 FROM rrhh_permiso_solicitudes s
+                WHERE s.empleado_id = p_empleado_id AND s.deleted_at IS NULL
+                  AND s.estado IN ('pendiente_jefe', 'pendiente_rrhh', 'aprobada')
+                  AND s.fecha_inicio <= p_fin AND s.fecha_fin >= p_inicio) THEN
+        RAISE EXCEPTION 'VACACIONES_INVALIDAS: El empleado tiene un permiso pedido o aprobado que se cruza con esas fechas.';
+    END IF;
+
+    v_disp := fn_rrhh_vac_devengado(p_empleado_id, p_inicio) + fn_rrhh_vac_movimientos(p_empleado_id) - fn_rrhh_vac_reservado(p_empleado_id, p_excluir_id);
+    IF v_dias > v_disp THEN
+        RAISE EXCEPTION 'VACACIONES_INVALIDAS: Solicita % día(s) hábil(es) y a esa fecha solo tiene % disponible(s).', v_dias, trim(trailing '.' FROM trim(trailing '0' FROM round(GREATEST(v_disp, 0), 2)::TEXT));
+    END IF;
+
+    PERFORM fn_rrhh_vac_validar_fracciones(p_empleado_id, p_inicio, v_dias, p_excluir_id);
+    RETURN v_dias;
+END; $$;
+
+
+--
+-- Name: fn_rrhh_vac_validar_fracciones(bigint, date, integer, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_rrhh_vac_validar_fracciones(p_empleado_id bigint, p_inicio date, p_dias integer, p_excluir_id bigint) RETURNS void
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_periodo INTEGER;
+BEGIN
+    SELECT t.per INTO v_periodo FROM (
+        WITH base AS (
+            SELECT GREATEST(COALESCE(-SUM(m.dias), 0), 0) AS b
+              FROM rrhh_vacaciones_movimientos m WHERE m.empleado_id = p_empleado_id AND m.deleted_at IS NULL
+        ),
+        reqs AS (
+            SELECT s.id AS rid, s.fecha_inicio AS ini, s.dias::NUMERIC AS d FROM rrhh_vacaciones_solicitudes s
+             WHERE s.empleado_id = p_empleado_id AND s.deleted_at IS NULL
+               AND s.estado IN ('pendiente_jefe', 'pendiente_rrhh', 'aprobada') AND s.id <> COALESCE(p_excluir_id, 0)
+            UNION ALL
+            SELECT 0::BIGINT, p_inicio, p_dias::NUMERIC
+        ),
+        rg AS (
+            SELECT r.d, (SELECT b FROM base) + COALESCE(SUM(r.d) OVER (ORDER BY r.ini, r.rid ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING), 0) AS a
+              FROM reqs r
+        )
+        SELECT gs.per FROM rg, LATERAL generate_series(floor(rg.a / 12)::INTEGER, floor((rg.a + rg.d - 1) / 12)::INTEGER) AS gs(per)
+         GROUP BY gs.per HAVING COUNT(*) > 2 ORDER BY gs.per LIMIT 1
+    ) t;
+    IF v_periodo IS NOT NULL THEN
+        RAISE EXCEPTION 'VACACIONES_INVALIDAS: Con esas fechas un mismo período de 12 días quedaría repartido en más de dos fracciones; el Código de Trabajo (art. 154) permite dividirlo en dos como máximo.';
+    END IF;
+END; $$;
+
+
+--
+-- Name: fn_rrhh_valida_depto_padre(bigint, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_rrhh_valida_depto_padre(p_empresa_id bigint, p_depto_id bigint, p_padre_id bigint) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    IF p_padre_id IS NULL THEN RETURN; END IF;
+    IF p_depto_id IS NOT NULL AND p_padre_id = p_depto_id THEN
+        RAISE EXCEPTION 'DEPTO_INVALIDO: Un departamento no puede depender de sí mismo.';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM rrhh_departamentos WHERE id = p_padre_id AND empresa_id = p_empresa_id AND deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'DEPTO_INVALIDO: El departamento superior indicado no existe.';
+    END IF;
+    IF p_depto_id IS NOT NULL AND EXISTS (
+        WITH RECURSIVE cadena AS (
+            SELECT d.id, d.departamento_padre_id FROM rrhh_departamentos d WHERE d.id = p_padre_id
+            UNION
+            SELECT d.id, d.departamento_padre_id FROM rrhh_departamentos d JOIN cadena c ON d.id = c.departamento_padre_id
+        ) SELECT 1 FROM cadena WHERE id = p_depto_id
+    ) THEN
+        RAISE EXCEPTION 'DEPTO_CICLO: Ese departamento depende de este (directa o indirectamente); la estructura quedaría en círculo.';
+    END IF;
+END; $$;
+
+
+--
+-- Name: fn_rrhh_valida_dispositivo(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_rrhh_valida_dispositivo(p_empresa_id bigint, p_agente_id bigint) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    IF p_agente_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM rrhh_agentes WHERE id = p_agente_id AND empresa_id = p_empresa_id AND deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'AGENTE_INVALIDO: El agente indicado no existe.';
+    END IF;
+END; $$;
+
+
+--
+-- Name: fn_rrhh_valida_empleado_refs(bigint, bigint, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_rrhh_valida_empleado_refs(p_empresa_id bigint, p_empleado_id bigint, p_d jsonb) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_depto BIGINT := NULLIF(p_d->>'departamento_id', '')::BIGINT;
+    v_puesto BIGINT := NULLIF(p_d->>'puesto_id', '')::BIGINT;
+    v_func  BIGINT := NULLIF(p_d->>'funcionario_id', '')::BIGINT;
+BEGIN
+    IF v_depto IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM rrhh_departamentos WHERE id = v_depto AND empresa_id = p_empresa_id AND deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'REF_INVALIDA: El departamento indicado no existe.';
+    END IF;
+    IF v_puesto IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM rrhh_puestos WHERE id = v_puesto AND empresa_id = p_empresa_id AND deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'REF_INVALIDA: El puesto indicado no existe.';
+    END IF;
+    IF v_func IS NOT NULL THEN
+        IF NOT EXISTS (SELECT 1 FROM funcionarios WHERE id = v_func AND empresa_id = p_empresa_id AND deleted_at IS NULL) THEN
+            RAISE EXCEPTION 'REF_INVALIDA: El funcionario indicado no existe.';
+        END IF;
+        IF EXISTS (SELECT 1 FROM rrhh_empleados WHERE funcionario_id = v_func AND deleted_at IS NULL
+                      AND (p_empleado_id IS NULL OR id <> p_empleado_id)) THEN
+            RAISE EXCEPTION 'REF_INVALIDA: Ese funcionario ya está ligado a otro empleado.';
+        END IF;
+    END IF;
+    IF NULLIF(p_d->>'fecha_fin_contrato', '') IS NOT NULL
+       AND (p_d->>'fecha_fin_contrato')::DATE < (p_d->>'fecha_ingreso')::DATE THEN
+        RAISE EXCEPTION 'FECHA_INVALIDA: El fin del contrato no puede ser anterior a la fecha de ingreso.';
+    END IF;
+END; $$;
+
+
+--
+-- Name: fn_rrhh_valida_horario(character varying, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_rrhh_valida_horario(p_jornada character varying, p_dias jsonb) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    d             RECORD;
+    v_total       INTEGER := 0;
+    v_max_dia     INTEGER;
+    v_max_semana  INTEGER;
+    v_minutos     INTEGER;
+    v_vistos      INTEGER[] := '{}';
+BEGIN
+    IF p_dias IS NULL OR jsonb_typeof(p_dias) <> 'array' OR jsonb_array_length(p_dias) = 0 THEN
+        RAISE EXCEPTION 'HORARIO_INVALIDO: Indique al menos un día laboral.';
+    END IF;
+    -- Máximo diario (jornada ampliada de hasta 10 h diurna / 8 h mixta si la semana no pasa del límite) y semanal.
+    v_max_dia    := CASE p_jornada WHEN 'diurna' THEN 600 WHEN 'mixta' THEN 480 WHEN 'nocturna' THEN 360 ELSE 600 END;
+    v_max_semana := CASE p_jornada WHEN 'diurna' THEN 2880 WHEN 'mixta' THEN 2520 WHEN 'nocturna' THEN 2160 ELSE 2880 END;
+
+    FOR d IN SELECT (x->>'dia_semana')::INTEGER AS dia, (x->>'hora_entrada')::TIME AS ent, (x->>'hora_salida')::TIME AS sal,
+                    COALESCE((x->>'minutos_descanso')::INTEGER, 0) AS descanso
+               FROM jsonb_array_elements(p_dias) x
+    LOOP
+        IF d.dia NOT BETWEEN 1 AND 7 THEN RAISE EXCEPTION 'HORARIO_INVALIDO: Día de la semana inválido.'; END IF;
+        IF d.dia = ANY (v_vistos) THEN RAISE EXCEPTION 'HORARIO_INVALIDO: Un día de la semana está repetido.'; END IF;
+        v_vistos := v_vistos || d.dia;
+        IF d.ent = d.sal THEN RAISE EXCEPTION 'HORARIO_INVALIDO: La entrada y la salida no pueden ser la misma hora.'; END IF;
+        v_minutos := fn_rrhh_minutos_dia(d.ent, d.sal, d.descanso);
+        IF v_minutos <= 0 THEN RAISE EXCEPTION 'HORARIO_INVALIDO: El descanso no puede ser igual o mayor que el tiempo del turno.'; END IF;
+        IF v_minutos > v_max_dia THEN
+            RAISE EXCEPTION 'HORARIO_INVALIDO: Un turno de jornada % no puede pasar de % horas ordinarias por día (Código de Trabajo, art. 136).', p_jornada, v_max_dia / 60;
+        END IF;
+        v_total := v_total + v_minutos;
+    END LOOP;
+
+    IF v_total > v_max_semana THEN
+        RAISE EXCEPTION 'HORARIO_INVALIDO: La jornada % no puede pasar de % horas ordinarias por semana (art. 136); este horario suma % h.',
+            p_jornada, v_max_semana / 60, round(v_total / 60.0, 1);
+    END IF;
+END; $$;
+
+
+--
+-- Name: fn_rrhh_valida_jefe(bigint, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_rrhh_valida_jefe(p_empresa_id bigint, p_empleado_id bigint, p_jefe_id bigint) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    IF p_jefe_id IS NULL THEN RETURN; END IF;
+    IF p_empleado_id IS NOT NULL AND p_jefe_id = p_empleado_id THEN
+        RAISE EXCEPTION 'JEFE_INVALIDO: Un empleado no puede ser su propio jefe.';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM rrhh_empleados WHERE id = p_jefe_id AND empresa_id = p_empresa_id AND deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'JEFE_INVALIDO: El jefe indicado no existe.';
+    END IF;
+    IF p_empleado_id IS NOT NULL AND EXISTS (
+        WITH RECURSIVE cadena AS (
+            SELECT e.id, e.jefe_id FROM rrhh_empleados e WHERE e.id = p_jefe_id
+            UNION
+            SELECT e.id, e.jefe_id FROM rrhh_empleados e JOIN cadena c ON e.id = c.jefe_id
+        ) SELECT 1 FROM cadena WHERE id = p_empleado_id
+    ) THEN
+        RAISE EXCEPTION 'JEFE_CICLO: Ese jefe es subordinado (directo o indirecto) de este empleado; la jerarquía quedaría en círculo.';
+    END IF;
+END; $$;
 
 
 --
@@ -7494,6 +8158,2524 @@ $$;
 
 
 --
+-- Name: sp_rrhh_agente_autenticar(character varying, character varying, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_agente_autenticar(p_token_hash character varying, p_ip character varying, p_version character varying) RETURNS TABLE(id bigint, empresa_id bigint, nombre character varying)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    UPDATE rrhh_agentes a
+       SET ultimo_contacto = NOW(), ultima_ip = LEFT(p_ip, 45), version = COALESCE(LEFT(p_version, 20), a.version)
+     WHERE a.token_hash = p_token_hash AND a.is_active AND a.deleted_at IS NULL
+    RETURNING a.id, a.empresa_id, a.nombre;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_agente_create(bigint, character varying, bigint, character varying, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_agente_create(p_empresa_id bigint, p_nombre character varying, p_sucursal_id bigint, p_token_hash character varying, p_prefijo character varying) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_id BIGINT;
+BEGIN
+    INSERT INTO rrhh_agentes (empresa_id, nombre, sucursal_id, token_hash, token_prefijo)
+    VALUES (p_empresa_id, btrim(p_nombre), p_sucursal_id, p_token_hash, p_prefijo) RETURNING rrhh_agentes.id INTO v_id;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_agente_list(bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_agente_list(p_empresa_id bigint) RETURNS TABLE(id bigint, nombre character varying, sucursal_id bigint, token_prefijo character varying, version character varying, ultimo_contacto timestamp without time zone, ultima_ip character varying, is_active boolean, dispositivos bigint, tiene_token boolean)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT a.id, a.nombre, a.sucursal_id, a.token_prefijo, a.version, a.ultimo_contacto, a.ultima_ip, a.is_active,
+           (SELECT COUNT(*) FROM rrhh_dispositivos d WHERE d.agente_id = a.id AND d.deleted_at IS NULL),
+           (a.token_hash IS NOT NULL)
+      FROM rrhh_agentes a
+     WHERE a.empresa_id = p_empresa_id AND a.deleted_at IS NULL
+     ORDER BY lower(a.nombre);
+END; $$;
+
+
+--
+-- Name: sp_rrhh_agente_set_token(bigint, bigint, character varying, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_agente_set_token(p_id bigint, p_empresa_id bigint, p_token_hash character varying, p_prefijo character varying) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    UPDATE rrhh_agentes SET token_hash = p_token_hash, token_prefijo = p_prefijo, updated_at = NOW()
+     WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
+    RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_agente_soft_delete(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_agente_soft_delete(p_id bigint, p_empresa_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM rrhh_agentes WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL) THEN RETURN FALSE; END IF;
+    IF EXISTS (SELECT 1 FROM rrhh_dispositivos WHERE agente_id = p_id AND deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'AGENTE_EN_USO: El agente atiende dispositivos; cámbielos de agente o elimínelos antes.';
+    END IF;
+    UPDATE rrhh_agentes SET deleted_at = NOW(), token_hash = NULL, updated_at = NOW() WHERE id = p_id AND empresa_id = p_empresa_id;
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_agente_update(bigint, bigint, character varying, bigint, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_agente_update(p_id bigint, p_empresa_id bigint, p_nombre character varying, p_sucursal_id bigint, p_is_active boolean) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    UPDATE rrhh_agentes SET nombre = btrim(p_nombre), sucursal_id = p_sucursal_id, is_active = COALESCE(p_is_active, TRUE), updated_at = NOW()
+     WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
+    RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_ajuste_eliminar(bigint, bigint, date, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_ajuste_eliminar(p_empresa_id bigint, p_empleado_id bigint, p_fecha date, p_tipo character varying) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    UPDATE rrhh_asistencia_ajustes SET deleted_at = NOW(), updated_at = NOW()
+     WHERE empresa_id = p_empresa_id AND empleado_id = p_empleado_id AND fecha = p_fecha AND tipo = p_tipo AND deleted_at IS NULL;
+    RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_ajuste_guardar(bigint, bigint, date, character varying, boolean, integer, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_ajuste_guardar(p_empresa_id bigint, p_empleado_id bigint, p_fecha date, p_tipo character varying, p_aprobado boolean, p_minutos integer, p_motivo character varying) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_id BIGINT;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM rrhh_empleados WHERE id = p_empleado_id AND empresa_id = p_empresa_id AND deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'REF_INVALIDA: El empleado no existe.';
+    END IF;
+    IF p_tipo = 'justificacion' AND COALESCE(btrim(p_motivo), '') = '' THEN
+        RAISE EXCEPTION 'AJUSTE_INVALIDO: Indique el motivo de la justificación.';
+    END IF;
+    IF p_tipo = 'extra' AND p_aprobado IS NULL THEN
+        RAISE EXCEPTION 'AJUSTE_INVALIDO: Indique si aprueba o rechaza las horas extra.';
+    END IF;
+    IF p_tipo = 'extra' AND p_aprobado = FALSE AND COALESCE(btrim(p_motivo), '') = '' THEN
+        RAISE EXCEPTION 'AJUSTE_INVALIDO: Indique el motivo del rechazo.';
+    END IF;
+
+    UPDATE rrhh_asistencia_ajustes SET aprobado = p_aprobado, minutos = p_minutos, motivo = NULLIF(btrim(COALESCE(p_motivo, '')), ''),
+           usuario_id = NULLIF(current_setting('app.current_user_id', true), '')::BIGINT, updated_at = NOW()
+     WHERE empleado_id = p_empleado_id AND fecha = p_fecha AND tipo = p_tipo AND deleted_at IS NULL
+    RETURNING id INTO v_id;
+    IF v_id IS NULL THEN
+        INSERT INTO rrhh_asistencia_ajustes (empresa_id, empleado_id, fecha, tipo, aprobado, minutos, motivo, usuario_id)
+        VALUES (p_empresa_id, p_empleado_id, p_fecha, p_tipo, p_aprobado, p_minutos, NULLIF(btrim(COALESCE(p_motivo, '')), ''),
+                NULLIF(current_setting('app.current_user_id', true), '')::BIGINT)
+        RETURNING id INTO v_id;
+    END IF;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_asistencia_resumen(bigint, date, date, bigint, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_asistencia_resumen(p_empresa_id bigint, p_desde date, p_hasta date, p_empleado_id bigint DEFAULT NULL::bigint, p_departamento_id bigint DEFAULT NULL::bigint, p_sucursal_id bigint DEFAULT NULL::bigint) RETURNS TABLE(empleado_id bigint, empleado_codigo character varying, empleado_nombre character varying, departamento_nombre character varying, fecha date, dia_semana integer, tipo_dia character varying, feriado_nombre character varying, horario_id bigint, horario_nombre character varying, entrada_prog time without time zone, salida_prog time without time zone, entrada_real timestamp without time zone, salida_real timestamp without time zone, marcas integer, minutos_programados integer, minutos_trabajados integer, minutos_tarde integer, minutos_salida_anticipada integer, minutos_extra integer, factor_extra numeric, excede_12h boolean, estado character varying, justificacion character varying, extra_estado character varying, extra_minutos_aprobados integer, extra_motivo character varying)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_hoy TIMESTAMP := NOW();
+BEGIN
+    IF p_hasta < p_desde THEN RAISE EXCEPTION 'FECHA_INVALIDA: La fecha final es anterior a la inicial.'; END IF;
+    IF p_hasta - p_desde > 92 THEN RAISE EXCEPTION 'FECHA_INVALIDA: El rango de fechas no puede pasar de 93 días.'; END IF;
+
+    RETURN QUERY
+    WITH ses AS (
+        SELECT * FROM fn_rrhh_sesiones(p_empresa_id, p_empleado_id, (p_desde - 1)::TIMESTAMP, (p_hasta + 2)::TIMESTAMP)
+    ),
+    emp AS (
+        SELECT e.id, e.codigo, btrim(e.nombre || ' ' || e.apellido1 || ' ' || COALESCE(e.apellido2, ''))::VARCHAR AS nombre,
+               dp.nombre AS depto, e.fecha_ingreso, e.fecha_salida, e.estado
+          FROM rrhh_empleados e
+          LEFT JOIN rrhh_departamentos dp ON dp.id = e.departamento_id
+         WHERE e.empresa_id = p_empresa_id AND e.deleted_at IS NULL
+           AND (p_empleado_id IS NULL OR e.id = p_empleado_id)
+           AND (p_departamento_id IS NULL OR e.departamento_id = p_departamento_id)
+           AND (p_sucursal_id IS NULL OR e.sucursal_id = p_sucursal_id)
+           AND e.fecha_ingreso <= p_hasta AND (e.fecha_salida IS NULL OR e.fecha_salida >= p_desde)
+    ),
+    dias AS (
+        SELECT emp.*, g::DATE AS dia
+          FROM emp, generate_series(p_desde::TIMESTAMP, p_hasta::TIMESTAMP, INTERVAL '1 day') g
+         WHERE g::DATE >= emp.fecha_ingreso AND (emp.fecha_salida IS NULL OR g::DATE <= emp.fecha_salida)
+    ),
+    base AS (
+        SELECT d.*, a.horario_id AS hid, h.nombre AS hnombre, h.tolerancia_entrada_min AS tol_ent, h.tolerancia_salida_min AS tol_sal,
+               h.minutos_minimos_extra AS min_extra, hd.hora_entrada, hd.hora_salida, hd.minutos_descanso,
+               f.nombre AS fer_nombre, f.pago_obligatorio AS fer_oblig
+          FROM dias d
+          LEFT JOIN LATERAL (
+              SELECT x.horario_id FROM rrhh_empleado_horarios x
+               WHERE x.empleado_id = d.id AND x.deleted_at IS NULL AND x.vigente_desde <= d.dia AND (x.vigente_hasta IS NULL OR x.vigente_hasta >= d.dia)
+               ORDER BY x.vigente_desde DESC LIMIT 1) a ON TRUE
+          LEFT JOIN rrhh_horarios h ON h.id = a.horario_id
+          LEFT JOIN rrhh_horario_dias hd ON hd.horario_id = a.horario_id AND hd.dia_semana = EXTRACT(ISODOW FROM d.dia)
+          LEFT JOIN rrhh_feriados f ON f.empresa_id = p_empresa_id AND f.fecha = d.dia AND f.deleted_at IS NULL
+    ),
+    agr AS (
+        SELECT s.s_empleado_id AS emp_id, s.s_entrada::DATE AS dia, MIN(s.s_entrada) AS primera_entrada, MAX(s.s_salida) AS ultima_salida,
+               (COUNT(*) + COUNT(s.s_salida))::INTEGER AS n_marcas,
+               COUNT(*) FILTER (WHERE s.s_salida IS NOT NULL)::INTEGER AS cerradas,
+               COUNT(*) FILTER (WHERE s.s_salida IS NULL)::INTEGER AS abiertas,
+               COALESCE(SUM(EXTRACT(EPOCH FROM (s.s_salida - s.s_entrada)) / 60) FILTER (WHERE s.s_salida IS NOT NULL), 0)::INTEGER AS bruto,
+               MAX(s.s_entrada) FILTER (WHERE s.s_salida IS NULL) AS abierta_desde
+          FROM ses s GROUP BY s.s_empleado_id, s.s_entrada::DATE
+    ),
+    calc AS (
+        SELECT b.*, g.primera_entrada, g.ultima_salida, COALESCE(g.n_marcas, 0) AS n_marcas, COALESCE(g.cerradas, 0) AS cerradas,
+               COALESCE(g.abiertas, 0) AS abiertas, g.abierta_desde,
+               -- con una sola sesión continua se descuenta el descanso no remunerado del horario
+               CASE WHEN COALESCE(g.cerradas, 0) = 1 AND b.minutos_descanso > 0 THEN GREATEST(COALESCE(g.bruto, 0) - b.minutos_descanso, 0)
+                    ELSE COALESCE(g.bruto, 0) END AS trabajado,
+               CASE WHEN b.hora_entrada IS NOT NULL THEN fn_rrhh_minutos_dia(b.hora_entrada, b.hora_salida, b.minutos_descanso) END AS programado,
+               CASE WHEN b.hora_entrada IS NOT NULL THEN b.dia::TIMESTAMP + b.hora_entrada END AS ts_entrada_prog,
+               CASE WHEN b.hora_entrada IS NOT NULL THEN b.dia::TIMESTAMP + b.hora_salida
+                         + CASE WHEN b.hora_salida <= b.hora_entrada THEN INTERVAL '1 day' ELSE INTERVAL '0' END END AS ts_salida_prog,
+               (SELECT j.motivo FROM rrhh_asistencia_ajustes j WHERE j.empleado_id = b.id AND j.fecha = b.dia AND j.tipo = 'justificacion' AND j.deleted_at IS NULL) AS just,
+               (SELECT j.aprobado FROM rrhh_asistencia_ajustes j WHERE j.empleado_id = b.id AND j.fecha = b.dia AND j.tipo = 'extra' AND j.deleted_at IS NULL) AS ex_aprob,
+               (SELECT j.minutos FROM rrhh_asistencia_ajustes j WHERE j.empleado_id = b.id AND j.fecha = b.dia AND j.tipo = 'extra' AND j.deleted_at IS NULL) AS ex_min,
+               (SELECT j.motivo FROM rrhh_asistencia_ajustes j WHERE j.empleado_id = b.id AND j.fecha = b.dia AND j.tipo = 'extra' AND j.deleted_at IS NULL) AS ex_motivo,
+               EXISTS (SELECT 1 FROM rrhh_asistencia_ajustes j WHERE j.empleado_id = b.id AND j.fecha = b.dia AND j.tipo = 'extra' AND j.deleted_at IS NULL) AS ex_hay,
+               EXISTS (SELECT 1 FROM rrhh_incapacidades i WHERE i.empleado_id = b.id AND i.deleted_at IS NULL AND i.estado = 'registrada'
+                          AND i.fecha_inicio <= b.dia AND i.fecha_fin >= b.dia) AS hay_inc,
+               (SELECT t.nombre FROM rrhh_permiso_solicitudes ps JOIN rrhh_permiso_tipos t ON t.id = ps.tipo_id
+                 WHERE ps.empleado_id = b.id AND ps.deleted_at IS NULL AND ps.estado = 'aprobada' AND ps.unidad = 'dias'
+                   AND ps.fecha_inicio <= b.dia AND ps.fecha_fin >= b.dia ORDER BY ps.id LIMIT 1) AS perm_dia
+          FROM base b LEFT JOIN agr g ON g.emp_id = b.id AND g.dia = b.dia
+    ),
+    perm AS (
+        SELECT c.*,
+               COALESCE((SELECT SUM(GREATEST(EXTRACT(EPOCH FROM (LEAST(c.dia::TIMESTAMP + ph.hora_fin, c.primera_entrada)
+                                                                 - GREATEST(c.dia::TIMESTAMP + ph.hora_inicio, c.ts_entrada_prog))) / 60, 0))
+                           FROM rrhh_permiso_solicitudes ph
+                          WHERE ph.empleado_id = c.id AND ph.deleted_at IS NULL AND ph.estado = 'aprobada' AND ph.unidad = 'horas'
+                            AND ph.fecha_inicio = c.dia AND c.primera_entrada IS NOT NULL AND c.ts_entrada_prog IS NOT NULL), 0) AS ov_ent,
+               COALESCE((SELECT SUM(GREATEST(EXTRACT(EPOCH FROM (LEAST(c.dia::TIMESTAMP + ph.hora_fin, c.ts_salida_prog)
+                                                                 - GREATEST(c.dia::TIMESTAMP + ph.hora_inicio, c.ultima_salida))) / 60, 0))
+                           FROM rrhh_permiso_solicitudes ph
+                          WHERE ph.empleado_id = c.id AND ph.deleted_at IS NULL AND ph.estado = 'aprobada' AND ph.unidad = 'horas'
+                            AND ph.fecha_inicio = c.dia AND c.ultima_salida IS NOT NULL AND c.ts_salida_prog IS NOT NULL), 0) AS ov_sal
+          FROM calc c
+    ),
+    fin AS (
+        SELECT c.*,
+               (c.fer_nombre IS NOT NULL) AS es_feriado,
+               (c.hora_entrada IS NULL) AS es_descanso,
+               -- tardanza y salida anticipada solo en días laborales con horario
+               CASE WHEN c.hora_entrada IS NOT NULL AND c.fer_nombre IS NULL AND c.primera_entrada IS NOT NULL
+                         AND EXTRACT(EPOCH FROM (c.primera_entrada - c.ts_entrada_prog)) / 60 - c.ov_ent > c.tol_ent
+                    THEN (EXTRACT(EPOCH FROM (c.primera_entrada - c.ts_entrada_prog)) / 60 - c.ov_ent)::INTEGER ELSE 0 END AS tarde,
+               CASE WHEN c.hora_entrada IS NOT NULL AND c.fer_nombre IS NULL AND c.ultima_salida IS NOT NULL AND c.abiertas = 0
+                         AND EXTRACT(EPOCH FROM (c.ts_salida_prog - c.ultima_salida)) / 60 - c.ov_sal > c.tol_sal
+                    THEN (EXTRACT(EPOCH FROM (c.ts_salida_prog - c.ultima_salida)) / 60 - c.ov_sal)::INTEGER ELSE 0 END AS anticipada
+          FROM perm c
+    ),
+    extra AS (
+        SELECT f.*,
+               CASE WHEN f.abiertas > 0 THEN 0
+                    WHEN f.es_feriado OR f.es_descanso THEN f.trabajado
+                    WHEN f.programado IS NOT NULL AND f.trabajado - f.programado >= GREATEST(f.min_extra, 1) THEN f.trabajado - f.programado
+                    ELSE 0 END AS x_min
+          FROM fin f
+    )
+    SELECT x.id, x.codigo::VARCHAR, x.nombre, x.depto::VARCHAR, x.dia, EXTRACT(ISODOW FROM x.dia)::INTEGER,
+           (CASE WHEN x.es_feriado THEN 'feriado' WHEN x.es_descanso THEN 'descanso' ELSE 'laboral' END)::VARCHAR,
+           x.fer_nombre::VARCHAR, x.hid, x.hnombre::VARCHAR, x.hora_entrada, x.hora_salida, x.primera_entrada, x.ultima_salida,
+           x.n_marcas, x.programado, x.trabajado, x.tarde, x.anticipada, x.x_min,
+           (CASE WHEN x.x_min = 0 THEN 0
+                 WHEN x.es_descanso OR (x.es_feriado AND x.fer_oblig) THEN 2.0 ELSE 1.5 END)::NUMERIC,
+           (x.trabajado > 720),
+           (CASE
+              WHEN x.abiertas > 0 AND x.dia = v_hoy::DATE AND x.abierta_desde > v_hoy - INTERVAL '14 hours' THEN 'en_curso'
+              WHEN x.abiertas > 0 THEN 'incompleta'
+              WHEN x.n_marcas > 0 AND x.es_feriado THEN 'trabajo_feriado'
+              WHEN x.n_marcas > 0 AND x.es_descanso THEN 'trabajo_descanso'
+              WHEN x.n_marcas > 0 AND x.tarde > 0 THEN 'tarde'
+              WHEN x.n_marcas > 0 THEN 'ok'
+              WHEN x.hay_inc THEN 'incapacidad'
+              WHEN x.es_feriado THEN 'feriado'
+              WHEN x.es_descanso THEN 'descanso'
+              WHEN x.perm_dia IS NOT NULL THEN 'permiso'
+              WHEN x.dia > v_hoy::DATE OR (x.dia = v_hoy::DATE AND v_hoy < x.ts_entrada_prog + INTERVAL '1 minute' * x.tol_ent) THEN 'programado'
+              WHEN x.just IS NOT NULL THEN 'justificada'
+              WHEN x.hid IS NULL THEN 'sin_horario'
+              ELSE 'ausente' END)::VARCHAR,
+           COALESCE(x.just, CASE WHEN x.hay_inc THEN 'Incapacidad' WHEN x.perm_dia IS NOT NULL THEN 'Permiso: ' || x.perm_dia END)::VARCHAR,
+           (CASE WHEN x.x_min = 0 THEN NULL WHEN NOT x.ex_hay THEN 'pendiente' WHEN x.ex_aprob THEN 'aprobada' ELSE 'rechazada' END)::VARCHAR,
+           (CASE WHEN x.x_min = 0 OR NOT x.ex_hay OR NOT x.ex_aprob THEN 0 ELSE LEAST(COALESCE(x.ex_min, x.x_min), x.x_min) END)::INTEGER,
+           x.ex_motivo::VARCHAR
+      FROM extra x
+     ORDER BY x.nombre, x.dia;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_ausencias_calendario(bigint, date, date, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_ausencias_calendario(p_empresa_id bigint, p_desde date, p_hasta date, p_departamento_id bigint DEFAULT NULL::bigint) RETURNS TABLE(categoria character varying, id bigint, empleado_id bigint, empleado_nombre character varying, departamento_id bigint, departamento_nombre character varying, departamento_total integer, fecha_inicio date, fecha_fin date, dias numeric, hora_inicio time without time zone, hora_fin time without time zone, estado character varying, detalle character varying)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    IF p_hasta < p_desde THEN RAISE EXCEPTION 'FECHA_INVALIDA: La fecha final es anterior a la inicial.'; END IF;
+    IF p_hasta - p_desde > 92 THEN RAISE EXCEPTION 'FECHA_INVALIDA: El rango de fechas no puede pasar de 93 días.'; END IF;
+    RETURN QUERY
+    WITH a AS (
+        SELECT 'vacaciones'::VARCHAR AS cat, s.id AS rid, s.empleado_id AS eid, s.fecha_inicio AS ini, s.fecha_fin AS fin, s.dias::NUMERIC AS cant,
+               NULL::TIME AS hi, NULL::TIME AS hf, s.estado::VARCHAR AS est, 'Vacaciones'::VARCHAR AS det
+          FROM rrhh_vacaciones_solicitudes s
+         WHERE s.empresa_id = p_empresa_id AND s.deleted_at IS NULL AND s.estado IN ('pendiente_jefe', 'pendiente_rrhh', 'aprobada')
+           AND s.fecha_inicio <= p_hasta AND s.fecha_fin >= p_desde
+        UNION ALL
+        SELECT 'permiso'::VARCHAR, s.id, s.empleado_id, s.fecha_inicio, s.fecha_fin, s.cantidad, s.hora_inicio, s.hora_fin, s.estado::VARCHAR, t.nombre::VARCHAR
+          FROM rrhh_permiso_solicitudes s JOIN rrhh_permiso_tipos t ON t.id = s.tipo_id
+         WHERE s.empresa_id = p_empresa_id AND s.deleted_at IS NULL AND s.estado IN ('pendiente_jefe', 'pendiente_rrhh', 'aprobada')
+           AND s.fecha_inicio <= p_hasta AND s.fecha_fin >= p_desde
+        UNION ALL
+        SELECT 'incapacidad'::VARCHAR, i.id, i.empleado_id, i.fecha_inicio, i.fecha_fin, i.dias::NUMERIC, NULL::TIME, NULL::TIME, 'registrada'::VARCHAR,
+               (CASE i.tipo WHEN 'enfermedad' THEN 'Incapacidad por enfermedad' WHEN 'maternidad' THEN 'Incapacidad por maternidad'
+                            ELSE 'Incapacidad por riesgo del trabajo' END)::VARCHAR
+          FROM rrhh_incapacidades i
+         WHERE i.empresa_id = p_empresa_id AND i.deleted_at IS NULL AND i.estado = 'registrada'
+           AND i.fecha_inicio <= p_hasta AND i.fecha_fin >= p_desde
+    )
+    SELECT a.cat, a.rid, a.eid, btrim(e.nombre || ' ' || e.apellido1 || ' ' || COALESCE(e.apellido2, ''))::VARCHAR,
+           e.departamento_id, dp.nombre::VARCHAR,
+           (SELECT COUNT(*)::INTEGER FROM rrhh_empleados x WHERE x.empresa_id = p_empresa_id AND x.deleted_at IS NULL AND x.estado = 'activo'
+               AND x.departamento_id IS NOT DISTINCT FROM e.departamento_id),
+           a.ini, a.fin, a.cant, a.hi, a.hf, a.est, a.det
+      FROM a
+      JOIN rrhh_empleados e ON e.id = a.eid
+      LEFT JOIN rrhh_departamentos dp ON dp.id = e.departamento_id
+     WHERE (p_departamento_id IS NULL OR e.departamento_id = p_departamento_id)
+     ORDER BY dp.nombre NULLS LAST, a.ini, e.nombre;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_ausencias_traslapes(bigint, bigint, date, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_ausencias_traslapes(p_empresa_id bigint, p_empleado_id bigint, p_desde date, p_hasta date) RETURNS TABLE(categoria character varying, empleado_id bigint, empleado_nombre character varying, fecha_inicio date, fecha_fin date, estado character varying, detalle character varying, departamento_total integer)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_depto BIGINT;
+BEGIN
+    SELECT e.departamento_id INTO v_depto FROM rrhh_empleados e WHERE e.id = p_empleado_id AND e.empresa_id = p_empresa_id AND e.deleted_at IS NULL;
+    IF v_depto IS NULL OR p_hasta < p_desde OR p_hasta - p_desde > 92 THEN RETURN; END IF;
+    RETURN QUERY
+    SELECT c.categoria, c.empleado_id, c.empleado_nombre, c.fecha_inicio, c.fecha_fin, c.estado, c.detalle, c.departamento_total
+      FROM sp_rrhh_ausencias_calendario(p_empresa_id, p_desde, p_hasta, v_depto) c
+     WHERE c.empleado_id <> p_empleado_id
+     ORDER BY c.fecha_inicio, c.empleado_nombre;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_departamento_create(bigint, character varying, character varying, character varying, bigint, bigint, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_departamento_create(p_empresa_id bigint, p_codigo character varying, p_nombre character varying, p_descripcion character varying, p_padre_id bigint, p_jefe_empleado_id bigint, p_centro_costo character varying) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_id BIGINT;
+BEGIN
+    PERFORM fn_rrhh_valida_depto_padre(p_empresa_id, NULL, p_padre_id);
+    IF p_jefe_empleado_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM rrhh_empleados WHERE id = p_jefe_empleado_id AND empresa_id = p_empresa_id AND deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'JEFE_INVALIDO: El jefe del departamento no existe.';
+    END IF;
+    INSERT INTO rrhh_departamentos (empresa_id, codigo, nombre, descripcion, departamento_padre_id, jefe_empleado_id, centro_costo)
+    VALUES (p_empresa_id, NULLIF(btrim(COALESCE(p_codigo, '')), ''), btrim(p_nombre),
+            NULLIF(btrim(COALESCE(p_descripcion, '')), ''), p_padre_id, p_jefe_empleado_id,
+            NULLIF(btrim(COALESCE(p_centro_costo, '')), ''))
+    RETURNING rrhh_departamentos.id INTO v_id;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_departamento_get(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_departamento_get(p_id bigint, p_empresa_id bigint) RETURNS TABLE(id bigint, empresa_id bigint, codigo character varying, nombre character varying, descripcion character varying, departamento_padre_id bigint, jefe_empleado_id bigint, centro_costo character varying, is_active boolean, deleted_at timestamp without time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT d.id, d.empresa_id, d.codigo, d.nombre, d.descripcion, d.departamento_padre_id,
+           d.jefe_empleado_id, d.centro_costo, d.is_active, d.deleted_at
+    FROM rrhh_departamentos d WHERE d.id = p_id AND d.empresa_id = p_empresa_id;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_departamento_list(bigint, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_departamento_list(p_empresa_id bigint, p_eliminados boolean DEFAULT false) RETURNS TABLE(id bigint, empresa_id bigint, codigo character varying, nombre character varying, descripcion character varying, departamento_padre_id bigint, departamento_padre_nombre character varying, jefe_empleado_id bigint, jefe_nombre character varying, centro_costo character varying, is_active boolean, deleted_at timestamp without time zone, empleados bigint)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT d.id, d.empresa_id, d.codigo, d.nombre, d.descripcion,
+           d.departamento_padre_id, p.nombre, d.jefe_empleado_id,
+           NULLIF(btrim(j.nombre || ' ' || j.apellido1 || ' ' || COALESCE(j.apellido2, '')), '')::VARCHAR,
+           d.centro_costo, d.is_active, d.deleted_at,
+           (SELECT COUNT(*) FROM rrhh_empleados e
+             WHERE e.departamento_id = d.id AND e.deleted_at IS NULL AND e.estado <> 'liquidado')
+    FROM rrhh_departamentos d
+    LEFT JOIN rrhh_departamentos p ON p.id = d.departamento_padre_id
+    LEFT JOIN rrhh_empleados     j ON j.id = d.jefe_empleado_id
+    WHERE d.empresa_id = p_empresa_id
+      AND ((p_eliminados AND d.deleted_at IS NOT NULL) OR (NOT p_eliminados AND d.deleted_at IS NULL))
+    ORDER BY lower(d.nombre);
+END; $$;
+
+
+--
+-- Name: sp_rrhh_departamento_restore(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_departamento_restore(p_id bigint, p_empresa_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    UPDATE rrhh_departamentos SET deleted_at = NULL, is_active = TRUE, updated_at = NOW()
+    WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NOT NULL;
+    RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_departamento_soft_delete(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_departamento_soft_delete(p_id bigint, p_empresa_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_n BIGINT;
+BEGIN
+    SELECT COUNT(*) INTO v_n FROM rrhh_empleados
+     WHERE departamento_id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL AND estado <> 'liquidado';
+    IF v_n > 0 THEN
+        RAISE EXCEPTION 'DEPTO_EN_USO: El departamento tiene % empleado(s); muévalos a otro departamento antes de eliminarlo.', v_n;
+    END IF;
+    SELECT COUNT(*) INTO v_n FROM rrhh_departamentos
+     WHERE departamento_padre_id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
+    IF v_n > 0 THEN
+        RAISE EXCEPTION 'DEPTO_EN_USO: El departamento tiene % departamento(s) dependiente(s); reubíquelos antes de eliminarlo.', v_n;
+    END IF;
+    UPDATE rrhh_departamentos SET is_active = FALSE, deleted_at = NOW(), updated_at = NOW()
+    WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
+    RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_departamento_update(bigint, bigint, character varying, character varying, character varying, bigint, bigint, character varying, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_departamento_update(p_id bigint, p_empresa_id bigint, p_codigo character varying, p_nombre character varying, p_descripcion character varying, p_padre_id bigint, p_jefe_empleado_id bigint, p_centro_costo character varying, p_is_active boolean) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    PERFORM fn_rrhh_valida_depto_padre(p_empresa_id, p_id, p_padre_id);
+    IF p_jefe_empleado_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM rrhh_empleados WHERE id = p_jefe_empleado_id AND empresa_id = p_empresa_id AND deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'JEFE_INVALIDO: El jefe del departamento no existe.';
+    END IF;
+    UPDATE rrhh_departamentos SET
+        codigo = NULLIF(btrim(COALESCE(p_codigo, '')), ''), nombre = btrim(p_nombre),
+        descripcion = NULLIF(btrim(COALESCE(p_descripcion, '')), ''),
+        departamento_padre_id = p_padre_id, jefe_empleado_id = p_jefe_empleado_id,
+        centro_costo = NULLIF(btrim(COALESCE(p_centro_costo, '')), ''),
+        is_active = p_is_active, updated_at = NOW()
+    WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
+    RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_dispositivo_create(bigint, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_dispositivo_create(p_empresa_id bigint, p_datos jsonb) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_id BIGINT;
+BEGIN
+    PERFORM fn_rrhh_valida_dispositivo(p_empresa_id, NULLIF(p_datos->>'agente_id', '')::BIGINT);
+    INSERT INTO rrhh_dispositivos (empresa_id, nombre, tipo_lector, marca, modelo, numero_serie, ubicacion, sucursal_id, agente_id)
+    VALUES (p_empresa_id, btrim(p_datos->>'nombre'), COALESCE(p_datos->>'tipo_lector', 'huella'), COALESCE(p_datos->>'marca', 'otro'),
+            NULLIF(btrim(COALESCE(p_datos->>'modelo', '')), ''), NULLIF(btrim(COALESCE(p_datos->>'numero_serie', '')), ''),
+            NULLIF(btrim(COALESCE(p_datos->>'ubicacion', '')), ''), NULLIF(p_datos->>'sucursal_id', '')::BIGINT,
+            NULLIF(p_datos->>'agente_id', '')::BIGINT)
+    RETURNING rrhh_dispositivos.id INTO v_id;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_dispositivo_estado(bigint, bigint, bigint, character varying, character varying, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_dispositivo_estado(p_empresa_id bigint, p_agente_id bigint, p_dispositivo_id bigint, p_estado character varying, p_error character varying, p_sincronizado boolean) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    UPDATE rrhh_dispositivos SET
+        estado_conexion = CASE WHEN p_estado IN ('en_linea', 'error') THEN p_estado ELSE estado_conexion END,
+        ultimo_error = CASE WHEN p_estado = 'error' THEN LEFT(p_error, 255) ELSE NULL END,
+        ultima_sincronizacion = CASE WHEN p_sincronizado THEN NOW() ELSE ultima_sincronizacion END
+     WHERE id = p_dispositivo_id AND empresa_id = p_empresa_id AND agente_id = p_agente_id AND deleted_at IS NULL;
+    RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_dispositivo_list(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_dispositivo_list(p_empresa_id bigint, p_agente_id bigint DEFAULT NULL::bigint) RETURNS TABLE(id bigint, nombre character varying, tipo_lector character varying, marca character varying, modelo character varying, numero_serie character varying, ubicacion character varying, sucursal_id bigint, agente_id bigint, agente_nombre character varying, ultima_sincronizacion timestamp without time zone, ultima_marca timestamp without time zone, estado_conexion character varying, ultimo_error character varying, is_active boolean, usuarios bigint)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT d.id, d.nombre, d.tipo_lector, d.marca, d.modelo, d.numero_serie, d.ubicacion, d.sucursal_id, d.agente_id, a.nombre,
+           d.ultima_sincronizacion, d.ultima_marca, d.estado_conexion, d.ultimo_error, d.is_active,
+           (SELECT COUNT(*) FROM rrhh_dispositivo_usuarios u WHERE u.dispositivo_id = d.id)
+      FROM rrhh_dispositivos d
+      LEFT JOIN rrhh_agentes a ON a.id = d.agente_id
+     WHERE d.empresa_id = p_empresa_id AND d.deleted_at IS NULL AND (p_agente_id IS NULL OR d.agente_id = p_agente_id)
+     ORDER BY lower(d.nombre);
+END; $$;
+
+
+--
+-- Name: sp_rrhh_dispositivo_soft_delete(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_dispositivo_soft_delete(p_id bigint, p_empresa_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    UPDATE rrhh_dispositivos SET deleted_at = NOW(), updated_at = NOW()
+     WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
+    RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_dispositivo_update(bigint, bigint, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_dispositivo_update(p_id bigint, p_empresa_id bigint, p_datos jsonb) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM rrhh_dispositivos WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL) THEN RETURN FALSE; END IF;
+    PERFORM fn_rrhh_valida_dispositivo(p_empresa_id, NULLIF(p_datos->>'agente_id', '')::BIGINT);
+    UPDATE rrhh_dispositivos SET
+        nombre = btrim(p_datos->>'nombre'), tipo_lector = COALESCE(p_datos->>'tipo_lector', 'huella'), marca = COALESCE(p_datos->>'marca', 'otro'),
+        modelo = NULLIF(btrim(COALESCE(p_datos->>'modelo', '')), ''), numero_serie = NULLIF(btrim(COALESCE(p_datos->>'numero_serie', '')), ''),
+        ubicacion = NULLIF(btrim(COALESCE(p_datos->>'ubicacion', '')), ''), sucursal_id = NULLIF(p_datos->>'sucursal_id', '')::BIGINT,
+        agente_id = NULLIF(p_datos->>'agente_id', '')::BIGINT, is_active = COALESCE((p_datos->>'is_active')::BOOLEAN, TRUE), updated_at = NOW()
+     WHERE id = p_id AND empresa_id = p_empresa_id;
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_dispositivo_usuario_delete(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_dispositivo_usuario_delete(p_id bigint, p_empresa_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    DELETE FROM rrhh_dispositivo_usuarios WHERE id = p_id AND empresa_id = p_empresa_id;
+    RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_dispositivo_usuario_set(bigint, bigint, bigint, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_dispositivo_usuario_set(p_empresa_id bigint, p_dispositivo_id bigint, p_empleado_id bigint, p_id_en_dispositivo character varying) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_id BIGINT; v_ext VARCHAR := btrim(p_id_en_dispositivo);
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM rrhh_dispositivos WHERE id = p_dispositivo_id AND empresa_id = p_empresa_id AND deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'DISPOSITIVO_INVALIDO: El dispositivo no existe.';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM rrhh_empleados WHERE id = p_empleado_id AND empresa_id = p_empresa_id AND deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'REF_INVALIDA: El empleado no existe.';
+    END IF;
+    IF v_ext = '' THEN RAISE EXCEPTION 'DISPOSITIVO_INVALIDO: Indique el ID del empleado dentro del dispositivo.'; END IF;
+    IF EXISTS (SELECT 1 FROM rrhh_dispositivo_usuarios WHERE dispositivo_id = p_dispositivo_id AND id_en_dispositivo = v_ext AND empleado_id <> p_empleado_id) THEN
+        RAISE EXCEPTION 'DISPOSITIVO_INVALIDO: Ese ID ya está asignado a otro empleado en este dispositivo.';
+    END IF;
+
+    INSERT INTO rrhh_dispositivo_usuarios (empresa_id, dispositivo_id, empleado_id, id_en_dispositivo)
+    VALUES (p_empresa_id, p_dispositivo_id, p_empleado_id, v_ext)
+    ON CONFLICT (dispositivo_id, empleado_id) DO UPDATE SET id_en_dispositivo = EXCLUDED.id_en_dispositivo, updated_at = NOW()
+    RETURNING rrhh_dispositivo_usuarios.id INTO v_id;
+
+    -- Las marcas que llegaron de ese ID antes de existir el vínculo quedan a nombre del empleado.
+    UPDATE rrhh_marcas SET empleado_id = p_empleado_id, estado = 'valida', updated_at = NOW()
+     WHERE dispositivo_id = p_dispositivo_id AND id_externo = v_ext AND estado = 'sin_asignar' AND deleted_at IS NULL;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_dispositivo_usuarios(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_dispositivo_usuarios(p_dispositivo_id bigint, p_empresa_id bigint) RETURNS TABLE(id bigint, empleado_id bigint, empleado_codigo character varying, empleado_nombre character varying, id_en_dispositivo character varying)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT u.id, u.empleado_id, e.codigo, btrim(e.nombre || ' ' || e.apellido1 || ' ' || COALESCE(e.apellido2, ''))::VARCHAR, u.id_en_dispositivo
+      FROM rrhh_dispositivo_usuarios u
+      JOIN rrhh_empleados e ON e.id = u.empleado_id
+     WHERE u.dispositivo_id = p_dispositivo_id AND u.empresa_id = p_empresa_id
+     ORDER BY u.id_en_dispositivo::TEXT;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_empleado_create(bigint, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_empleado_create(p_empresa_id bigint, p_d jsonb) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $_$
+DECLARE
+    v_id     BIGINT;
+    v_codigo VARCHAR;
+    v_jefe   BIGINT := NULLIF(p_d->>'jefe_id', '')::BIGINT;
+BEGIN
+    PERFORM fn_rrhh_valida_empleado_refs(p_empresa_id, NULL, p_d);
+    PERFORM fn_rrhh_valida_jefe(p_empresa_id, NULL, v_jefe);
+
+    -- Código correlativo por empresa si no se indica (el candado evita repetirlo con dos altas a la vez)
+    PERFORM pg_advisory_xact_lock(hashtext('rrhh_empleado_codigo'), p_empresa_id::int);
+    v_codigo := NULLIF(btrim(COALESCE(p_d->>'codigo', '')), '');
+    IF v_codigo IS NULL THEN
+        SELECT lpad((COALESCE(MAX(substring(e.codigo from '^[0-9]{1,9}$')::INT), 0) + 1)::TEXT, 4, '0')
+          INTO v_codigo FROM rrhh_empleados e WHERE e.empresa_id = p_empresa_id;
+    END IF;
+
+    INSERT INTO rrhh_empleados (
+        empresa_id, funcionario_id, codigo, tipo_identificacion, identificacion, nombre, apellido1, apellido2,
+        fecha_nacimiento, sexo, estado_civil, nacionalidad, email, telefono, direccion, tiene_conyuge, cantidad_hijos,
+        contacto_emergencia_nombre, contacto_emergencia_telefono, contacto_emergencia_parentesco,
+        departamento_id, puesto_id, jefe_id, sucursal_id, fecha_ingreso, tipo_contrato, fecha_fin_contrato,
+        jornada, horas_semanales, periodo_pago, salario_base, moneda, banco, iban, numero_ccss, notas)
+    VALUES (
+        p_empresa_id, NULLIF(p_d->>'funcionario_id', '')::BIGINT, v_codigo,
+        COALESCE(NULLIF(p_d->>'tipo_identificacion', ''), 'cedula'), btrim(p_d->>'identificacion'),
+        btrim(p_d->>'nombre'), btrim(p_d->>'apellido1'), NULLIF(btrim(COALESCE(p_d->>'apellido2', '')), ''),
+        NULLIF(p_d->>'fecha_nacimiento', '')::DATE, NULLIF(p_d->>'sexo', ''), NULLIF(p_d->>'estado_civil', ''),
+        COALESCE(NULLIF(btrim(COALESCE(p_d->>'nacionalidad', '')), ''), 'Costarricense'),
+        NULLIF(btrim(COALESCE(p_d->>'email', '')), ''), NULLIF(btrim(COALESCE(p_d->>'telefono', '')), ''),
+        NULLIF(btrim(COALESCE(p_d->>'direccion', '')), ''),
+        COALESCE((p_d->>'tiene_conyuge')::BOOLEAN, FALSE), COALESCE(NULLIF(p_d->>'cantidad_hijos', '')::INT, 0),
+        NULLIF(btrim(COALESCE(p_d->>'contacto_emergencia_nombre', '')), ''),
+        NULLIF(btrim(COALESCE(p_d->>'contacto_emergencia_telefono', '')), ''),
+        NULLIF(btrim(COALESCE(p_d->>'contacto_emergencia_parentesco', '')), ''),
+        NULLIF(p_d->>'departamento_id', '')::BIGINT, NULLIF(p_d->>'puesto_id', '')::BIGINT, v_jefe,
+        NULLIF(p_d->>'sucursal_id', '')::BIGINT, (p_d->>'fecha_ingreso')::DATE,
+        COALESCE(NULLIF(p_d->>'tipo_contrato', ''), 'indefinido'), NULLIF(p_d->>'fecha_fin_contrato', '')::DATE,
+        COALESCE(NULLIF(p_d->>'jornada', ''), 'diurna'), COALESCE(NULLIF(p_d->>'horas_semanales', '')::NUMERIC, 48),
+        COALESCE(NULLIF(p_d->>'periodo_pago', ''), 'mensual'), COALESCE(NULLIF(p_d->>'salario_base', '')::NUMERIC, 0),
+        COALESCE(NULLIF(p_d->>'moneda', ''), 'CRC'), NULLIF(btrim(COALESCE(p_d->>'banco', '')), ''),
+        NULLIF(upper(replace(COALESCE(p_d->>'iban', ''), ' ', '')), ''), NULLIF(btrim(COALESCE(p_d->>'numero_ccss', '')), ''),
+        NULLIF(btrim(COALESCE(p_d->>'notas', '')), ''))
+    RETURNING rrhh_empleados.id INTO v_id;
+
+    PERFORM fn_rrhh_movimiento(p_empresa_id, v_id, 'ingreso', 'Ingreso a la empresa', NULL,
+        jsonb_build_object('puesto_id', NULLIF(p_d->>'puesto_id', ''), 'departamento_id', NULLIF(p_d->>'departamento_id', ''),
+                           'salario_base', COALESCE(NULLIF(p_d->>'salario_base', '')::NUMERIC, 0)),
+        (p_d->>'fecha_ingreso')::DATE);
+    RETURN v_id;
+END; $_$;
+
+
+--
+-- Name: sp_rrhh_empleado_get(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_empleado_get(p_id bigint, p_empresa_id bigint) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v JSONB;
+BEGIN
+    SELECT to_jsonb(e) || jsonb_build_object(
+               'departamento_nombre', d.nombre,
+               'puesto_nombre', p.nombre,
+               'jefe_nombre', btrim(j.nombre || ' ' || j.apellido1 || ' ' || COALESCE(j.apellido2, '')),
+               'funcionario_nombre', f.name)
+      INTO v
+      FROM rrhh_empleados e
+      LEFT JOIN rrhh_departamentos d ON d.id = e.departamento_id
+      LEFT JOIN rrhh_puestos       p ON p.id = e.puesto_id
+      LEFT JOIN rrhh_empleados     j ON j.id = e.jefe_id
+      LEFT JOIN funcionarios       f ON f.id = e.funcionario_id
+     WHERE e.id = p_id AND e.empresa_id = p_empresa_id;
+    RETURN v;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_empleado_horarios(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_empleado_horarios(p_empleado_id bigint, p_empresa_id bigint) RETURNS TABLE(id bigint, horario_id bigint, horario_nombre character varying, vigente_desde date, vigente_hasta date, vigente boolean)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT a.id, a.horario_id, h.nombre, a.vigente_desde, a.vigente_hasta,
+           (a.vigente_desde <= CURRENT_DATE AND (a.vigente_hasta IS NULL OR a.vigente_hasta >= CURRENT_DATE))
+      FROM rrhh_empleado_horarios a
+      JOIN rrhh_horarios h ON h.id = a.horario_id
+     WHERE a.empleado_id = p_empleado_id AND a.empresa_id = p_empresa_id AND a.deleted_at IS NULL
+     ORDER BY a.vigente_desde DESC, a.id DESC;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_empleado_list(bigint, boolean, character varying, bigint, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_empleado_list(p_empresa_id bigint, p_eliminados boolean DEFAULT false, p_estado character varying DEFAULT NULL::character varying, p_departamento_id bigint DEFAULT NULL::bigint, p_buscar character varying DEFAULT NULL::character varying) RETURNS TABLE(id bigint, codigo character varying, identificacion character varying, nombre_completo character varying, email character varying, telefono character varying, departamento_id bigint, departamento_nombre character varying, puesto_id bigint, puesto_nombre character varying, jefe_id bigint, jefe_nombre character varying, fecha_ingreso date, fecha_salida date, tipo_contrato character varying, salario_base numeric, moneda character varying, estado character varying, subordinados bigint, deleted_at timestamp without time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT e.id, e.codigo, e.identificacion,
+           btrim(e.nombre || ' ' || e.apellido1 || ' ' || COALESCE(e.apellido2, ''))::VARCHAR,
+           e.email, e.telefono, e.departamento_id, d.nombre, e.puesto_id, p.nombre,
+           e.jefe_id, btrim(j.nombre || ' ' || j.apellido1 || ' ' || COALESCE(j.apellido2, ''))::VARCHAR,
+           e.fecha_ingreso, e.fecha_salida, e.tipo_contrato, e.salario_base, e.moneda, e.estado,
+           (SELECT COUNT(*) FROM rrhh_empleados s WHERE s.jefe_id = e.id AND s.deleted_at IS NULL AND s.estado <> 'liquidado'),
+           e.deleted_at
+    FROM rrhh_empleados e
+    LEFT JOIN rrhh_departamentos d ON d.id = e.departamento_id
+    LEFT JOIN rrhh_puestos       p ON p.id = e.puesto_id
+    LEFT JOIN rrhh_empleados     j ON j.id = e.jefe_id
+    WHERE e.empresa_id = p_empresa_id
+      AND ((p_eliminados AND e.deleted_at IS NOT NULL) OR (NOT p_eliminados AND e.deleted_at IS NULL))
+      AND (p_estado IS NULL OR p_estado = '' OR e.estado = p_estado)
+      AND (p_departamento_id IS NULL OR e.departamento_id = p_departamento_id)
+      AND (p_buscar IS NULL OR btrim(p_buscar) = '' OR
+           lower(e.nombre || ' ' || e.apellido1 || ' ' || COALESCE(e.apellido2, '') || ' ' || e.codigo || ' ' || e.identificacion)
+               LIKE '%' || lower(btrim(p_buscar)) || '%')
+    ORDER BY lower(e.apellido1), lower(COALESCE(e.apellido2, '')), lower(e.nombre);
+END; $$;
+
+
+--
+-- Name: sp_rrhh_empleado_movimientos(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_empleado_movimientos(p_id bigint, p_empresa_id bigint) RETURNS TABLE(id bigint, tipo character varying, fecha date, descripcion text, usuario_id bigint, created_at timestamp without time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT m.id, m.tipo, m.fecha, m.descripcion, m.usuario_id, m.created_at
+    FROM rrhh_empleado_movimientos m
+    WHERE m.empleado_id = p_id AND m.empresa_id = p_empresa_id AND m.deleted_at IS NULL
+    ORDER BY m.fecha DESC, m.id DESC;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_empleado_por_funcionario(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_empleado_por_funcionario(p_empresa_id bigint, p_funcionario_id bigint) RETURNS TABLE(id bigint, codigo character varying, nombre_completo character varying, departamento_id bigint, departamento_nombre character varying, jefe_id bigint, fecha_ingreso date, estado character varying, subordinados integer)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT e.id, e.codigo::VARCHAR, btrim(e.nombre || ' ' || e.apellido1 || ' ' || COALESCE(e.apellido2, ''))::VARCHAR,
+           e.departamento_id, dp.nombre::VARCHAR, e.jefe_id, e.fecha_ingreso, e.estado::VARCHAR,
+           (SELECT COUNT(*)::INTEGER FROM rrhh_empleados s WHERE s.empresa_id = e.empresa_id AND s.jefe_id = e.id AND s.deleted_at IS NULL)
+      FROM rrhh_empleados e LEFT JOIN rrhh_departamentos dp ON dp.id = e.departamento_id
+     WHERE e.empresa_id = p_empresa_id AND e.funcionario_id = p_funcionario_id AND e.deleted_at IS NULL
+     LIMIT 1;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_empleado_restore(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_empleado_restore(p_id bigint, p_empresa_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    UPDATE rrhh_empleados SET deleted_at = NULL, is_active = TRUE, updated_at = NOW()
+    WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NOT NULL;
+    RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_empleado_set_estado(bigint, bigint, character varying, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_empleado_set_estado(p_id bigint, p_empresa_id bigint, p_estado character varying, p_motivo character varying) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_actual VARCHAR;
+BEGIN
+    IF p_estado NOT IN ('activo', 'suspendido') THEN
+        RAISE EXCEPTION 'ESTADO_INVALIDO: Estado no permitido.';
+    END IF;
+    SELECT estado INTO v_actual FROM rrhh_empleados
+     WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL FOR UPDATE;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    IF v_actual = 'liquidado' THEN
+        RAISE EXCEPTION 'EMPLEADO_LIQUIDADO: El expediente está liquidado y ya no se puede modificar.';
+    END IF;
+    IF v_actual = p_estado THEN RETURN TRUE; END IF;
+
+    UPDATE rrhh_empleados SET estado = p_estado, updated_at = NOW() WHERE id = p_id;
+    PERFORM fn_rrhh_movimiento(p_empresa_id, p_id, CASE p_estado WHEN 'suspendido' THEN 'suspension' ELSE 'reactivacion' END,
+        CASE p_estado WHEN 'suspendido' THEN 'Suspensión del contrato' ELSE 'Reactivación del contrato' END
+            || COALESCE(': ' || NULLIF(btrim(p_motivo), ''), ''),
+        jsonb_build_object('estado', v_actual), jsonb_build_object('estado', p_estado));
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_empleado_soft_delete(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_empleado_soft_delete(p_id bigint, p_empresa_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_n BIGINT;
+BEGIN
+    SELECT COUNT(*) INTO v_n FROM rrhh_empleados
+     WHERE jefe_id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL AND estado <> 'liquidado';
+    IF v_n > 0 THEN
+        RAISE EXCEPTION 'EMPLEADO_EN_USO: Es jefe de % empleado(s); asígneles otro jefe antes de eliminarlo.', v_n;
+    END IF;
+    SELECT COUNT(*) INTO v_n FROM rrhh_departamentos
+     WHERE jefe_empleado_id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
+    IF v_n > 0 THEN
+        RAISE EXCEPTION 'EMPLEADO_EN_USO: Es jefe de % departamento(s); asigne otro jefe antes de eliminarlo.', v_n;
+    END IF;
+    UPDATE rrhh_empleados SET is_active = FALSE, deleted_at = NOW(), updated_at = NOW()
+    WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
+    RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_empleado_update(bigint, bigint, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_empleado_update(p_id bigint, p_empresa_id bigint, p_d jsonb) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    o        rrhh_empleados%ROWTYPE;
+    v_jefe   BIGINT := NULLIF(p_d->>'jefe_id', '')::BIGINT;
+    v_depto  BIGINT := NULLIF(p_d->>'departamento_id', '')::BIGINT;
+    v_puesto BIGINT := NULLIF(p_d->>'puesto_id', '')::BIGINT;
+    v_sal    NUMERIC := COALESCE(NULLIF(p_d->>'salario_base', '')::NUMERIC, 0);
+    v_cont   VARCHAR := COALESCE(NULLIF(p_d->>'tipo_contrato', ''), 'indefinido');
+    v_jorn   VARCHAR := COALESCE(NULLIF(p_d->>'jornada', ''), 'diurna');
+BEGIN
+    SELECT * INTO o FROM rrhh_empleados WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL FOR UPDATE;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    IF o.estado = 'liquidado' THEN
+        RAISE EXCEPTION 'EMPLEADO_LIQUIDADO: El expediente está liquidado y ya no se puede modificar.';
+    END IF;
+
+    PERFORM fn_rrhh_valida_empleado_refs(p_empresa_id, p_id, p_d);
+    PERFORM fn_rrhh_valida_jefe(p_empresa_id, p_id, v_jefe);
+
+    UPDATE rrhh_empleados SET
+        funcionario_id = NULLIF(p_d->>'funcionario_id', '')::BIGINT,
+        codigo = COALESCE(NULLIF(btrim(COALESCE(p_d->>'codigo', '')), ''), o.codigo),
+        tipo_identificacion = COALESCE(NULLIF(p_d->>'tipo_identificacion', ''), 'cedula'),
+        identificacion = btrim(p_d->>'identificacion'),
+        nombre = btrim(p_d->>'nombre'), apellido1 = btrim(p_d->>'apellido1'),
+        apellido2 = NULLIF(btrim(COALESCE(p_d->>'apellido2', '')), ''),
+        fecha_nacimiento = NULLIF(p_d->>'fecha_nacimiento', '')::DATE,
+        sexo = NULLIF(p_d->>'sexo', ''), estado_civil = NULLIF(p_d->>'estado_civil', ''),
+        nacionalidad = COALESCE(NULLIF(btrim(COALESCE(p_d->>'nacionalidad', '')), ''), 'Costarricense'),
+        email = NULLIF(btrim(COALESCE(p_d->>'email', '')), ''), telefono = NULLIF(btrim(COALESCE(p_d->>'telefono', '')), ''),
+        direccion = NULLIF(btrim(COALESCE(p_d->>'direccion', '')), ''),
+        tiene_conyuge = COALESCE((p_d->>'tiene_conyuge')::BOOLEAN, FALSE),
+        cantidad_hijos = COALESCE(NULLIF(p_d->>'cantidad_hijos', '')::INT, 0),
+        contacto_emergencia_nombre = NULLIF(btrim(COALESCE(p_d->>'contacto_emergencia_nombre', '')), ''),
+        contacto_emergencia_telefono = NULLIF(btrim(COALESCE(p_d->>'contacto_emergencia_telefono', '')), ''),
+        contacto_emergencia_parentesco = NULLIF(btrim(COALESCE(p_d->>'contacto_emergencia_parentesco', '')), ''),
+        departamento_id = v_depto, puesto_id = v_puesto, jefe_id = v_jefe,
+        sucursal_id = NULLIF(p_d->>'sucursal_id', '')::BIGINT,
+        fecha_ingreso = (p_d->>'fecha_ingreso')::DATE,
+        tipo_contrato = v_cont, fecha_fin_contrato = NULLIF(p_d->>'fecha_fin_contrato', '')::DATE,
+        jornada = v_jorn, horas_semanales = COALESCE(NULLIF(p_d->>'horas_semanales', '')::NUMERIC, 48),
+        periodo_pago = COALESCE(NULLIF(p_d->>'periodo_pago', ''), 'mensual'),
+        salario_base = v_sal, moneda = COALESCE(NULLIF(p_d->>'moneda', ''), 'CRC'),
+        banco = NULLIF(btrim(COALESCE(p_d->>'banco', '')), ''),
+        iban = NULLIF(upper(replace(COALESCE(p_d->>'iban', ''), ' ', '')), ''),
+        numero_ccss = NULLIF(btrim(COALESCE(p_d->>'numero_ccss', '')), ''),
+        notas = NULLIF(btrim(COALESCE(p_d->>'notas', '')), ''),
+        updated_at = NOW()
+    WHERE id = p_id;
+
+    -- Historial del expediente: solo lo que cambió de la relación laboral
+    IF o.puesto_id IS DISTINCT FROM v_puesto THEN
+        PERFORM fn_rrhh_movimiento(p_empresa_id, p_id, 'cambio_puesto',
+            'Puesto: ' || COALESCE((SELECT nombre FROM rrhh_puestos WHERE id = o.puesto_id), 'sin puesto') || ' → ' ||
+                          COALESCE((SELECT nombre FROM rrhh_puestos WHERE id = v_puesto), 'sin puesto'),
+            jsonb_build_object('puesto_id', o.puesto_id), jsonb_build_object('puesto_id', v_puesto));
+    END IF;
+    IF o.departamento_id IS DISTINCT FROM v_depto THEN
+        PERFORM fn_rrhh_movimiento(p_empresa_id, p_id, 'cambio_departamento',
+            'Departamento: ' || COALESCE((SELECT nombre FROM rrhh_departamentos WHERE id = o.departamento_id), 'sin departamento') || ' → ' ||
+                                COALESCE((SELECT nombre FROM rrhh_departamentos WHERE id = v_depto), 'sin departamento'),
+            jsonb_build_object('departamento_id', o.departamento_id), jsonb_build_object('departamento_id', v_depto));
+    END IF;
+    IF o.jefe_id IS DISTINCT FROM v_jefe THEN
+        PERFORM fn_rrhh_movimiento(p_empresa_id, p_id, 'cambio_jefe',
+            'Jefe inmediato: ' ||
+              COALESCE((SELECT btrim(nombre || ' ' || apellido1) FROM rrhh_empleados WHERE id = o.jefe_id), 'sin jefe') || ' → ' ||
+              COALESCE((SELECT btrim(nombre || ' ' || apellido1) FROM rrhh_empleados WHERE id = v_jefe), 'sin jefe'),
+            jsonb_build_object('jefe_id', o.jefe_id), jsonb_build_object('jefe_id', v_jefe));
+    END IF;
+    IF o.salario_base IS DISTINCT FROM v_sal THEN
+        PERFORM fn_rrhh_movimiento(p_empresa_id, p_id, 'ajuste_salarial',
+            'Salario base: ' || to_char(o.salario_base, 'FM999G999G999D00') || ' → ' || to_char(v_sal, 'FM999G999G999D00'),
+            jsonb_build_object('salario_base', o.salario_base), jsonb_build_object('salario_base', v_sal));
+    END IF;
+    IF o.tipo_contrato IS DISTINCT FROM v_cont OR o.jornada IS DISTINCT FROM v_jorn THEN
+        PERFORM fn_rrhh_movimiento(p_empresa_id, p_id, 'cambio_contrato',
+            'Contrato/jornada: ' || o.tipo_contrato || ' ' || o.jornada || ' → ' || v_cont || ' ' || v_jorn,
+            jsonb_build_object('tipo_contrato', o.tipo_contrato, 'jornada', o.jornada),
+            jsonb_build_object('tipo_contrato', v_cont, 'jornada', v_jorn));
+    END IF;
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_feriado_cargar(bigint, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_feriado_cargar(p_empresa_id bigint, p_items jsonb) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_n INTEGER;
+BEGIN
+    WITH ins AS (
+        INSERT INTO rrhh_feriados (empresa_id, fecha, nombre, pago_obligatorio)
+        SELECT p_empresa_id, (x->>'fecha')::DATE, x->>'nombre', COALESCE((x->>'pago_obligatorio')::BOOLEAN, TRUE)
+          FROM jsonb_array_elements(p_items) x
+         WHERE NOT EXISTS (SELECT 1 FROM rrhh_feriados f WHERE f.empresa_id = p_empresa_id AND f.fecha = (x->>'fecha')::DATE AND f.deleted_at IS NULL)
+        RETURNING 1)
+    SELECT COUNT(*) INTO v_n FROM ins;
+    RETURN v_n;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_feriado_create(bigint, date, character varying, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_feriado_create(p_empresa_id bigint, p_fecha date, p_nombre character varying, p_pago_obligatorio boolean) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_id BIGINT;
+BEGIN
+    INSERT INTO rrhh_feriados (empresa_id, fecha, nombre, pago_obligatorio)
+    VALUES (p_empresa_id, p_fecha, btrim(p_nombre), COALESCE(p_pago_obligatorio, TRUE))
+    RETURNING rrhh_feriados.id INTO v_id;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_feriado_delete(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_feriado_delete(p_id bigint, p_empresa_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    UPDATE rrhh_feriados SET deleted_at = NOW(), updated_at = NOW()
+     WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
+    RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_feriado_list(bigint, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_feriado_list(p_empresa_id bigint, p_anio integer) RETURNS TABLE(id bigint, fecha date, nombre character varying, pago_obligatorio boolean)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT f.id, f.fecha, f.nombre, f.pago_obligatorio
+      FROM rrhh_feriados f
+     WHERE f.empresa_id = p_empresa_id AND f.deleted_at IS NULL AND EXTRACT(YEAR FROM f.fecha) = p_anio
+     ORDER BY f.fecha;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_feriado_update(bigint, bigint, date, character varying, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_feriado_update(p_id bigint, p_empresa_id bigint, p_fecha date, p_nombre character varying, p_pago_obligatorio boolean) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    UPDATE rrhh_feriados SET fecha = p_fecha, nombre = btrim(p_nombre), pago_obligatorio = COALESCE(p_pago_obligatorio, TRUE), updated_at = NOW()
+     WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
+    RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_horario_asignar(bigint, bigint, bigint, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_horario_asignar(p_empresa_id bigint, p_empleado_id bigint, p_horario_id bigint, p_desde date) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_emp    RECORD;
+    v_id     BIGINT;
+    v_nombre VARCHAR;
+BEGIN
+    SELECT e.id, e.estado, e.fecha_ingreso INTO v_emp
+      FROM rrhh_empleados e WHERE e.id = p_empleado_id AND e.empresa_id = p_empresa_id AND e.deleted_at IS NULL;
+    IF NOT FOUND THEN RAISE EXCEPTION 'REF_INVALIDA: El empleado no existe.'; END IF;
+    IF v_emp.estado = 'liquidado' THEN RAISE EXCEPTION 'EMPLEADO_LIQUIDADO: El expediente está liquidado y no admite cambios.'; END IF;
+    SELECT h.nombre INTO v_nombre FROM rrhh_horarios h
+     WHERE h.id = p_horario_id AND h.empresa_id = p_empresa_id AND h.deleted_at IS NULL AND h.is_active;
+    IF NOT FOUND THEN RAISE EXCEPTION 'REF_INVALIDA: El horario no existe o está inactivo.'; END IF;
+    IF EXISTS (SELECT 1 FROM rrhh_empleado_horarios a WHERE a.empleado_id = p_empleado_id AND a.deleted_at IS NULL AND a.vigente_desde >= p_desde) THEN
+        RAISE EXCEPTION 'FECHA_INVALIDA: El empleado ya tiene un horario asignado desde esa fecha o una posterior; indique una fecha más reciente.';
+    END IF;
+
+    UPDATE rrhh_empleado_horarios SET vigente_hasta = p_desde - 1, updated_at = NOW()
+     WHERE empleado_id = p_empleado_id AND deleted_at IS NULL AND (vigente_hasta IS NULL OR vigente_hasta >= p_desde);
+
+    INSERT INTO rrhh_empleado_horarios (empresa_id, empleado_id, horario_id, vigente_desde)
+    VALUES (p_empresa_id, p_empleado_id, p_horario_id, p_desde) RETURNING rrhh_empleado_horarios.id INTO v_id;
+
+    PERFORM fn_rrhh_movimiento(p_empresa_id, p_empleado_id, 'horario',
+        'Horario «' || v_nombre || '» desde ' || to_char(p_desde, 'DD/MM/YYYY'), NULL,
+        jsonb_build_object('horario_id', p_horario_id, 'vigente_desde', p_desde), p_desde);
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_horario_create(bigint, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_horario_create(p_empresa_id bigint, p_datos jsonb) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_id BIGINT;
+BEGIN
+    PERFORM fn_rrhh_valida_horario(COALESCE(p_datos->>'jornada', 'diurna'), p_datos->'dias');
+    INSERT INTO rrhh_horarios (empresa_id, nombre, descripcion, jornada, tolerancia_entrada_min, tolerancia_salida_min, minutos_minimos_extra)
+    VALUES (p_empresa_id, btrim(p_datos->>'nombre'), NULLIF(btrim(COALESCE(p_datos->>'descripcion', '')), ''),
+            COALESCE(p_datos->>'jornada', 'diurna'),
+            COALESCE((p_datos->>'tolerancia_entrada_min')::SMALLINT, 10),
+            COALESCE((p_datos->>'tolerancia_salida_min')::SMALLINT, 0),
+            COALESCE((p_datos->>'minutos_minimos_extra')::SMALLINT, 30))
+    RETURNING rrhh_horarios.id INTO v_id;
+    PERFORM fn_rrhh_horario_guardar_dias(v_id, p_datos->'dias');
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_horario_get(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_horario_get(p_id bigint, p_empresa_id bigint) RETURNS TABLE(id bigint, empresa_id bigint, nombre character varying, descripcion character varying, jornada character varying, tolerancia_entrada_min smallint, tolerancia_salida_min smallint, minutos_minimos_extra smallint, is_active boolean, deleted_at timestamp without time zone, dias jsonb, horas_semanales numeric, empleados bigint)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT l.id, l.empresa_id, l.nombre, l.descripcion, l.jornada, l.tolerancia_entrada_min, l.tolerancia_salida_min,
+           l.minutos_minimos_extra, l.is_active, l.deleted_at, l.dias, l.horas_semanales, l.empleados
+      FROM (SELECT * FROM sp_rrhh_horario_list(p_empresa_id, FALSE)
+            UNION ALL SELECT * FROM sp_rrhh_horario_list(p_empresa_id, TRUE)) l
+     WHERE l.id = p_id;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_horario_list(bigint, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_horario_list(p_empresa_id bigint, p_eliminados boolean DEFAULT false) RETURNS TABLE(id bigint, empresa_id bigint, nombre character varying, descripcion character varying, jornada character varying, tolerancia_entrada_min smallint, tolerancia_salida_min smallint, minutos_minimos_extra smallint, is_active boolean, deleted_at timestamp without time zone, dias jsonb, horas_semanales numeric, empleados bigint)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT h.id, h.empresa_id, h.nombre, h.descripcion, h.jornada, h.tolerancia_entrada_min, h.tolerancia_salida_min,
+           h.minutos_minimos_extra, h.is_active, h.deleted_at,
+           COALESCE((SELECT jsonb_agg(jsonb_build_object('dia_semana', d.dia_semana,
+                                                         'hora_entrada', to_char(d.hora_entrada, 'HH24:MI'),
+                                                         'hora_salida', to_char(d.hora_salida, 'HH24:MI'),
+                                                         'minutos_descanso', d.minutos_descanso) ORDER BY d.dia_semana)
+                       FROM rrhh_horario_dias d WHERE d.horario_id = h.id), '[]'::jsonb),
+           COALESCE((SELECT round(SUM(fn_rrhh_minutos_dia(d.hora_entrada, d.hora_salida, d.minutos_descanso)) / 60.0, 2)
+                       FROM rrhh_horario_dias d WHERE d.horario_id = h.id), 0),
+           (SELECT COUNT(*) FROM rrhh_empleado_horarios a
+              JOIN rrhh_empleados e ON e.id = a.empleado_id AND e.deleted_at IS NULL AND e.estado <> 'liquidado'
+             WHERE a.horario_id = h.id AND a.deleted_at IS NULL
+               AND a.vigente_desde <= CURRENT_DATE AND (a.vigente_hasta IS NULL OR a.vigente_hasta >= CURRENT_DATE))
+    FROM rrhh_horarios h
+    WHERE h.empresa_id = p_empresa_id
+      AND ((p_eliminados AND h.deleted_at IS NOT NULL) OR (NOT p_eliminados AND h.deleted_at IS NULL))
+    ORDER BY lower(h.nombre);
+END; $$;
+
+
+--
+-- Name: sp_rrhh_horario_restore(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_horario_restore(p_id bigint, p_empresa_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    UPDATE rrhh_horarios SET deleted_at = NULL, updated_at = NOW()
+     WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NOT NULL;
+    RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_horario_soft_delete(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_horario_soft_delete(p_id bigint, p_empresa_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM rrhh_horarios WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL) THEN
+        RETURN FALSE;
+    END IF;
+    IF EXISTS (SELECT 1 FROM rrhh_empleado_horarios a JOIN rrhh_empleados e ON e.id = a.empleado_id AND e.deleted_at IS NULL AND e.estado <> 'liquidado'
+                WHERE a.horario_id = p_id AND a.deleted_at IS NULL AND (a.vigente_hasta IS NULL OR a.vigente_hasta >= CURRENT_DATE)) THEN
+        RAISE EXCEPTION 'HORARIO_EN_USO: El horario está asignado a empleados vigentes; reasígnelos antes de eliminarlo.';
+    END IF;
+    UPDATE rrhh_horarios SET deleted_at = NOW(), updated_at = NOW() WHERE id = p_id AND empresa_id = p_empresa_id;
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_horario_update(bigint, bigint, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_horario_update(p_id bigint, p_empresa_id bigint, p_datos jsonb) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM rrhh_horarios WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL) THEN
+        RETURN FALSE;
+    END IF;
+    PERFORM fn_rrhh_valida_horario(COALESCE(p_datos->>'jornada', 'diurna'), p_datos->'dias');
+    UPDATE rrhh_horarios SET
+        nombre = btrim(p_datos->>'nombre'),
+        descripcion = NULLIF(btrim(COALESCE(p_datos->>'descripcion', '')), ''),
+        jornada = COALESCE(p_datos->>'jornada', 'diurna'),
+        tolerancia_entrada_min = COALESCE((p_datos->>'tolerancia_entrada_min')::SMALLINT, 10),
+        tolerancia_salida_min = COALESCE((p_datos->>'tolerancia_salida_min')::SMALLINT, 0),
+        minutos_minimos_extra = COALESCE((p_datos->>'minutos_minimos_extra')::SMALLINT, 30),
+        is_active = COALESCE((p_datos->>'is_active')::BOOLEAN, TRUE),
+        updated_at = NOW()
+     WHERE id = p_id AND empresa_id = p_empresa_id;
+    PERFORM fn_rrhh_horario_guardar_dias(p_id, p_datos->'dias');
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_horas_extra(bigint, date, date, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_horas_extra(p_empresa_id bigint, p_desde date, p_hasta date, p_empleado_id bigint DEFAULT NULL::bigint, p_departamento_id bigint DEFAULT NULL::bigint) RETURNS TABLE(empleado_id bigint, empleado_codigo character varying, empleado_nombre character varying, departamento_nombre character varying, dias_con_extra integer, minutos_calculados integer, minutos_pendientes integer, minutos_aprobados integer, minutos_aprobados_1_5 integer, minutos_aprobados_2_0 integer, valor_hora numeric, monto_aprobado numeric)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    WITH r AS (
+        SELECT * FROM sp_rrhh_asistencia_resumen(p_empresa_id, p_desde, p_hasta, p_empleado_id, p_departamento_id, NULL)
+         WHERE minutos_extra > 0
+    ),
+    t AS (
+        SELECT r.empleado_id AS eid, MAX(r.empleado_codigo) AS cod, MAX(r.empleado_nombre) AS nom, MAX(r.departamento_nombre) AS dep,
+               COUNT(*)::INTEGER AS dias, SUM(r.minutos_extra)::INTEGER AS calc,
+               COALESCE(SUM(r.minutos_extra) FILTER (WHERE r.extra_estado = 'pendiente'), 0)::INTEGER AS pend,
+               COALESCE(SUM(r.extra_minutos_aprobados), 0)::INTEGER AS aprob,
+               COALESCE(SUM(r.extra_minutos_aprobados) FILTER (WHERE r.factor_extra = 1.5), 0)::INTEGER AS a15,
+               COALESCE(SUM(r.extra_minutos_aprobados) FILTER (WHERE r.factor_extra = 2.0), 0)::INTEGER AS a20
+          FROM r GROUP BY r.empleado_id
+    )
+    SELECT t.eid, t.cod::VARCHAR, t.nom::VARCHAR, t.dep::VARCHAR, t.dias, t.calc, t.pend, t.aprob, t.a15, t.a20,
+           round(v.hora, 2),
+           round(v.hora * (t.a15 * 1.5 + t.a20 * 2.0) / 60.0, 2)
+      FROM t
+      JOIN rrhh_empleados e ON e.id = t.eid
+      CROSS JOIN LATERAL (
+          SELECT e.salario_base / (CASE e.periodo_pago WHEN 'mensual' THEN 30 WHEN 'quincenal' THEN 15 ELSE 6 END)
+                 / (CASE e.jornada WHEN 'mixta' THEN 7 WHEN 'nocturna' THEN 6 ELSE 8 END) AS hora
+      ) v
+     ORDER BY t.nom;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_inc_actualizar(bigint, bigint, character varying, character varying, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_inc_actualizar(p_empresa_id bigint, p_id bigint, p_boleta character varying, p_obs character varying, p_completa boolean) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_n INTEGER;
+BEGIN
+    UPDATE rrhh_incapacidades
+       SET numero_boleta = NULLIF(btrim(COALESCE(p_boleta, '')), ''), observaciones = NULLIF(btrim(COALESCE(p_obs, '')), ''),
+           patrono_completa = COALESCE(p_completa, patrono_completa), updated_at = NOW()
+     WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL AND estado = 'registrada';
+    GET DIAGNOSTICS v_n = ROW_COUNT;
+    RETURN v_n > 0;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_inc_anular(bigint, bigint, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_inc_anular(p_empresa_id bigint, p_id bigint, p_nota character varying) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_i    RECORD;
+    v_nota VARCHAR := NULLIF(btrim(COALESCE(p_nota, '')), '');
+    v_user BIGINT := NULLIF(current_setting('app.current_user_id', true), '')::BIGINT;
+BEGIN
+    SELECT i.* INTO v_i FROM rrhh_incapacidades i WHERE i.id = p_id AND i.empresa_id = p_empresa_id AND i.deleted_at IS NULL FOR UPDATE;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    IF v_i.estado <> 'registrada' THEN RAISE EXCEPTION 'INCAPACIDAD_INVALIDA: La incapacidad ya estaba anulada.'; END IF;
+    IF v_nota IS NULL THEN RAISE EXCEPTION 'INCAPACIDAD_INVALIDA: Indique el motivo de la anulación.'; END IF;
+    IF v_i.vac_movimiento_id IS NOT NULL THEN
+        UPDATE rrhh_vacaciones_movimientos SET deleted_at = NOW(), updated_at = NOW() WHERE id = v_i.vac_movimiento_id AND deleted_at IS NULL;
+    END IF;
+    UPDATE rrhh_incapacidades
+       SET estado = 'anulada', anulada_por = v_user, anulada_at = NOW(), anulada_nota = v_nota, vac_repuestos = 0, vac_movimiento_id = NULL, updated_at = NOW()
+     WHERE id = p_id;
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_inc_list(bigint, bigint, character varying, character varying, date, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_inc_list(p_empresa_id bigint, p_empleado_id bigint DEFAULT NULL::bigint, p_tipo character varying DEFAULT NULL::character varying, p_estado character varying DEFAULT NULL::character varying, p_desde date DEFAULT NULL::date, p_hasta date DEFAULT NULL::date) RETURNS TABLE(id bigint, empleado_id bigint, empleado_codigo character varying, empleado_nombre character varying, departamento_nombre character varying, tipo character varying, entidad character varying, fecha_inicio date, fecha_fin date, dias integer, numero_boleta character varying, observaciones character varying, patrono_completa boolean, valor_dia numeric, estado character varying, vac_repuestos numeric, anulada_nota character varying, monto_patrono numeric, monto_entidad numeric, monto_complemento numeric, created_at timestamp without time zone)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT i.id, i.empleado_id, e.codigo::VARCHAR, btrim(e.nombre || ' ' || e.apellido1 || ' ' || COALESCE(e.apellido2, ''))::VARCHAR,
+           dp.nombre::VARCHAR, i.tipo::VARCHAR, i.entidad::VARCHAR, i.fecha_inicio, i.fecha_fin, i.dias, i.numero_boleta::VARCHAR, i.observaciones::VARCHAR,
+           i.patrono_completa, i.valor_dia, i.estado::VARCHAR, i.vac_repuestos, i.anulada_nota::VARCHAR,
+           COALESCE(m.mp, 0), COALESCE(m.me, 0), COALESCE(m.mc, 0), i.created_at
+      FROM rrhh_incapacidades i
+      JOIN rrhh_empleados e ON e.id = i.empleado_id
+      LEFT JOIN rrhh_departamentos dp ON dp.id = e.departamento_id
+      LEFT JOIN LATERAL (
+          SELECT SUM(x.monto_patrono) AS mp, SUM(x.monto_entidad) AS me, SUM(x.monto_complemento) AS mc
+            FROM fn_rrhh_inc_tramos(i.empleado_id, i.tipo, i.fecha_inicio, i.fecha_fin, i.valor_dia, i.patrono_completa, i.id) x
+           WHERE i.estado = 'registrada'
+      ) m ON TRUE
+     WHERE i.empresa_id = p_empresa_id AND i.deleted_at IS NULL
+       AND (p_empleado_id IS NULL OR i.empleado_id = p_empleado_id)
+       AND (p_tipo IS NULL OR i.tipo = p_tipo)
+       AND (p_estado IS NULL OR i.estado = p_estado)
+       AND (p_desde IS NULL OR i.fecha_fin >= p_desde)
+       AND (p_hasta IS NULL OR i.fecha_inicio <= p_hasta)
+     ORDER BY i.fecha_inicio DESC, i.id DESC
+     LIMIT 300;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_inc_previsualizar(bigint, bigint, character varying, date, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_inc_previsualizar(p_empresa_id bigint, p_empleado_id bigint, p_tipo character varying, p_inicio date, p_fin date) RETURNS TABLE(dias integer, dias_previos integer, valor_dia numeric, entidad character varying, vac_dias numeric, valida boolean, mensaje character varying)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_msg VARCHAR := NULL;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM rrhh_empleados e WHERE e.id = p_empleado_id AND e.empresa_id = p_empresa_id AND e.deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'REF_INVALIDA: El empleado no existe.';
+    END IF;
+    dias := CASE WHEN p_fin >= p_inicio AND p_fin - p_inicio <= 730 THEN p_fin - p_inicio + 1 ELSE 0 END;
+    dias_previos := CASE WHEN dias > 0 AND p_tipo IN ('enfermedad', 'maternidad', 'riesgo_trabajo')
+                         THEN fn_rrhh_inc_dias_previos(p_empleado_id, p_tipo, p_inicio, NULL) ELSE 0 END;
+    valor_dia := COALESCE(fn_rrhh_inc_valor_dia(p_empleado_id), 0);
+    entidad := CASE WHEN p_tipo = 'riesgo_trabajo' THEN 'INS' ELSE 'CCSS' END;
+    vac_dias := CASE WHEN dias > 0 THEN fn_rrhh_inc_vac_traslape(p_empresa_id, p_empleado_id, p_inicio, p_fin) ELSE 0 END;
+    BEGIN
+        PERFORM fn_rrhh_inc_validar(p_empresa_id, p_empleado_id, p_tipo, p_inicio, p_fin);
+    EXCEPTION WHEN OTHERS THEN
+        v_msg := regexp_replace(SQLERRM, '^[A-Z_]+:\s*', '');
+    END;
+    valida := v_msg IS NULL;
+    mensaje := v_msg;
+    RETURN NEXT;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_inc_registrar(bigint, bigint, character varying, date, date, character varying, character varying, boolean, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_inc_registrar(p_empresa_id bigint, p_empleado_id bigint, p_tipo character varying, p_inicio date, p_fin date, p_boleta character varying, p_obs character varying, p_completa boolean DEFAULT true, p_reponer_vac boolean DEFAULT false) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_user BIGINT := NULLIF(current_setting('app.current_user_id', true), '')::BIGINT;
+    v_id   BIGINT;
+    v_vac  NUMERIC;
+    v_mov  BIGINT;
+BEGIN
+    PERFORM fn_rrhh_inc_validar(p_empresa_id, p_empleado_id, p_tipo, p_inicio, p_fin);
+    INSERT INTO rrhh_incapacidades (empresa_id, empleado_id, tipo, entidad, fecha_inicio, fecha_fin, dias, numero_boleta, observaciones,
+                                    patrono_completa, valor_dia, creada_por)
+    VALUES (p_empresa_id, p_empleado_id, p_tipo, CASE WHEN p_tipo = 'riesgo_trabajo' THEN 'INS' ELSE 'CCSS' END, p_inicio, p_fin,
+            p_fin - p_inicio + 1, NULLIF(btrim(COALESCE(p_boleta, '')), ''), NULLIF(btrim(COALESCE(p_obs, '')), ''),
+            COALESCE(p_completa, TRUE), COALESCE(fn_rrhh_inc_valor_dia(p_empleado_id), 0), v_user)
+    RETURNING id INTO v_id;
+
+    IF p_reponer_vac THEN
+        v_vac := fn_rrhh_inc_vac_traslape(p_empresa_id, p_empleado_id, p_inicio, p_fin);
+        IF v_vac > 0 THEN
+            INSERT INTO rrhh_vacaciones_movimientos (empresa_id, empleado_id, tipo, dias, fecha, motivo, usuario_id)
+            VALUES (p_empresa_id, p_empleado_id, 'ajuste', v_vac, CURRENT_DATE,
+                    'Incapacidad #' || v_id || ' dentro de vacaciones aprobadas (se reponen los días)', v_user)
+            RETURNING id INTO v_mov;
+            UPDATE rrhh_incapacidades SET vac_repuestos = v_vac, vac_movimiento_id = v_mov WHERE id = v_id;
+        END IF;
+    END IF;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_inc_subsidio(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_inc_subsidio(p_empresa_id bigint, p_id bigint) RETURNS TABLE(desde date, hasta date, dias integer, patrono_pct numeric, entidad_pct numeric, complemento_pct numeric, monto_patrono numeric, monto_entidad numeric, monto_complemento numeric)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_i RECORD;
+BEGIN
+    SELECT i.* INTO v_i FROM rrhh_incapacidades i WHERE i.id = p_id AND i.empresa_id = p_empresa_id AND i.deleted_at IS NULL;
+    IF NOT FOUND OR v_i.estado <> 'registrada' THEN RETURN; END IF;
+    RETURN QUERY SELECT * FROM fn_rrhh_inc_tramos(v_i.empleado_id, v_i.tipo, v_i.fecha_inicio, v_i.fecha_fin, v_i.valor_dia, v_i.patrono_completa, v_i.id);
+END; $$;
+
+
+--
+-- Name: sp_rrhh_inc_tramos_calc(bigint, bigint, character varying, date, date, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_inc_tramos_calc(p_empresa_id bigint, p_empleado_id bigint, p_tipo character varying, p_inicio date, p_fin date, p_completa boolean DEFAULT true) RETURNS TABLE(desde date, hasta date, dias integer, patrono_pct numeric, entidad_pct numeric, complemento_pct numeric, monto_patrono numeric, monto_entidad numeric, monto_complemento numeric)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM rrhh_empleados e WHERE e.id = p_empleado_id AND e.empresa_id = p_empresa_id AND e.deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'REF_INVALIDA: El empleado no existe.';
+    END IF;
+    IF p_tipo NOT IN ('enfermedad', 'maternidad', 'riesgo_trabajo') OR p_fin < p_inicio OR p_fin - p_inicio > 730 THEN RETURN; END IF;
+    RETURN QUERY SELECT * FROM fn_rrhh_inc_tramos(p_empleado_id, p_tipo, p_inicio, p_fin, COALESCE(fn_rrhh_inc_valor_dia(p_empleado_id), 0), COALESCE(p_completa, TRUE), NULL);
+END; $$;
+
+
+--
+-- Name: sp_rrhh_marca_list(bigint, date, date, bigint, character varying, character varying, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_marca_list(p_empresa_id bigint, p_desde date, p_hasta date, p_empleado_id bigint DEFAULT NULL::bigint, p_estado character varying DEFAULT NULL::character varying, p_origen character varying DEFAULT NULL::character varying, p_limite integer DEFAULT 1000) RETURNS TABLE(id bigint, empleado_id bigint, empleado_codigo character varying, empleado_nombre character varying, fecha_hora timestamp without time zone, tipo character varying, origen character varying, metodo character varying, dispositivo_id bigint, dispositivo_nombre character varying, id_externo character varying, estado character varying, motivo character varying, registrado_por bigint, resuelto_por bigint, resuelto_at timestamp without time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    IF p_hasta - p_desde > 93 THEN RAISE EXCEPTION 'FECHA_INVALIDA: El rango de fechas no puede pasar de 93 días.'; END IF;
+    RETURN QUERY
+    WITH ses AS (
+        SELECT * FROM fn_rrhh_sesiones(p_empresa_id, p_empleado_id, (p_desde - 1)::TIMESTAMP, (p_hasta + 2)::TIMESTAMP)
+    )
+    SELECT m.id, m.empleado_id, e.codigo, btrim(e.nombre || ' ' || e.apellido1 || ' ' || COALESCE(e.apellido2, ''))::VARCHAR,
+           m.fecha_hora,
+           (CASE WHEN EXISTS (SELECT 1 FROM ses s WHERE s.s_entrada_id = m.id) THEN 'entrada'
+                 WHEN EXISTS (SELECT 1 FROM ses s WHERE s.s_salida_id = m.id) THEN 'salida' END)::VARCHAR,
+           m.origen, m.metodo, m.dispositivo_id, d.nombre, m.id_externo, m.estado, m.motivo, m.registrado_por, m.resuelto_por, m.resuelto_at
+      FROM rrhh_marcas m
+      LEFT JOIN rrhh_empleados e ON e.id = m.empleado_id
+      LEFT JOIN rrhh_dispositivos d ON d.id = m.dispositivo_id
+     WHERE m.empresa_id = p_empresa_id AND m.deleted_at IS NULL
+       AND m.fecha_hora >= p_desde::TIMESTAMP AND m.fecha_hora < (p_hasta + 1)::TIMESTAMP
+       AND (p_empleado_id IS NULL OR m.empleado_id = p_empleado_id)
+       AND (p_estado IS NULL OR m.estado = p_estado)
+       AND (p_origen IS NULL OR m.origen = p_origen)
+     ORDER BY m.fecha_hora DESC, m.id DESC
+     LIMIT GREATEST(1, LEAST(COALESCE(p_limite, 1000), 5000));
+END; $$;
+
+
+--
+-- Name: sp_rrhh_marca_registrar(bigint, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_marca_registrar(p_empresa_id bigint, p_datos jsonb) RETURNS TABLE(marca_id bigint, duplicada boolean, tipo character varying, estado character varying, empleado_id bigint)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_emp     BIGINT := NULLIF(p_datos->>'empleado_id', '')::BIGINT;
+    v_fecha   TIMESTAMP := (p_datos->>'fecha_hora')::TIMESTAMP;
+    v_disp    BIGINT := NULLIF(p_datos->>'dispositivo_id', '')::BIGINT;
+    v_ext     VARCHAR := NULLIF(btrim(COALESCE(p_datos->>'id_externo', '')), '');
+    v_ref     VARCHAR := NULLIF(btrim(COALESCE(p_datos->>'referencia_externa', '')), '');
+    v_estado  VARCHAR := COALESCE(p_datos->>'estado', 'valida');
+    v_id      BIGINT;
+    v_tipo    VARCHAR := NULL;
+    v_empl    RECORD;
+BEGIN
+    IF v_fecha IS NULL THEN RAISE EXCEPTION 'MARCA_INVALIDA: Falta la fecha y hora de la marca.'; END IF;
+    IF v_fecha > NOW() + INTERVAL '5 minutes' THEN RAISE EXCEPTION 'MARCA_INVALIDA: La marca no puede estar en el futuro.'; END IF;
+
+    -- Reenvío de una marca de dispositivo ya guardada
+    IF v_disp IS NOT NULL AND v_ref IS NOT NULL THEN
+        SELECT m.id, m.empleado_id, m.estado INTO v_id, v_emp, v_estado
+          FROM rrhh_marcas m WHERE m.dispositivo_id = v_disp AND m.referencia_externa = v_ref;
+        IF FOUND THEN
+            RETURN QUERY SELECT v_id, TRUE, NULL::VARCHAR, v_estado, v_emp; RETURN;
+        END IF;
+        v_estado := COALESCE(p_datos->>'estado', 'valida');
+    END IF;
+
+    -- Usuario del dispositivo → empleado
+    IF v_emp IS NULL AND v_disp IS NOT NULL AND v_ext IS NOT NULL THEN
+        SELECT u.empleado_id INTO v_emp FROM rrhh_dispositivo_usuarios u
+         WHERE u.dispositivo_id = v_disp AND u.id_en_dispositivo = v_ext AND u.empresa_id = p_empresa_id;
+        IF v_emp IS NULL THEN v_estado := 'sin_asignar'; END IF;
+    END IF;
+    IF v_emp IS NULL AND v_estado <> 'sin_asignar' THEN
+        RAISE EXCEPTION 'MARCA_INVALIDA: La marca no indica el empleado.';
+    END IF;
+
+    IF v_emp IS NOT NULL THEN
+        SELECT e.estado, e.fecha_ingreso, e.fecha_salida INTO v_empl
+          FROM rrhh_empleados e WHERE e.id = v_emp AND e.empresa_id = p_empresa_id AND e.deleted_at IS NULL;
+        IF NOT FOUND THEN RAISE EXCEPTION 'REF_INVALIDA: El empleado no existe.'; END IF;
+        IF v_empl.estado = 'liquidado' THEN RAISE EXCEPTION 'EMPLEADO_LIQUIDADO: El expediente está liquidado y no admite marcas.'; END IF;
+
+        SELECT m.id INTO v_id FROM rrhh_marcas m
+         WHERE m.empleado_id = v_emp AND m.deleted_at IS NULL AND m.estado IN ('valida', 'pendiente')
+           AND abs(EXTRACT(EPOCH FROM (m.fecha_hora - v_fecha))) < 60
+         LIMIT 1;
+        IF FOUND THEN
+            RETURN QUERY SELECT v_id, TRUE, NULL::VARCHAR, 'valida'::VARCHAR, v_emp; RETURN;
+        END IF;
+    END IF;
+
+    INSERT INTO rrhh_marcas (empresa_id, empleado_id, fecha_hora, origen, metodo, dispositivo_id, agente_id, id_externo,
+                             referencia_externa, estado, motivo, ip, registrado_por)
+    VALUES (p_empresa_id, v_emp, v_fecha, p_datos->>'origen', COALESCE(p_datos->>'metodo', 'pin'), v_disp,
+            NULLIF(p_datos->>'agente_id', '')::BIGINT, v_ext, v_ref, v_estado, NULLIF(btrim(COALESCE(p_datos->>'motivo', '')), ''),
+            LEFT(p_datos->>'ip', 45), NULLIF(p_datos->>'registrado_por', '')::BIGINT)
+    RETURNING id INTO v_id;
+
+    IF v_disp IS NOT NULL THEN
+        UPDATE rrhh_dispositivos SET ultima_marca = GREATEST(COALESCE(ultima_marca, v_fecha), v_fecha) WHERE id = v_disp;
+    END IF;
+
+    IF v_estado = 'valida' AND v_emp IS NOT NULL THEN
+        SELECT CASE WHEN s.s_entrada_id = v_id THEN 'entrada' ELSE 'salida' END INTO v_tipo
+          FROM fn_rrhh_sesiones(p_empresa_id, v_emp, v_fecha - INTERVAL '2 days', v_fecha + INTERVAL '2 days') s
+         WHERE s.s_entrada_id = v_id OR s.s_salida_id = v_id;
+    END IF;
+
+    RETURN QUERY SELECT v_id, FALSE, v_tipo, v_estado, v_emp;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_marca_resolver(bigint, bigint, boolean, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_marca_resolver(p_id bigint, p_empresa_id bigint, p_aprobar boolean, p_motivo character varying) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_m RECORD;
+BEGIN
+    SELECT m.estado, m.empleado_id INTO v_m FROM rrhh_marcas m WHERE m.id = p_id AND m.empresa_id = p_empresa_id AND m.deleted_at IS NULL;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    IF p_aprobar THEN
+        IF v_m.estado <> 'pendiente' THEN RAISE EXCEPTION 'MARCA_INVALIDA: Solo se pueden aprobar marcas pendientes.'; END IF;
+        UPDATE rrhh_marcas SET estado = 'valida', resuelto_por = NULLIF(current_setting('app.current_user_id', true), '')::BIGINT,
+               resuelto_at = NOW(), updated_at = NOW() WHERE id = p_id;
+    ELSE
+        IF v_m.estado = 'rechazada' THEN RAISE EXCEPTION 'MARCA_INVALIDA: La marca ya estaba rechazada.'; END IF;
+        IF COALESCE(btrim(p_motivo), '') = '' THEN RAISE EXCEPTION 'MARCA_INVALIDA: Indique el motivo.'; END IF;
+        UPDATE rrhh_marcas SET estado = 'rechazada', motivo = LEFT(btrim(p_motivo), 255),
+               resuelto_por = NULLIF(current_setting('app.current_user_id', true), '')::BIGINT, resuelto_at = NOW(), updated_at = NOW()
+         WHERE id = p_id;
+    END IF;
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_organigrama(bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_organigrama(p_empresa_id bigint) RETURNS TABLE(id bigint, jefe_id bigint, nivel integer, nombre_completo character varying, puesto_nombre character varying, departamento_nombre character varying, estado character varying, subordinados_directos bigint, subordinados_total bigint)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    WITH RECURSIVE vigentes AS (
+        SELECT e.* FROM rrhh_empleados e
+        WHERE e.empresa_id = p_empresa_id AND e.deleted_at IS NULL AND e.estado <> 'liquidado'
+    ),
+    arbol AS (
+        SELECT v.id, v.jefe_id, 1 AS nivel, ARRAY[v.id] AS ruta
+          FROM vigentes v
+         WHERE v.jefe_id IS NULL OR v.jefe_id NOT IN (SELECT x.id FROM vigentes x)
+        UNION ALL
+        SELECT v.id, v.jefe_id, a.nivel + 1, a.ruta || v.id
+          FROM vigentes v JOIN arbol a ON v.jefe_id = a.id
+         WHERE NOT v.id = ANY(a.ruta)
+    ),
+    descendientes AS (
+        SELECT a.id AS raiz, a.id AS desc_id FROM arbol a
+        UNION ALL
+        SELECT d.raiz, v.id FROM descendientes d JOIN vigentes v ON v.jefe_id = d.desc_id
+    )
+    SELECT a.id, a.jefe_id, a.nivel,
+           btrim(v.nombre || ' ' || v.apellido1 || ' ' || COALESCE(v.apellido2, ''))::VARCHAR,
+           p.nombre, d.nombre, v.estado,
+           (SELECT COUNT(*) FROM vigentes s WHERE s.jefe_id = a.id),
+           (SELECT COUNT(*) - 1 FROM descendientes ds WHERE ds.raiz = a.id)
+    FROM arbol a
+    JOIN vigentes v ON v.id = a.id
+    LEFT JOIN rrhh_puestos p ON p.id = v.puesto_id
+    LEFT JOIN rrhh_departamentos d ON d.id = v.departamento_id
+    ORDER BY a.nivel, lower(v.apellido1), lower(v.nombre);
+END; $$;
+
+
+--
+-- Name: sp_rrhh_permiso_cancelar(bigint, bigint, bigint, boolean, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_permiso_cancelar(p_empresa_id bigint, p_id bigint, p_actor_empleado_id bigint, p_es_rrhh boolean, p_nota character varying DEFAULT NULL::character varying) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_s    RECORD;
+    v_user BIGINT := NULLIF(current_setting('app.current_user_id', true), '')::BIGINT;
+BEGIN
+    SELECT s.* INTO v_s FROM rrhh_permiso_solicitudes s WHERE s.id = p_id AND s.empresa_id = p_empresa_id AND s.deleted_at IS NULL FOR UPDATE;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    IF NOT p_es_rrhh AND (p_actor_empleado_id IS NULL OR p_actor_empleado_id <> v_s.empleado_id) THEN
+        RAISE EXCEPTION 'PERMISO_INVALIDO: Solo quien pidió el permiso puede cancelarlo.';
+    END IF;
+    IF v_s.estado IN ('pendiente_jefe', 'pendiente_rrhh') THEN
+        NULL;
+    ELSIF v_s.estado = 'aprobada' THEN
+        IF NOT p_es_rrhh THEN RAISE EXCEPTION 'PERMISO_INVALIDO: Un permiso aprobado solo lo puede cancelar Recursos Humanos.'; END IF;
+        IF v_s.fecha_inicio <= CURRENT_DATE THEN RAISE EXCEPTION 'PERMISO_INVALIDO: El permiso ya empezó y no se puede cancelar.'; END IF;
+    ELSE
+        RAISE EXCEPTION 'PERMISO_INVALIDO: La solicitud ya estaba %.', v_s.estado;
+    END IF;
+    UPDATE rrhh_permiso_solicitudes
+       SET estado = 'cancelada', rrhh_resuelto_por = CASE WHEN p_es_rrhh THEN v_user ELSE rrhh_resuelto_por END,
+           rrhh_resuelto_at = CASE WHEN p_es_rrhh THEN NOW() ELSE rrhh_resuelto_at END,
+           rrhh_nota = CASE WHEN p_es_rrhh THEN NULLIF(btrim(COALESCE(p_nota, '')), '') ELSE rrhh_nota END, updated_at = NOW()
+     WHERE id = p_id;
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_permiso_list(bigint, character varying, bigint, date, date, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_permiso_list(p_empresa_id bigint, p_estado character varying DEFAULT NULL::character varying, p_empleado_id bigint DEFAULT NULL::bigint, p_desde date DEFAULT NULL::date, p_hasta date DEFAULT NULL::date, p_jefe_id bigint DEFAULT NULL::bigint) RETURNS TABLE(id bigint, empleado_id bigint, empleado_codigo character varying, empleado_nombre character varying, departamento_id bigint, departamento_nombre character varying, tipo_id bigint, tipo_nombre character varying, unidad character varying, con_goce boolean, fecha_inicio date, fecha_fin date, hora_inicio time without time zone, hora_fin time without time zone, cantidad numeric, estado character varying, jefe_id bigint, jefe_nombre character varying, motivo character varying, jefe_resuelto_at timestamp without time zone, jefe_nota character varying, rrhh_resuelto_at timestamp without time zone, rrhh_nota character varying, created_at timestamp without time zone)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT s.id, s.empleado_id, e.codigo::VARCHAR, btrim(e.nombre || ' ' || e.apellido1 || ' ' || COALESCE(e.apellido2, ''))::VARCHAR,
+           e.departamento_id, dp.nombre::VARCHAR, s.tipo_id, t.nombre::VARCHAR, s.unidad::VARCHAR, s.con_goce, s.fecha_inicio, s.fecha_fin,
+           s.hora_inicio, s.hora_fin, s.cantidad, s.estado::VARCHAR, s.jefe_id,
+           btrim(j.nombre || ' ' || j.apellido1 || ' ' || COALESCE(j.apellido2, ''))::VARCHAR, s.motivo::VARCHAR,
+           s.jefe_resuelto_at, s.jefe_nota::VARCHAR, s.rrhh_resuelto_at, s.rrhh_nota::VARCHAR, s.created_at
+      FROM rrhh_permiso_solicitudes s
+      JOIN rrhh_empleados e ON e.id = s.empleado_id
+      JOIN rrhh_permiso_tipos t ON t.id = s.tipo_id
+      LEFT JOIN rrhh_departamentos dp ON dp.id = e.departamento_id
+      LEFT JOIN rrhh_empleados j ON j.id = s.jefe_id
+     WHERE s.empresa_id = p_empresa_id AND s.deleted_at IS NULL
+       AND (p_estado IS NULL OR s.estado = p_estado)
+       AND (p_empleado_id IS NULL OR s.empleado_id = p_empleado_id)
+       AND (p_jefe_id IS NULL OR s.jefe_id = p_jefe_id)
+       AND (p_desde IS NULL OR s.fecha_fin >= p_desde)
+       AND (p_hasta IS NULL OR s.fecha_inicio <= p_hasta)
+     ORDER BY (s.estado IN ('pendiente_jefe', 'pendiente_rrhh')) DESC, s.fecha_inicio DESC, s.id DESC
+     LIMIT 500;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_permiso_previsualizar(bigint, bigint, bigint, date, date, time without time zone, time without time zone); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_permiso_previsualizar(p_empresa_id bigint, p_empleado_id bigint, p_tipo_id bigint, p_inicio date, p_fin date, p_hi time without time zone, p_hf time without time zone) RETURNS TABLE(cantidad numeric, unidad character varying, con_goce boolean, usado_anio numeric, max_por_solicitud numeric, max_por_anio numeric, valida boolean, mensaje character varying)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_t   RECORD;
+    v_msg VARCHAR := NULL;
+BEGIN
+    SELECT t.* INTO v_t FROM rrhh_permiso_tipos t WHERE t.id = p_tipo_id AND t.empresa_id = p_empresa_id AND t.deleted_at IS NULL;
+    IF NOT FOUND THEN RAISE EXCEPTION 'PERMISO_INVALIDO: El tipo de permiso no existe.'; END IF;
+    IF NOT EXISTS (SELECT 1 FROM rrhh_empleados e WHERE e.id = p_empleado_id AND e.empresa_id = p_empresa_id AND e.deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'REF_INVALIDA: El empleado no existe.';
+    END IF;
+
+    unidad := v_t.unidad; con_goce := v_t.con_goce; max_por_solicitud := v_t.max_por_solicitud; max_por_anio := v_t.max_por_anio;
+    IF v_t.unidad = 'horas' THEN
+        cantidad := CASE WHEN p_hi IS NOT NULL AND p_hf IS NOT NULL AND p_hf > p_hi THEN round(EXTRACT(EPOCH FROM (p_hf - p_hi)) / 3600.0, 2) ELSE 0 END;
+    ELSE
+        cantidad := CASE WHEN p_fin >= p_inicio AND p_fin - p_inicio <= 400 THEN fn_rrhh_dias_habiles(p_empresa_id, p_empleado_id, p_inicio, p_fin) ELSE 0 END;
+    END IF;
+    SELECT COALESCE(SUM(s.cantidad), 0) INTO usado_anio FROM rrhh_permiso_solicitudes s
+     WHERE s.empleado_id = p_empleado_id AND s.tipo_id = p_tipo_id AND s.deleted_at IS NULL
+       AND s.estado IN ('pendiente_jefe', 'pendiente_rrhh', 'aprobada') AND EXTRACT(YEAR FROM s.fecha_inicio) = EXTRACT(YEAR FROM p_inicio);
+    BEGIN
+        PERFORM fn_rrhh_permiso_validar(p_empresa_id, p_empleado_id, p_tipo_id, p_inicio, p_fin, p_hi, p_hf, NULL);
+    EXCEPTION WHEN OTHERS THEN
+        v_msg := regexp_replace(SQLERRM, '^[A-Z_]+:\s*', '');
+    END;
+    valida := v_msg IS NULL;
+    mensaje := v_msg;
+    RETURN NEXT;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_permiso_resolver(bigint, bigint, character varying, boolean, character varying, bigint, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_permiso_resolver(p_empresa_id bigint, p_id bigint, p_etapa character varying, p_aprobar boolean, p_nota character varying, p_actor_empleado_id bigint DEFAULT NULL::bigint, p_omitir_jefe boolean DEFAULT false) RETURNS character varying
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_s     RECORD;
+    v_nota  VARCHAR := NULLIF(btrim(COALESCE(p_nota, '')), '');
+    v_user  BIGINT := NULLIF(current_setting('app.current_user_id', true), '')::BIGINT;
+    v_cant  NUMERIC;
+BEGIN
+    SELECT s.* INTO v_s FROM rrhh_permiso_solicitudes s WHERE s.id = p_id AND s.empresa_id = p_empresa_id AND s.deleted_at IS NULL FOR UPDATE;
+    IF NOT FOUND THEN RETURN NULL; END IF;
+    IF p_actor_empleado_id IS NOT NULL AND p_actor_empleado_id = v_s.empleado_id THEN
+        RAISE EXCEPTION 'PERMISO_INVALIDO: No puede resolver su propia solicitud.';
+    END IF;
+
+    IF p_etapa = 'jefe' THEN
+        IF v_s.estado <> 'pendiente_jefe' THEN RAISE EXCEPTION 'PERMISO_INVALIDO: La solicitud ya no espera la aprobación del jefe.'; END IF;
+        IF p_actor_empleado_id IS NULL OR p_actor_empleado_id IS DISTINCT FROM v_s.jefe_id THEN
+            RAISE EXCEPTION 'PERMISO_INVALIDO: Solo el jefe inmediato del empleado puede resolver esta etapa.';
+        END IF;
+        IF NOT p_aprobar AND v_nota IS NULL THEN RAISE EXCEPTION 'PERMISO_INVALIDO: Indique el motivo del rechazo.'; END IF;
+        UPDATE rrhh_permiso_solicitudes
+           SET estado = CASE WHEN p_aprobar THEN 'pendiente_rrhh' ELSE 'rechazada' END,
+               jefe_resuelto_por = v_user, jefe_resuelto_at = NOW(), jefe_nota = v_nota, updated_at = NOW()
+         WHERE id = p_id;
+        RETURN CASE WHEN p_aprobar THEN 'pendiente_rrhh' ELSE 'rechazada' END;
+    END IF;
+
+    IF p_etapa <> 'rrhh' THEN RAISE EXCEPTION 'PERMISO_INVALIDO: Etapa desconocida.'; END IF;
+    IF v_s.estado = 'pendiente_jefe' THEN
+        IF NOT p_omitir_jefe THEN RAISE EXCEPTION 'PERMISO_INVALIDO: Falta la aprobación del jefe inmediato.'; END IF;
+        IF v_nota IS NULL THEN RAISE EXCEPTION 'PERMISO_INVALIDO: Indique por qué se resuelve sin el jefe.'; END IF;
+    ELSIF v_s.estado <> 'pendiente_rrhh' THEN
+        RAISE EXCEPTION 'PERMISO_INVALIDO: La solicitud ya no está pendiente.';
+    END IF;
+    IF NOT p_aprobar AND v_nota IS NULL THEN RAISE EXCEPTION 'PERMISO_INVALIDO: Indique el motivo del rechazo.'; END IF;
+
+    IF p_aprobar THEN
+        -- Se vuelve a validar: desde que se pidió pudo cambiar el horario, un tope o aparecer otra ausencia.
+        v_cant := fn_rrhh_permiso_validar(p_empresa_id, v_s.empleado_id, v_s.tipo_id, v_s.fecha_inicio, v_s.fecha_fin, v_s.hora_inicio, v_s.hora_fin, v_s.id);
+    END IF;
+    UPDATE rrhh_permiso_solicitudes
+       SET estado = CASE WHEN p_aprobar THEN 'aprobada' ELSE 'rechazada' END,
+           cantidad = COALESCE(v_cant, cantidad),
+           rrhh_resuelto_por = v_user, rrhh_resuelto_at = NOW(), rrhh_nota = v_nota, updated_at = NOW()
+     WHERE id = p_id;
+    RETURN CASE WHEN p_aprobar THEN 'aprobada' ELSE 'rechazada' END;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_permiso_solicitar(bigint, bigint, bigint, date, date, time without time zone, time without time zone, character varying, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_permiso_solicitar(p_empresa_id bigint, p_empleado_id bigint, p_tipo_id bigint, p_inicio date, p_fin date, p_hi time without time zone, p_hf time without time zone, p_motivo character varying, p_directa boolean DEFAULT false) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_cant   NUMERIC;
+    v_t      RECORD;
+    v_jefe   BIGINT;
+    v_estado VARCHAR;
+    v_user   BIGINT := NULLIF(current_setting('app.current_user_id', true), '')::BIGINT;
+    v_id     BIGINT;
+BEGIN
+    IF p_inicio < CURRENT_DATE AND NOT p_directa THEN
+        RAISE EXCEPTION 'FECHA_INVALIDA: La fecha del permiso no puede ser anterior a hoy.';
+    END IF;
+    v_cant := fn_rrhh_permiso_validar(p_empresa_id, p_empleado_id, p_tipo_id, p_inicio, p_fin, p_hi, p_hf, NULL);
+    SELECT t.unidad, t.con_goce INTO v_t FROM rrhh_permiso_tipos t WHERE t.id = p_tipo_id;
+
+    SELECT j.id INTO v_jefe FROM rrhh_empleados e
+      JOIN rrhh_empleados j ON j.id = e.jefe_id AND j.deleted_at IS NULL AND j.estado = 'activo'
+     WHERE e.id = p_empleado_id;
+
+    v_estado := CASE WHEN p_directa THEN 'aprobada' WHEN v_jefe IS NOT NULL THEN 'pendiente_jefe' ELSE 'pendiente_rrhh' END;
+    INSERT INTO rrhh_permiso_solicitudes (empresa_id, empleado_id, tipo_id, fecha_inicio, fecha_fin, hora_inicio, hora_fin, cantidad, unidad, con_goce,
+                                          estado, jefe_id, motivo, creada_por, rrhh_resuelto_por, rrhh_resuelto_at, rrhh_nota)
+    VALUES (p_empresa_id, p_empleado_id, p_tipo_id, p_inicio, p_fin,
+            CASE WHEN v_t.unidad = 'horas' THEN p_hi END, CASE WHEN v_t.unidad = 'horas' THEN p_hf END,
+            v_cant, v_t.unidad, v_t.con_goce, v_estado, v_jefe, NULLIF(btrim(COALESCE(p_motivo, '')), ''), v_user,
+            CASE WHEN p_directa THEN v_user END, CASE WHEN p_directa THEN NOW() END, CASE WHEN p_directa THEN 'Registrado directamente por RRHH' END)
+    RETURNING id INTO v_id;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_permiso_tipo_cargar(bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_permiso_tipo_cargar(p_empresa_id bigint) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_n INTEGER;
+BEGIN
+    WITH sug (nombre, unidad, con_goce, max_sol, max_anio, descr) AS (
+        VALUES ('Cita médica', 'horas', TRUE, 4::NUMERIC, NULL::NUMERIC, 'Consulta o examen médico propio, con comprobante.'),
+               ('Fallecimiento de un familiar', 'dias', TRUE, 3, NULL, 'Duelo por familiar cercano.'),
+               ('Matrimonio', 'dias', TRUE, 3, NULL, NULL),
+               ('Calamidad doméstica', 'dias', TRUE, 2, NULL, 'Imprevisto grave en el hogar.'),
+               ('Lactancia', 'horas', TRUE, 1, NULL, 'Tiempo para lactar o extraer leche.'),
+               ('Estudio o examen', 'horas', FALSE, 8, NULL, NULL),
+               ('Asunto personal', 'dias', FALSE, NULL, NULL, 'Permiso sin goce de salario.')
+    ), ins AS (
+        INSERT INTO rrhh_permiso_tipos (empresa_id, nombre, unidad, con_goce, max_por_solicitud, max_por_anio, descripcion)
+        SELECT p_empresa_id, s.nombre, s.unidad, s.con_goce, s.max_sol, s.max_anio, s.descr FROM sug s
+         WHERE NOT EXISTS (SELECT 1 FROM rrhh_permiso_tipos t WHERE t.empresa_id = p_empresa_id AND lower(t.nombre) = lower(s.nombre) AND t.deleted_at IS NULL)
+        RETURNING 1
+    )
+    SELECT COUNT(*)::INTEGER INTO v_n FROM ins;
+    RETURN v_n;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_permiso_tipo_create(bigint, character varying, character varying, boolean, numeric, numeric, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_permiso_tipo_create(p_empresa_id bigint, p_nombre character varying, p_unidad character varying, p_con_goce boolean, p_max_solicitud numeric, p_max_anio numeric, p_descripcion character varying) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_id BIGINT; v_nombre VARCHAR := btrim(COALESCE(p_nombre, ''));
+BEGIN
+    IF v_nombre = '' THEN RAISE EXCEPTION 'PERMISO_INVALIDO: Indique el nombre del tipo de permiso.'; END IF;
+    IF p_unidad NOT IN ('dias', 'horas') THEN RAISE EXCEPTION 'PERMISO_INVALIDO: La unidad debe ser días u horas.'; END IF;
+    IF EXISTS (SELECT 1 FROM rrhh_permiso_tipos t WHERE t.empresa_id = p_empresa_id AND lower(t.nombre) = lower(v_nombre) AND t.deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'PERMISO_INVALIDO: Ya existe un tipo de permiso con ese nombre.';
+    END IF;
+    INSERT INTO rrhh_permiso_tipos (empresa_id, nombre, unidad, con_goce, max_por_solicitud, max_por_anio, descripcion)
+    VALUES (p_empresa_id, v_nombre, p_unidad, COALESCE(p_con_goce, TRUE), p_max_solicitud, p_max_anio, NULLIF(btrim(COALESCE(p_descripcion, '')), ''))
+    RETURNING id INTO v_id;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_permiso_tipo_delete(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_permiso_tipo_delete(p_empresa_id bigint, p_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_n INTEGER;
+BEGIN
+    IF EXISTS (SELECT 1 FROM rrhh_permiso_solicitudes s WHERE s.tipo_id = p_id AND s.empresa_id = p_empresa_id AND s.deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'PERMISO_INVALIDO: Este tipo ya tiene solicitudes; en lugar de eliminarlo, desactívelo.';
+    END IF;
+    UPDATE rrhh_permiso_tipos SET deleted_at = NOW(), updated_at = NOW() WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
+    GET DIAGNOSTICS v_n = ROW_COUNT;
+    RETURN v_n > 0;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_permiso_tipo_list(bigint, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_permiso_tipo_list(p_empresa_id bigint, p_solo_activos boolean DEFAULT false) RETURNS TABLE(id bigint, nombre character varying, unidad character varying, con_goce boolean, max_por_solicitud numeric, max_por_anio numeric, descripcion character varying, is_active boolean, usos bigint)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT t.id, t.nombre::VARCHAR, t.unidad::VARCHAR, t.con_goce, t.max_por_solicitud, t.max_por_anio, t.descripcion::VARCHAR, t.is_active,
+           (SELECT COUNT(*) FROM rrhh_permiso_solicitudes s WHERE s.tipo_id = t.id AND s.deleted_at IS NULL)
+      FROM rrhh_permiso_tipos t
+     WHERE t.empresa_id = p_empresa_id AND t.deleted_at IS NULL AND (NOT p_solo_activos OR t.is_active)
+     ORDER BY lower(t.nombre);
+END; $$;
+
+
+--
+-- Name: sp_rrhh_permiso_tipo_update(bigint, bigint, character varying, character varying, boolean, numeric, numeric, character varying, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_permiso_tipo_update(p_empresa_id bigint, p_id bigint, p_nombre character varying, p_unidad character varying, p_con_goce boolean, p_max_solicitud numeric, p_max_anio numeric, p_descripcion character varying, p_is_active boolean) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_t RECORD; v_nombre VARCHAR := btrim(COALESCE(p_nombre, ''));
+BEGIN
+    SELECT t.* INTO v_t FROM rrhh_permiso_tipos t WHERE t.id = p_id AND t.empresa_id = p_empresa_id AND t.deleted_at IS NULL FOR UPDATE;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    IF v_nombre = '' THEN RAISE EXCEPTION 'PERMISO_INVALIDO: Indique el nombre del tipo de permiso.'; END IF;
+    IF p_unidad NOT IN ('dias', 'horas') THEN RAISE EXCEPTION 'PERMISO_INVALIDO: La unidad debe ser días u horas.'; END IF;
+    IF p_unidad <> v_t.unidad AND EXISTS (SELECT 1 FROM rrhh_permiso_solicitudes s WHERE s.tipo_id = p_id AND s.deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'PERMISO_INVALIDO: Este tipo ya tiene solicitudes; no se puede cambiar entre días y horas. Cree otro tipo.';
+    END IF;
+    IF EXISTS (SELECT 1 FROM rrhh_permiso_tipos t WHERE t.empresa_id = p_empresa_id AND lower(t.nombre) = lower(v_nombre) AND t.deleted_at IS NULL AND t.id <> p_id) THEN
+        RAISE EXCEPTION 'PERMISO_INVALIDO: Ya existe un tipo de permiso con ese nombre.';
+    END IF;
+    UPDATE rrhh_permiso_tipos
+       SET nombre = v_nombre, unidad = p_unidad, con_goce = COALESCE(p_con_goce, con_goce), max_por_solicitud = p_max_solicitud,
+           max_por_anio = p_max_anio, descripcion = NULLIF(btrim(COALESCE(p_descripcion, '')), ''), is_active = COALESCE(p_is_active, is_active),
+           updated_at = NOW()
+     WHERE id = p_id;
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_pin_get(bigint, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_pin_get(p_empresa_id bigint, p_codigo character varying) RETURNS TABLE(empleado_id bigint, nombre character varying, estado character varying, pin_hash character varying, bloqueado boolean, bloqueado_hasta timestamp without time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT e.id, btrim(e.nombre || ' ' || e.apellido1)::VARCHAR, e.estado, p.pin_hash,
+           (p.bloqueado_hasta IS NOT NULL AND p.bloqueado_hasta > NOW()), p.bloqueado_hasta
+      FROM rrhh_empleados e
+      LEFT JOIN rrhh_empleado_pin p ON p.empleado_id = e.id
+     WHERE e.empresa_id = p_empresa_id AND e.deleted_at IS NULL AND lower(e.codigo) = lower(btrim(p_codigo));
+END; $$;
+
+
+--
+-- Name: sp_rrhh_pin_resultado(bigint, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_pin_resultado(p_empleado_id bigint, p_ok boolean) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    IF p_ok THEN
+        UPDATE rrhh_empleado_pin SET intentos = 0, bloqueado_hasta = NULL WHERE empleado_id = p_empleado_id AND (intentos > 0 OR bloqueado_hasta IS NOT NULL);
+    ELSE
+        UPDATE rrhh_empleado_pin SET
+            intentos = CASE WHEN intentos + 1 >= 5 THEN 0 ELSE intentos + 1 END,
+            bloqueado_hasta = CASE WHEN intentos + 1 >= 5 THEN NOW() + INTERVAL '10 minutes' ELSE bloqueado_hasta END
+         WHERE empleado_id = p_empleado_id;
+    END IF;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_pin_set(bigint, bigint, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_pin_set(p_empresa_id bigint, p_empleado_id bigint, p_hash character varying) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM rrhh_empleados WHERE id = p_empleado_id AND empresa_id = p_empresa_id AND deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'REF_INVALIDA: El empleado no existe.';
+    END IF;
+    INSERT INTO rrhh_empleado_pin (empleado_id, empresa_id, pin_hash) VALUES (p_empleado_id, p_empresa_id, p_hash)
+    ON CONFLICT (empleado_id) DO UPDATE SET pin_hash = EXCLUDED.pin_hash, intentos = 0, bloqueado_hasta = NULL, cambiado_at = NOW();
+    PERFORM fn_rrhh_movimiento(p_empresa_id, p_empleado_id, 'pin', 'PIN de marca asignado o restablecido');
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_puesto_create(bigint, character varying, character varying, bigint, character varying, numeric, numeric); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_puesto_create(p_empresa_id bigint, p_nombre character varying, p_descripcion character varying, p_departamento_id bigint, p_categoria character varying, p_salario_minimo numeric, p_salario_maximo numeric) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_id BIGINT;
+BEGIN
+    IF p_departamento_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM rrhh_departamentos WHERE id = p_departamento_id AND empresa_id = p_empresa_id AND deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'REF_INVALIDA: El departamento indicado no existe.';
+    END IF;
+    INSERT INTO rrhh_puestos (empresa_id, nombre, descripcion, departamento_id, categoria, salario_minimo, salario_maximo)
+    VALUES (p_empresa_id, btrim(p_nombre), NULLIF(btrim(COALESCE(p_descripcion, '')), ''), p_departamento_id,
+            NULLIF(p_categoria, ''), p_salario_minimo, p_salario_maximo)
+    RETURNING rrhh_puestos.id INTO v_id;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_puesto_get(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_puesto_get(p_id bigint, p_empresa_id bigint) RETURNS TABLE(id bigint, empresa_id bigint, nombre character varying, descripcion character varying, departamento_id bigint, categoria character varying, salario_minimo numeric, salario_maximo numeric, is_active boolean, deleted_at timestamp without time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT p.id, p.empresa_id, p.nombre, p.descripcion, p.departamento_id, p.categoria,
+           p.salario_minimo, p.salario_maximo, p.is_active, p.deleted_at
+    FROM rrhh_puestos p WHERE p.id = p_id AND p.empresa_id = p_empresa_id;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_puesto_list(bigint, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_puesto_list(p_empresa_id bigint, p_eliminados boolean DEFAULT false) RETURNS TABLE(id bigint, empresa_id bigint, nombre character varying, descripcion character varying, departamento_id bigint, departamento_nombre character varying, categoria character varying, salario_minimo numeric, salario_maximo numeric, is_active boolean, deleted_at timestamp without time zone, empleados bigint)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT p.id, p.empresa_id, p.nombre, p.descripcion, p.departamento_id, d.nombre, p.categoria,
+           p.salario_minimo, p.salario_maximo, p.is_active, p.deleted_at,
+           (SELECT COUNT(*) FROM rrhh_empleados e
+             WHERE e.puesto_id = p.id AND e.deleted_at IS NULL AND e.estado <> 'liquidado')
+    FROM rrhh_puestos p
+    LEFT JOIN rrhh_departamentos d ON d.id = p.departamento_id
+    WHERE p.empresa_id = p_empresa_id
+      AND ((p_eliminados AND p.deleted_at IS NOT NULL) OR (NOT p_eliminados AND p.deleted_at IS NULL))
+    ORDER BY lower(p.nombre);
+END; $$;
+
+
+--
+-- Name: sp_rrhh_puesto_restore(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_puesto_restore(p_id bigint, p_empresa_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    UPDATE rrhh_puestos SET deleted_at = NULL, is_active = TRUE, updated_at = NOW()
+    WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NOT NULL;
+    RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_puesto_soft_delete(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_puesto_soft_delete(p_id bigint, p_empresa_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_n BIGINT;
+BEGIN
+    SELECT COUNT(*) INTO v_n FROM rrhh_empleados
+     WHERE puesto_id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL AND estado <> 'liquidado';
+    IF v_n > 0 THEN
+        RAISE EXCEPTION 'PUESTO_EN_USO: El puesto lo ocupan % empleado(s); cámbieles el puesto antes de eliminarlo.', v_n;
+    END IF;
+    UPDATE rrhh_puestos SET is_active = FALSE, deleted_at = NOW(), updated_at = NOW()
+    WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
+    RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_puesto_update(bigint, bigint, character varying, character varying, bigint, character varying, numeric, numeric, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_puesto_update(p_id bigint, p_empresa_id bigint, p_nombre character varying, p_descripcion character varying, p_departamento_id bigint, p_categoria character varying, p_salario_minimo numeric, p_salario_maximo numeric, p_is_active boolean) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    IF p_departamento_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM rrhh_departamentos WHERE id = p_departamento_id AND empresa_id = p_empresa_id AND deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'REF_INVALIDA: El departamento indicado no existe.';
+    END IF;
+    UPDATE rrhh_puestos SET
+        nombre = btrim(p_nombre), descripcion = NULLIF(btrim(COALESCE(p_descripcion, '')), ''),
+        departamento_id = p_departamento_id, categoria = NULLIF(p_categoria, ''),
+        salario_minimo = p_salario_minimo, salario_maximo = p_salario_maximo,
+        is_active = p_is_active, updated_at = NOW()
+    WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
+    RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_vac_calendario(bigint, date, date, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_vac_calendario(p_empresa_id bigint, p_desde date, p_hasta date, p_departamento_id bigint DEFAULT NULL::bigint) RETURNS TABLE(id bigint, empleado_id bigint, empleado_nombre character varying, departamento_id bigint, departamento_nombre character varying, departamento_total integer, fecha_inicio date, fecha_fin date, dias integer, estado character varying)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    IF p_hasta < p_desde THEN RAISE EXCEPTION 'FECHA_INVALIDA: La fecha final es anterior a la inicial.'; END IF;
+    IF p_hasta - p_desde > 92 THEN RAISE EXCEPTION 'FECHA_INVALIDA: El rango de fechas no puede pasar de 93 días.'; END IF;
+    RETURN QUERY
+    SELECT s.id, s.empleado_id, btrim(e.nombre || ' ' || e.apellido1 || ' ' || COALESCE(e.apellido2, ''))::VARCHAR,
+           e.departamento_id, dp.nombre::VARCHAR,
+           (SELECT COUNT(*)::INTEGER FROM rrhh_empleados x WHERE x.empresa_id = p_empresa_id AND x.deleted_at IS NULL AND x.estado = 'activo'
+               AND x.departamento_id IS NOT DISTINCT FROM e.departamento_id),
+           s.fecha_inicio, s.fecha_fin, s.dias, s.estado::VARCHAR
+      FROM rrhh_vacaciones_solicitudes s
+      JOIN rrhh_empleados e ON e.id = s.empleado_id
+      LEFT JOIN rrhh_departamentos dp ON dp.id = e.departamento_id
+     WHERE s.empresa_id = p_empresa_id AND s.deleted_at IS NULL AND s.estado IN ('pendiente_jefe', 'pendiente_rrhh', 'aprobada')
+       AND s.fecha_inicio <= p_hasta AND s.fecha_fin >= p_desde
+       AND (p_departamento_id IS NULL OR e.departamento_id = p_departamento_id)
+     ORDER BY dp.nombre NULLS LAST, s.fecha_inicio, e.nombre;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_vac_cancelar(bigint, bigint, bigint, boolean, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_vac_cancelar(p_empresa_id bigint, p_id bigint, p_actor_empleado_id bigint, p_es_rrhh boolean, p_nota character varying DEFAULT NULL::character varying) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_s    RECORD;
+    v_user BIGINT := NULLIF(current_setting('app.current_user_id', true), '')::BIGINT;
+BEGIN
+    SELECT s.* INTO v_s FROM rrhh_vacaciones_solicitudes s WHERE s.id = p_id AND s.empresa_id = p_empresa_id AND s.deleted_at IS NULL FOR UPDATE;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    IF NOT p_es_rrhh AND (p_actor_empleado_id IS NULL OR p_actor_empleado_id <> v_s.empleado_id) THEN
+        RAISE EXCEPTION 'VACACIONES_INVALIDAS: Solo quien solicitó las vacaciones puede cancelarlas.';
+    END IF;
+    IF v_s.estado IN ('pendiente_jefe', 'pendiente_rrhh') THEN
+        NULL;
+    ELSIF v_s.estado = 'aprobada' THEN
+        IF NOT p_es_rrhh THEN RAISE EXCEPTION 'VACACIONES_INVALIDAS: Una solicitud aprobada solo la puede cancelar Recursos Humanos.'; END IF;
+        IF v_s.fecha_inicio <= CURRENT_DATE THEN RAISE EXCEPTION 'VACACIONES_INVALIDAS: Las vacaciones ya empezaron; corrija el saldo con un ajuste.'; END IF;
+    ELSE
+        RAISE EXCEPTION 'VACACIONES_INVALIDAS: La solicitud ya estaba %.', v_s.estado;
+    END IF;
+    UPDATE rrhh_vacaciones_solicitudes
+       SET estado = 'cancelada', rrhh_resuelto_por = CASE WHEN p_es_rrhh THEN v_user ELSE rrhh_resuelto_por END,
+           rrhh_resuelto_at = CASE WHEN p_es_rrhh THEN NOW() ELSE rrhh_resuelto_at END,
+           rrhh_nota = CASE WHEN p_es_rrhh THEN NULLIF(btrim(COALESCE(p_nota, '')), '') ELSE rrhh_nota END, updated_at = NOW()
+     WHERE id = p_id;
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_vac_mov_eliminar(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_vac_mov_eliminar(p_empresa_id bigint, p_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_n INTEGER;
+BEGIN
+    UPDATE rrhh_vacaciones_movimientos SET deleted_at = NOW(), updated_at = NOW() WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
+    GET DIAGNOSTICS v_n = ROW_COUNT;
+    RETURN v_n > 0;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_vac_mov_guardar(bigint, bigint, character varying, numeric, date, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_vac_mov_guardar(p_empresa_id bigint, p_empleado_id bigint, p_tipo character varying, p_dias numeric, p_fecha date, p_motivo character varying) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_user   BIGINT := NULLIF(current_setting('app.current_user_id', true), '')::BIGINT;
+    v_motivo VARCHAR := NULLIF(btrim(COALESCE(p_motivo, '')), '');
+    v_dias   NUMERIC := p_dias;
+    v_id     BIGINT;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM rrhh_empleados WHERE id = p_empleado_id AND empresa_id = p_empresa_id AND deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'REF_INVALIDA: El empleado no existe.';
+    END IF;
+    IF p_tipo = 'saldo_inicial' THEN
+        -- Se recibe lo ya disfrutado (positivo) y se guarda como descuento.
+        IF p_dias IS NULL OR p_dias <= 0 THEN RAISE EXCEPTION 'VACACIONES_INVALIDAS: Indique cuántos días ya disfrutó (mayor que cero).'; END IF;
+        v_dias := -p_dias;
+        UPDATE rrhh_vacaciones_movimientos SET dias = v_dias, fecha = p_fecha, motivo = v_motivo, usuario_id = v_user, updated_at = NOW()
+         WHERE empleado_id = p_empleado_id AND tipo = 'saldo_inicial' AND deleted_at IS NULL
+        RETURNING id INTO v_id;
+    ELSIF p_tipo = 'ajuste' THEN
+        IF p_dias IS NULL OR p_dias = 0 THEN RAISE EXCEPTION 'VACACIONES_INVALIDAS: El ajuste no puede ser cero.'; END IF;
+        IF v_motivo IS NULL THEN RAISE EXCEPTION 'VACACIONES_INVALIDAS: Indique el motivo del ajuste.'; END IF;
+    ELSE
+        RAISE EXCEPTION 'VACACIONES_INVALIDAS: Tipo de movimiento desconocido.';
+    END IF;
+    IF v_id IS NULL THEN
+        INSERT INTO rrhh_vacaciones_movimientos (empresa_id, empleado_id, tipo, dias, fecha, motivo, usuario_id)
+        VALUES (p_empresa_id, p_empleado_id, p_tipo, v_dias, p_fecha, v_motivo, v_user) RETURNING id INTO v_id;
+    END IF;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_vac_mov_list(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_vac_mov_list(p_empresa_id bigint, p_empleado_id bigint) RETURNS TABLE(id bigint, tipo character varying, dias numeric, fecha date, motivo character varying, usuario_id bigint, created_at timestamp without time zone)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT m.id, m.tipo::VARCHAR, m.dias, m.fecha, m.motivo::VARCHAR, m.usuario_id, m.created_at
+      FROM rrhh_vacaciones_movimientos m
+     WHERE m.empresa_id = p_empresa_id AND m.empleado_id = p_empleado_id AND m.deleted_at IS NULL
+     ORDER BY m.created_at DESC, m.id DESC;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_vac_pagos(bigint, date, date, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_vac_pagos(p_empresa_id bigint, p_desde date, p_hasta date, p_empleado_id bigint DEFAULT NULL::bigint) RETURNS TABLE(solicitud_id bigint, empleado_id bigint, empleado_codigo character varying, empleado_nombre character varying, fecha_inicio date, fecha_fin date, dias integer, valor_dia numeric, extras_dia numeric, promedio_dia numeric, monto numeric, monto_ordinario numeric, monto_extras numeric)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    IF p_hasta < p_desde THEN RAISE EXCEPTION 'FECHA_INVALIDA: La fecha final es anterior a la inicial.'; END IF;
+    IF p_hasta - p_desde > 366 THEN RAISE EXCEPTION 'FECHA_INVALIDA: El rango de fechas no puede pasar de un año.'; END IF;
+    RETURN QUERY
+    SELECT s.id, s.empleado_id, e.codigo::VARCHAR, btrim(e.nombre || ' ' || e.apellido1 || ' ' || COALESCE(e.apellido2, ''))::VARCHAR,
+           s.fecha_inicio, s.fecha_fin, s.dias, t.valor_dia, t.extras_dia, t.promedio_dia,
+           round(s.dias * t.promedio_dia, 2), round(s.dias * t.valor_dia, 2), round(s.dias * t.extras_dia, 2)
+      FROM rrhh_vacaciones_solicitudes s
+      JOIN rrhh_empleados e ON e.id = s.empleado_id
+      CROSS JOIN LATERAL fn_rrhh_vac_tarifa(p_empresa_id, s.empleado_id, s.fecha_inicio) t
+     WHERE s.empresa_id = p_empresa_id AND s.deleted_at IS NULL AND s.estado = 'aprobada'
+       AND s.fecha_inicio BETWEEN p_desde AND p_hasta AND (p_empleado_id IS NULL OR s.empleado_id = p_empleado_id)
+     ORDER BY s.fecha_inicio, e.nombre;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_vac_previsualizar(bigint, bigint, date, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_vac_previsualizar(p_empresa_id bigint, p_empleado_id bigint, p_inicio date, p_fin date) RETURNS TABLE(dias integer, disponible numeric, elegible_desde date, valida boolean, mensaje character varying)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_ing DATE;
+    v_msg VARCHAR := NULL;
+BEGIN
+    SELECT e.fecha_ingreso INTO v_ing FROM rrhh_empleados e WHERE e.id = p_empleado_id AND e.empresa_id = p_empresa_id AND e.deleted_at IS NULL;
+    IF NOT FOUND THEN RAISE EXCEPTION 'REF_INVALIDA: El empleado no existe.'; END IF;
+    dias := CASE WHEN p_fin >= p_inicio AND p_fin - p_inicio <= 400 THEN fn_rrhh_dias_habiles(p_empresa_id, p_empleado_id, p_inicio, p_fin) ELSE 0 END;
+    disponible := fn_rrhh_vac_devengado(p_empleado_id, p_inicio) + fn_rrhh_vac_movimientos(p_empleado_id) - fn_rrhh_vac_reservado(p_empleado_id, NULL);
+    elegible_desde := v_ing + 350;
+    BEGIN
+        PERFORM fn_rrhh_vac_validar(p_empresa_id, p_empleado_id, p_inicio, p_fin, NULL);
+    EXCEPTION WHEN OTHERS THEN
+        v_msg := regexp_replace(SQLERRM, '^[A-Z_]+:\s*', '');
+    END;
+    valida := v_msg IS NULL;
+    mensaje := v_msg;
+    RETURN NEXT;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_vac_resolver(bigint, bigint, character varying, boolean, character varying, bigint, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_vac_resolver(p_empresa_id bigint, p_id bigint, p_etapa character varying, p_aprobar boolean, p_nota character varying, p_actor_empleado_id bigint DEFAULT NULL::bigint, p_omitir_jefe boolean DEFAULT false) RETURNS character varying
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_s     RECORD;
+    v_nota  VARCHAR := NULLIF(btrim(COALESCE(p_nota, '')), '');
+    v_user  BIGINT := NULLIF(current_setting('app.current_user_id', true), '')::BIGINT;
+    v_dias  INTEGER;
+BEGIN
+    SELECT s.* INTO v_s FROM rrhh_vacaciones_solicitudes s WHERE s.id = p_id AND s.empresa_id = p_empresa_id AND s.deleted_at IS NULL FOR UPDATE;
+    IF NOT FOUND THEN RETURN NULL; END IF;
+    IF p_actor_empleado_id IS NOT NULL AND p_actor_empleado_id = v_s.empleado_id THEN
+        RAISE EXCEPTION 'VACACIONES_INVALIDAS: No puede resolver su propia solicitud.';
+    END IF;
+
+    IF p_etapa = 'jefe' THEN
+        IF v_s.estado <> 'pendiente_jefe' THEN RAISE EXCEPTION 'VACACIONES_INVALIDAS: La solicitud ya no espera la aprobación del jefe.'; END IF;
+        IF p_actor_empleado_id IS NULL OR p_actor_empleado_id IS DISTINCT FROM v_s.jefe_id THEN
+            RAISE EXCEPTION 'VACACIONES_INVALIDAS: Solo el jefe inmediato del empleado puede resolver esta etapa.';
+        END IF;
+        IF NOT p_aprobar AND v_nota IS NULL THEN RAISE EXCEPTION 'VACACIONES_INVALIDAS: Indique el motivo del rechazo.'; END IF;
+        UPDATE rrhh_vacaciones_solicitudes
+           SET estado = CASE WHEN p_aprobar THEN 'pendiente_rrhh' ELSE 'rechazada' END,
+               jefe_resuelto_por = v_user, jefe_resuelto_at = NOW(), jefe_nota = v_nota, updated_at = NOW()
+         WHERE id = p_id;
+        RETURN CASE WHEN p_aprobar THEN 'pendiente_rrhh' ELSE 'rechazada' END;
+    END IF;
+
+    IF p_etapa <> 'rrhh' THEN RAISE EXCEPTION 'VACACIONES_INVALIDAS: Etapa desconocida.'; END IF;
+    IF v_s.estado = 'pendiente_jefe' THEN
+        IF NOT p_omitir_jefe THEN RAISE EXCEPTION 'VACACIONES_INVALIDAS: Falta la aprobación del jefe inmediato.'; END IF;
+        IF v_nota IS NULL THEN RAISE EXCEPTION 'VACACIONES_INVALIDAS: Indique por qué se resuelve sin el jefe.'; END IF;
+    ELSIF v_s.estado <> 'pendiente_rrhh' THEN
+        RAISE EXCEPTION 'VACACIONES_INVALIDAS: La solicitud ya no está pendiente.';
+    END IF;
+    IF NOT p_aprobar AND v_nota IS NULL THEN RAISE EXCEPTION 'VACACIONES_INVALIDAS: Indique el motivo del rechazo.'; END IF;
+
+    IF p_aprobar THEN
+        -- Se vuelve a validar: desde que se pidió pudo cambiar el saldo, los feriados o el horario.
+        v_dias := fn_rrhh_vac_validar(p_empresa_id, v_s.empleado_id, v_s.fecha_inicio, v_s.fecha_fin, v_s.id);
+    END IF;
+    UPDATE rrhh_vacaciones_solicitudes
+       SET estado = CASE WHEN p_aprobar THEN 'aprobada' ELSE 'rechazada' END,
+           dias = COALESCE(v_dias, dias),
+           rrhh_resuelto_por = v_user, rrhh_resuelto_at = NOW(), rrhh_nota = v_nota, updated_at = NOW()
+     WHERE id = p_id;
+    RETURN CASE WHEN p_aprobar THEN 'aprobada' ELSE 'rechazada' END;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_vac_saldos(bigint, date, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_vac_saldos(p_empresa_id bigint, p_fecha date, p_departamento_id bigint DEFAULT NULL::bigint, p_empleado_id bigint DEFAULT NULL::bigint) RETURNS TABLE(empleado_id bigint, empleado_codigo character varying, empleado_nombre character varying, departamento_id bigint, departamento_nombre character varying, jefe_id bigint, jefe_nombre character varying, fecha_ingreso date, estado character varying, meses integer, elegible_desde date, elegible boolean, devengado numeric, ajustes numeric, disfrutados numeric, programados numeric, pendientes numeric, acumulado numeric, disponible numeric, alerta character varying)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    WITH a AS (
+        SELECT e.id AS eid, e.codigo AS cod,
+               btrim(e.nombre || ' ' || e.apellido1 || ' ' || COALESCE(e.apellido2, '')) AS nom,
+               e.departamento_id AS did, dp.nombre AS dnom, e.jefe_id AS jid,
+               btrim(j.nombre || ' ' || j.apellido1 || ' ' || COALESCE(j.apellido2, '')) AS jnom,
+               e.fecha_ingreso AS ingreso, e.estado AS est,
+               fn_rrhh_vac_devengado(e.id, p_fecha) AS dev,
+               fn_rrhh_vac_movimientos(e.id) AS aj,
+               COALESCE((SELECT SUM(s.dias) FROM rrhh_vacaciones_solicitudes s WHERE s.empleado_id = e.id AND s.deleted_at IS NULL
+                          AND s.estado = 'aprobada' AND s.fecha_fin <= p_fecha), 0)::NUMERIC AS disf,
+               COALESCE((SELECT SUM(s.dias) FROM rrhh_vacaciones_solicitudes s WHERE s.empleado_id = e.id AND s.deleted_at IS NULL
+                          AND s.estado = 'aprobada' AND s.fecha_fin > p_fecha), 0)::NUMERIC AS prog,
+               COALESCE((SELECT SUM(s.dias) FROM rrhh_vacaciones_solicitudes s WHERE s.empleado_id = e.id AND s.deleted_at IS NULL
+                          AND s.estado IN ('pendiente_jefe', 'pendiente_rrhh')), 0)::NUMERIC AS pend,
+               COALESCE((SELECT SUM(i.vac_repuestos) FROM rrhh_incapacidades i WHERE i.empleado_id = e.id AND i.deleted_at IS NULL
+                          AND i.estado = 'registrada' AND i.vac_repuestos > 0 AND i.fecha_fin > p_fecha), 0)::NUMERIC AS rep
+          FROM rrhh_empleados e
+          LEFT JOIN rrhh_departamentos dp ON dp.id = e.departamento_id
+          LEFT JOIN rrhh_empleados j ON j.id = e.jefe_id
+         WHERE e.empresa_id = p_empresa_id AND e.deleted_at IS NULL AND e.estado <> 'liquidado' AND e.fecha_ingreso <= p_fecha
+           AND (p_departamento_id IS NULL OR e.departamento_id = p_departamento_id)
+           AND (p_empleado_id IS NULL OR e.id = p_empleado_id)
+    ), b AS (
+        SELECT a.*, LEAST(a.rep, a.prog) AS rep_prog FROM a
+    )
+    SELECT b.eid, b.cod::VARCHAR, b.nom::VARCHAR, b.did, b.dnom::VARCHAR, b.jid, b.jnom::VARCHAR, b.ingreso, b.est::VARCHAR,
+           (EXTRACT(YEAR FROM age(p_fecha, b.ingreso)) * 12 + EXTRACT(MONTH FROM age(p_fecha, b.ingreso)))::INTEGER,
+           (b.ingreso + 350), (p_fecha >= b.ingreso + 350),
+           b.dev, (b.aj - b.rep_prog), b.disf, (b.prog - b.rep_prog), b.pend,
+           (b.dev + b.aj - b.disf),
+           (b.dev + (b.aj - b.rep_prog) - b.disf - (b.prog - b.rep_prog) - b.pend),
+           (CASE WHEN b.dev + b.aj - b.disf > 24 THEN 'excedido' WHEN b.dev + b.aj - b.disf > 12 THEN 'atencion' ELSE 'ok' END)::VARCHAR
+      FROM b ORDER BY b.nom;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_vac_solicitar(bigint, bigint, date, date, character varying, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_vac_solicitar(p_empresa_id bigint, p_empleado_id bigint, p_inicio date, p_fin date, p_motivo character varying, p_directa boolean DEFAULT false) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_dias   INTEGER;
+    v_jefe   BIGINT;
+    v_estado VARCHAR;
+    v_user   BIGINT := NULLIF(current_setting('app.current_user_id', true), '')::BIGINT;
+    v_id     BIGINT;
+BEGIN
+    IF p_inicio < CURRENT_DATE AND NOT p_directa THEN
+        RAISE EXCEPTION 'FECHA_INVALIDA: La fecha de inicio no puede ser anterior a hoy.';
+    END IF;
+    v_dias := fn_rrhh_vac_validar(p_empresa_id, p_empleado_id, p_inicio, p_fin, NULL);
+
+    SELECT j.id INTO v_jefe FROM rrhh_empleados e
+      JOIN rrhh_empleados j ON j.id = e.jefe_id AND j.deleted_at IS NULL AND j.estado = 'activo'
+     WHERE e.id = p_empleado_id;
+
+    v_estado := CASE WHEN p_directa THEN 'aprobada' WHEN v_jefe IS NOT NULL THEN 'pendiente_jefe' ELSE 'pendiente_rrhh' END;
+    INSERT INTO rrhh_vacaciones_solicitudes (empresa_id, empleado_id, fecha_inicio, fecha_fin, dias, estado, jefe_id, motivo, creada_por,
+                                             rrhh_resuelto_por, rrhh_resuelto_at, rrhh_nota)
+    VALUES (p_empresa_id, p_empleado_id, p_inicio, p_fin, v_dias, v_estado, v_jefe, NULLIF(btrim(COALESCE(p_motivo, '')), ''), v_user,
+            CASE WHEN p_directa THEN v_user END, CASE WHEN p_directa THEN NOW() END, CASE WHEN p_directa THEN 'Registrada directamente por RRHH' END)
+    RETURNING id INTO v_id;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_vac_solicitud_list(bigint, character varying, bigint, date, date, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_vac_solicitud_list(p_empresa_id bigint, p_estado character varying DEFAULT NULL::character varying, p_empleado_id bigint DEFAULT NULL::bigint, p_desde date DEFAULT NULL::date, p_hasta date DEFAULT NULL::date, p_jefe_id bigint DEFAULT NULL::bigint) RETURNS TABLE(id bigint, empleado_id bigint, empleado_codigo character varying, empleado_nombre character varying, departamento_id bigint, departamento_nombre character varying, fecha_inicio date, fecha_fin date, dias integer, estado character varying, jefe_id bigint, jefe_nombre character varying, motivo character varying, jefe_resuelto_at timestamp without time zone, jefe_nota character varying, rrhh_resuelto_at timestamp without time zone, rrhh_nota character varying, created_at timestamp without time zone)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT s.id, s.empleado_id, e.codigo::VARCHAR, btrim(e.nombre || ' ' || e.apellido1 || ' ' || COALESCE(e.apellido2, ''))::VARCHAR,
+           e.departamento_id, dp.nombre::VARCHAR, s.fecha_inicio, s.fecha_fin, s.dias, s.estado::VARCHAR, s.jefe_id,
+           btrim(j.nombre || ' ' || j.apellido1 || ' ' || COALESCE(j.apellido2, ''))::VARCHAR, s.motivo::VARCHAR,
+           s.jefe_resuelto_at, s.jefe_nota::VARCHAR, s.rrhh_resuelto_at, s.rrhh_nota::VARCHAR, s.created_at
+      FROM rrhh_vacaciones_solicitudes s
+      JOIN rrhh_empleados e ON e.id = s.empleado_id
+      LEFT JOIN rrhh_departamentos dp ON dp.id = e.departamento_id
+      LEFT JOIN rrhh_empleados j ON j.id = s.jefe_id
+     WHERE s.empresa_id = p_empresa_id AND s.deleted_at IS NULL
+       AND (p_estado IS NULL OR s.estado = p_estado)
+       AND (p_empleado_id IS NULL OR s.empleado_id = p_empleado_id)
+       AND (p_jefe_id IS NULL OR s.jefe_id = p_jefe_id)
+       AND (p_desde IS NULL OR s.fecha_fin >= p_desde)
+       AND (p_hasta IS NULL OR s.fecha_inicio <= p_hasta)
+     ORDER BY (s.estado IN ('pendiente_jefe', 'pendiente_rrhh')) DESC, s.fecha_inicio DESC, s.id DESC
+     LIMIT 500;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_vac_traslapes(bigint, bigint, date, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_vac_traslapes(p_empresa_id bigint, p_empleado_id bigint, p_desde date, p_hasta date) RETURNS TABLE(empleado_id bigint, empleado_nombre character varying, fecha_inicio date, fecha_fin date, estado character varying, departamento_total integer)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_depto BIGINT;
+BEGIN
+    SELECT e.departamento_id INTO v_depto FROM rrhh_empleados e WHERE e.id = p_empleado_id AND e.empresa_id = p_empresa_id AND e.deleted_at IS NULL;
+    IF v_depto IS NULL THEN RETURN; END IF;
+    RETURN QUERY
+    SELECT s.empleado_id, btrim(e.nombre || ' ' || e.apellido1 || ' ' || COALESCE(e.apellido2, ''))::VARCHAR, s.fecha_inicio, s.fecha_fin, s.estado::VARCHAR,
+           (SELECT COUNT(*)::INTEGER FROM rrhh_empleados x WHERE x.empresa_id = p_empresa_id AND x.deleted_at IS NULL AND x.estado = 'activo' AND x.departamento_id = v_depto)
+      FROM rrhh_vacaciones_solicitudes s JOIN rrhh_empleados e ON e.id = s.empleado_id
+     WHERE s.empresa_id = p_empresa_id AND s.deleted_at IS NULL AND s.estado IN ('pendiente_jefe', 'pendiente_rrhh', 'aprobada')
+       AND e.departamento_id = v_depto AND s.empleado_id <> p_empleado_id AND s.fecha_inicio <= p_hasta AND s.fecha_fin >= p_desde
+     ORDER BY s.fecha_inicio, e.nombre;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_vac_valoracion(bigint, date, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_vac_valoracion(p_empresa_id bigint, p_fecha date, p_empleado_id bigint DEFAULT NULL::bigint) RETURNS TABLE(empleado_id bigint, empleado_codigo character varying, empleado_nombre character varying, fecha_ingreso date, saldo_dias numeric, salario_base numeric, periodo_pago character varying, valor_dia numeric, extras_50sem numeric, extras_dia numeric, promedio_dia numeric, monto_saldo numeric, monto_ordinario numeric)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT e.id, e.codigo::VARCHAR, btrim(e.nombre || ' ' || e.apellido1 || ' ' || COALESCE(e.apellido2, ''))::VARCHAR, e.fecha_ingreso,
+           GREATEST(fn_rrhh_vac_devengado(e.id, p_fecha) + fn_rrhh_vac_movimientos(e.id) - fn_rrhh_vac_reservado(e.id, NULL, TRUE), 0),
+           e.salario_base, e.periodo_pago::VARCHAR, t.valor_dia, t.extras_50sem, t.extras_dia, t.promedio_dia,
+           round(GREATEST(fn_rrhh_vac_devengado(e.id, p_fecha) + fn_rrhh_vac_movimientos(e.id) - fn_rrhh_vac_reservado(e.id, NULL, TRUE), 0) * t.promedio_dia, 2),
+           round(GREATEST(fn_rrhh_vac_devengado(e.id, p_fecha) + fn_rrhh_vac_movimientos(e.id) - fn_rrhh_vac_reservado(e.id, NULL, TRUE), 0) * t.valor_dia, 2)
+      FROM rrhh_empleados e
+      CROSS JOIN LATERAL fn_rrhh_vac_tarifa(p_empresa_id, e.id, p_fecha) t
+     WHERE e.empresa_id = p_empresa_id AND e.deleted_at IS NULL AND e.estado <> 'liquidado' AND e.fecha_ingreso <= p_fecha
+       AND (p_empleado_id IS NULL OR e.id = p_empleado_id)
+     ORDER BY e.nombre, e.apellido1;
+END; $$;
+
+
+--
 -- Name: sp_servicio_create(bigint, character varying, character varying, text, character varying, character varying, numeric, character varying, character varying, numeric, character varying, text, character varying, character varying, character varying, character varying, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -11542,6 +14724,1434 @@ ALTER SEQUENCE public.recibos_adelanto_auditoria_id_seq OWNED BY public.recibos_
 
 
 --
+-- Name: rrhh_agentes; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_agentes (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    nombre character varying(100) NOT NULL,
+    sucursal_id bigint,
+    token_hash character(64),
+    token_prefijo character varying(8),
+    version character varying(20),
+    ultimo_contacto timestamp without time zone,
+    ultima_ip character varying(45),
+    is_active boolean DEFAULT true NOT NULL,
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rrhh_agentes_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_agentes_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'rrhh_agentes'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rrhh_agentes_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_agentes_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_agentes_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_agentes_auditoria_id_seq OWNED BY public.rrhh_agentes_auditoria.id;
+
+
+--
+-- Name: rrhh_agentes_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_agentes_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_agentes_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_agentes_id_seq OWNED BY public.rrhh_agentes.id;
+
+
+--
+-- Name: rrhh_asistencia_ajustes; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_asistencia_ajustes (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    empleado_id bigint NOT NULL,
+    fecha date NOT NULL,
+    tipo character varying(15) NOT NULL,
+    aprobado boolean,
+    minutos integer,
+    motivo character varying(255),
+    usuario_id bigint,
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rrhh_asistencia_ajustes_minutos_check CHECK ((minutos >= 0)),
+    CONSTRAINT rrhh_asistencia_ajustes_tipo_check CHECK (((tipo)::text = ANY ((ARRAY['justificacion'::character varying, 'extra'::character varying])::text[])))
+);
+
+
+--
+-- Name: rrhh_asistencia_ajustes_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_asistencia_ajustes_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'rrhh_asistencia_ajustes'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rrhh_asistencia_ajustes_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_asistencia_ajustes_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_asistencia_ajustes_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_asistencia_ajustes_auditoria_id_seq OWNED BY public.rrhh_asistencia_ajustes_auditoria.id;
+
+
+--
+-- Name: rrhh_asistencia_ajustes_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_asistencia_ajustes_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_asistencia_ajustes_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_asistencia_ajustes_id_seq OWNED BY public.rrhh_asistencia_ajustes.id;
+
+
+--
+-- Name: rrhh_departamentos; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_departamentos (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    codigo character varying(20),
+    nombre character varying(100) NOT NULL,
+    descripcion character varying(255),
+    departamento_padre_id bigint,
+    jefe_empleado_id bigint,
+    centro_costo character varying(30),
+    is_active boolean DEFAULT true NOT NULL,
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rrhh_departamentos_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_departamentos_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'rrhh_departamentos'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rrhh_departamentos_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_departamentos_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_departamentos_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_departamentos_auditoria_id_seq OWNED BY public.rrhh_departamentos_auditoria.id;
+
+
+--
+-- Name: rrhh_departamentos_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_departamentos_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_departamentos_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_departamentos_id_seq OWNED BY public.rrhh_departamentos.id;
+
+
+--
+-- Name: rrhh_dispositivo_usuarios; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_dispositivo_usuarios (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    dispositivo_id bigint NOT NULL,
+    empleado_id bigint NOT NULL,
+    id_en_dispositivo character varying(30) NOT NULL,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rrhh_dispositivo_usuarios_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_dispositivo_usuarios_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'rrhh_dispositivo_usuarios'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rrhh_dispositivo_usuarios_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_dispositivo_usuarios_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_dispositivo_usuarios_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_dispositivo_usuarios_auditoria_id_seq OWNED BY public.rrhh_dispositivo_usuarios_auditoria.id;
+
+
+--
+-- Name: rrhh_dispositivo_usuarios_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_dispositivo_usuarios_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_dispositivo_usuarios_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_dispositivo_usuarios_id_seq OWNED BY public.rrhh_dispositivo_usuarios.id;
+
+
+--
+-- Name: rrhh_dispositivos; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_dispositivos (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    nombre character varying(100) NOT NULL,
+    tipo_lector character varying(15) DEFAULT 'huella'::character varying NOT NULL,
+    marca character varying(15) DEFAULT 'otro'::character varying NOT NULL,
+    modelo character varying(60),
+    numero_serie character varying(60),
+    ubicacion character varying(120),
+    sucursal_id bigint,
+    agente_id bigint,
+    ultima_sincronizacion timestamp without time zone,
+    ultima_marca timestamp without time zone,
+    estado_conexion character varying(10) DEFAULT 'sin_datos'::character varying NOT NULL,
+    ultimo_error character varying(255),
+    is_active boolean DEFAULT true NOT NULL,
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rrhh_dispositivos_estado_conexion_check CHECK (((estado_conexion)::text = ANY ((ARRAY['sin_datos'::character varying, 'en_linea'::character varying, 'error'::character varying])::text[]))),
+    CONSTRAINT rrhh_dispositivos_marca_check CHECK (((marca)::text = ANY ((ARRAY['zkteco'::character varying, 'hikvision'::character varying, 'dahua'::character varying, 'suprema'::character varying, 'anviz'::character varying, 'otro'::character varying, 'simulado'::character varying])::text[]))),
+    CONSTRAINT rrhh_dispositivos_tipo_lector_check CHECK (((tipo_lector)::text = ANY ((ARRAY['huella'::character varying, 'facial'::character varying, 'huella_facial'::character varying, 'tarjeta'::character varying, 'pin'::character varying])::text[])))
+);
+
+
+--
+-- Name: rrhh_dispositivos_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_dispositivos_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'rrhh_dispositivos'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rrhh_dispositivos_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_dispositivos_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_dispositivos_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_dispositivos_auditoria_id_seq OWNED BY public.rrhh_dispositivos_auditoria.id;
+
+
+--
+-- Name: rrhh_dispositivos_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_dispositivos_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_dispositivos_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_dispositivos_id_seq OWNED BY public.rrhh_dispositivos.id;
+
+
+--
+-- Name: rrhh_empleado_horarios; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_empleado_horarios (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    empleado_id bigint NOT NULL,
+    horario_id bigint NOT NULL,
+    vigente_desde date NOT NULL,
+    vigente_hasta date,
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rrhh_empleado_horarios_check CHECK (((vigente_hasta IS NULL) OR (vigente_hasta >= vigente_desde)))
+);
+
+
+--
+-- Name: rrhh_empleado_horarios_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_empleado_horarios_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'rrhh_empleado_horarios'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rrhh_empleado_horarios_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_empleado_horarios_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_empleado_horarios_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_empleado_horarios_auditoria_id_seq OWNED BY public.rrhh_empleado_horarios_auditoria.id;
+
+
+--
+-- Name: rrhh_empleado_horarios_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_empleado_horarios_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_empleado_horarios_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_empleado_horarios_id_seq OWNED BY public.rrhh_empleado_horarios.id;
+
+
+--
+-- Name: rrhh_empleado_movimientos; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_empleado_movimientos (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    empleado_id bigint NOT NULL,
+    tipo character varying(25) NOT NULL,
+    fecha date DEFAULT CURRENT_DATE NOT NULL,
+    descripcion text NOT NULL,
+    valor_anterior jsonb,
+    valor_nuevo jsonb,
+    usuario_id bigint,
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rrhh_empleado_movimientos_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_empleado_movimientos_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'rrhh_empleado_movimientos'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rrhh_empleado_movimientos_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_empleado_movimientos_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_empleado_movimientos_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_empleado_movimientos_auditoria_id_seq OWNED BY public.rrhh_empleado_movimientos_auditoria.id;
+
+
+--
+-- Name: rrhh_empleado_movimientos_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_empleado_movimientos_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_empleado_movimientos_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_empleado_movimientos_id_seq OWNED BY public.rrhh_empleado_movimientos.id;
+
+
+--
+-- Name: rrhh_empleado_pin; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_empleado_pin (
+    empleado_id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    pin_hash character varying(100) NOT NULL,
+    intentos smallint DEFAULT 0 NOT NULL,
+    bloqueado_hasta timestamp without time zone,
+    cambiado_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rrhh_empleados; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_empleados (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    funcionario_id bigint,
+    codigo character varying(20) NOT NULL,
+    tipo_identificacion character varying(10) DEFAULT 'cedula'::character varying NOT NULL,
+    identificacion character varying(30) NOT NULL,
+    nombre character varying(100) NOT NULL,
+    apellido1 character varying(60) NOT NULL,
+    apellido2 character varying(60),
+    fecha_nacimiento date,
+    sexo character varying(1),
+    estado_civil character varying(15),
+    nacionalidad character varying(60) DEFAULT 'Costarricense'::character varying NOT NULL,
+    email character varying(150),
+    telefono character varying(30),
+    direccion text,
+    tiene_conyuge boolean DEFAULT false NOT NULL,
+    cantidad_hijos smallint DEFAULT 0 NOT NULL,
+    contacto_emergencia_nombre character varying(120),
+    contacto_emergencia_telefono character varying(30),
+    contacto_emergencia_parentesco character varying(40),
+    departamento_id bigint,
+    puesto_id bigint,
+    jefe_id bigint,
+    sucursal_id bigint,
+    fecha_ingreso date NOT NULL,
+    fecha_salida date,
+    motivo_salida character varying(40),
+    tipo_contrato character varying(20) DEFAULT 'indefinido'::character varying NOT NULL,
+    fecha_fin_contrato date,
+    jornada character varying(15) DEFAULT 'diurna'::character varying NOT NULL,
+    horas_semanales numeric(5,2) DEFAULT 48 NOT NULL,
+    periodo_pago character varying(10) DEFAULT 'mensual'::character varying NOT NULL,
+    salario_base numeric(14,2) DEFAULT 0 NOT NULL,
+    moneda character varying(3) DEFAULT 'CRC'::character varying NOT NULL,
+    banco character varying(60),
+    iban character varying(34),
+    numero_ccss character varying(30),
+    estado character varying(12) DEFAULT 'activo'::character varying NOT NULL,
+    notas text,
+    is_active boolean DEFAULT true NOT NULL,
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rrhh_empleados_cantidad_hijos_check CHECK ((cantidad_hijos >= 0)),
+    CONSTRAINT rrhh_empleados_estado_check CHECK (((estado)::text = ANY ((ARRAY['activo'::character varying, 'suspendido'::character varying, 'liquidado'::character varying])::text[]))),
+    CONSTRAINT rrhh_empleados_estado_civil_check CHECK (((estado_civil)::text = ANY ((ARRAY['soltero'::character varying, 'casado'::character varying, 'union_libre'::character varying, 'divorciado'::character varying, 'viudo'::character varying])::text[]))),
+    CONSTRAINT rrhh_empleados_horas_semanales_check CHECK (((horas_semanales > (0)::numeric) AND (horas_semanales <= (60)::numeric))),
+    CONSTRAINT rrhh_empleados_jornada_check CHECK (((jornada)::text = ANY ((ARRAY['diurna'::character varying, 'mixta'::character varying, 'nocturna'::character varying, 'acumulativa'::character varying])::text[]))),
+    CONSTRAINT rrhh_empleados_periodo_pago_check CHECK (((periodo_pago)::text = ANY ((ARRAY['mensual'::character varying, 'quincenal'::character varying, 'semanal'::character varying])::text[]))),
+    CONSTRAINT rrhh_empleados_salario_base_check CHECK ((salario_base >= (0)::numeric)),
+    CONSTRAINT rrhh_empleados_sexo_check CHECK (((sexo)::text = ANY ((ARRAY['F'::character varying, 'M'::character varying, 'O'::character varying])::text[]))),
+    CONSTRAINT rrhh_empleados_tipo_contrato_check CHECK (((tipo_contrato)::text = ANY ((ARRAY['indefinido'::character varying, 'plazo_fijo'::character varying, 'obra_determinada'::character varying])::text[]))),
+    CONSTRAINT rrhh_empleados_tipo_identificacion_check CHECK (((tipo_identificacion)::text = ANY ((ARRAY['cedula'::character varying, 'dimex'::character varying, 'nite'::character varying, 'pasaporte'::character varying])::text[])))
+);
+
+
+--
+-- Name: rrhh_empleados_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_empleados_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'rrhh_empleados'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rrhh_empleados_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_empleados_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_empleados_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_empleados_auditoria_id_seq OWNED BY public.rrhh_empleados_auditoria.id;
+
+
+--
+-- Name: rrhh_empleados_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_empleados_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_empleados_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_empleados_id_seq OWNED BY public.rrhh_empleados.id;
+
+
+--
+-- Name: rrhh_feriados; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_feriados (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    fecha date NOT NULL,
+    nombre character varying(100) NOT NULL,
+    pago_obligatorio boolean DEFAULT true NOT NULL,
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rrhh_feriados_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_feriados_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'rrhh_feriados'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rrhh_feriados_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_feriados_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_feriados_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_feriados_auditoria_id_seq OWNED BY public.rrhh_feriados_auditoria.id;
+
+
+--
+-- Name: rrhh_feriados_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_feriados_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_feriados_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_feriados_id_seq OWNED BY public.rrhh_feriados.id;
+
+
+--
+-- Name: rrhh_horario_dias; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_horario_dias (
+    horario_id bigint NOT NULL,
+    dia_semana smallint NOT NULL,
+    hora_entrada time without time zone NOT NULL,
+    hora_salida time without time zone NOT NULL,
+    minutos_descanso smallint DEFAULT 0 NOT NULL,
+    CONSTRAINT rrhh_horario_dias_dia_semana_check CHECK (((dia_semana >= 1) AND (dia_semana <= 7))),
+    CONSTRAINT rrhh_horario_dias_minutos_descanso_check CHECK (((minutos_descanso >= 0) AND (minutos_descanso <= 240)))
+);
+
+
+--
+-- Name: rrhh_horarios; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_horarios (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    nombre character varying(100) NOT NULL,
+    descripcion character varying(255),
+    jornada character varying(15) DEFAULT 'diurna'::character varying NOT NULL,
+    tolerancia_entrada_min smallint DEFAULT 10 NOT NULL,
+    tolerancia_salida_min smallint DEFAULT 0 NOT NULL,
+    minutos_minimos_extra smallint DEFAULT 30 NOT NULL,
+    is_active boolean DEFAULT true NOT NULL,
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rrhh_horarios_jornada_check CHECK (((jornada)::text = ANY ((ARRAY['diurna'::character varying, 'mixta'::character varying, 'nocturna'::character varying, 'acumulativa'::character varying])::text[]))),
+    CONSTRAINT rrhh_horarios_minutos_minimos_extra_check CHECK (((minutos_minimos_extra >= 0) AND (minutos_minimos_extra <= 240))),
+    CONSTRAINT rrhh_horarios_tolerancia_entrada_min_check CHECK (((tolerancia_entrada_min >= 0) AND (tolerancia_entrada_min <= 120))),
+    CONSTRAINT rrhh_horarios_tolerancia_salida_min_check CHECK (((tolerancia_salida_min >= 0) AND (tolerancia_salida_min <= 120)))
+);
+
+
+--
+-- Name: rrhh_horarios_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_horarios_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'rrhh_horarios'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rrhh_horarios_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_horarios_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_horarios_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_horarios_auditoria_id_seq OWNED BY public.rrhh_horarios_auditoria.id;
+
+
+--
+-- Name: rrhh_horarios_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_horarios_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_horarios_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_horarios_id_seq OWNED BY public.rrhh_horarios.id;
+
+
+--
+-- Name: rrhh_incapacidades; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_incapacidades (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    empleado_id bigint NOT NULL,
+    tipo character varying(15) NOT NULL,
+    entidad character varying(4) NOT NULL,
+    fecha_inicio date NOT NULL,
+    fecha_fin date NOT NULL,
+    dias integer NOT NULL,
+    numero_boleta character varying(40),
+    observaciones character varying(255),
+    patrono_completa boolean DEFAULT true NOT NULL,
+    valor_dia numeric(14,2) NOT NULL,
+    estado character varying(10) DEFAULT 'registrada'::character varying NOT NULL,
+    vac_repuestos numeric(6,2) DEFAULT 0 NOT NULL,
+    vac_movimiento_id bigint,
+    anulada_por bigint,
+    anulada_at timestamp without time zone,
+    anulada_nota character varying(255),
+    creada_por bigint,
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rrhh_incapacidades_check CHECK ((fecha_fin >= fecha_inicio)),
+    CONSTRAINT rrhh_incapacidades_dias_check CHECK ((dias > 0)),
+    CONSTRAINT rrhh_incapacidades_entidad_check CHECK (((entidad)::text = ANY ((ARRAY['CCSS'::character varying, 'INS'::character varying])::text[]))),
+    CONSTRAINT rrhh_incapacidades_estado_check CHECK (((estado)::text = ANY ((ARRAY['registrada'::character varying, 'anulada'::character varying])::text[]))),
+    CONSTRAINT rrhh_incapacidades_tipo_check CHECK (((tipo)::text = ANY ((ARRAY['enfermedad'::character varying, 'maternidad'::character varying, 'riesgo_trabajo'::character varying])::text[])))
+);
+
+
+--
+-- Name: rrhh_incapacidades_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_incapacidades_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'rrhh_incapacidades'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rrhh_incapacidades_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_incapacidades_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_incapacidades_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_incapacidades_auditoria_id_seq OWNED BY public.rrhh_incapacidades_auditoria.id;
+
+
+--
+-- Name: rrhh_incapacidades_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_incapacidades_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_incapacidades_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_incapacidades_id_seq OWNED BY public.rrhh_incapacidades.id;
+
+
+--
+-- Name: rrhh_marcas; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_marcas (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    empleado_id bigint,
+    fecha_hora timestamp without time zone NOT NULL,
+    origen character varying(12) NOT NULL,
+    metodo character varying(10) DEFAULT 'pin'::character varying NOT NULL,
+    dispositivo_id bigint,
+    agente_id bigint,
+    id_externo character varying(30),
+    referencia_externa character varying(80),
+    estado character varying(12) DEFAULT 'valida'::character varying NOT NULL,
+    motivo character varying(255),
+    ip character varying(45),
+    registrado_por bigint,
+    resuelto_por bigint,
+    resuelto_at timestamp without time zone,
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rrhh_marcas_estado_check CHECK (((estado)::text = ANY ((ARRAY['valida'::character varying, 'pendiente'::character varying, 'rechazada'::character varying, 'sin_asignar'::character varying])::text[]))),
+    CONSTRAINT rrhh_marcas_metodo_check CHECK (((metodo)::text = ANY ((ARRAY['pin'::character varying, 'huella'::character varying, 'facial'::character varying, 'tarjeta'::character varying, 'manual'::character varying, 'otro'::character varying])::text[]))),
+    CONSTRAINT rrhh_marcas_origen_check CHECK (((origen)::text = ANY ((ARRAY['web'::character varying, 'dispositivo'::character varying, 'manual'::character varying])::text[])))
+);
+
+
+--
+-- Name: rrhh_marcas_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_marcas_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'rrhh_marcas'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rrhh_marcas_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_marcas_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_marcas_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_marcas_auditoria_id_seq OWNED BY public.rrhh_marcas_auditoria.id;
+
+
+--
+-- Name: rrhh_marcas_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_marcas_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_marcas_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_marcas_id_seq OWNED BY public.rrhh_marcas.id;
+
+
+--
+-- Name: rrhh_permiso_solicitudes; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_permiso_solicitudes (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    empleado_id bigint NOT NULL,
+    tipo_id bigint NOT NULL,
+    fecha_inicio date NOT NULL,
+    fecha_fin date NOT NULL,
+    hora_inicio time without time zone,
+    hora_fin time without time zone,
+    cantidad numeric(6,2) NOT NULL,
+    unidad character varying(5) NOT NULL,
+    con_goce boolean NOT NULL,
+    estado character varying(15) DEFAULT 'pendiente_jefe'::character varying NOT NULL,
+    jefe_id bigint,
+    motivo character varying(255),
+    jefe_resuelto_por bigint,
+    jefe_resuelto_at timestamp without time zone,
+    jefe_nota character varying(255),
+    rrhh_resuelto_por bigint,
+    rrhh_resuelto_at timestamp without time zone,
+    rrhh_nota character varying(255),
+    creada_por bigint,
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rrhh_permiso_solicitudes_cantidad_check CHECK ((cantidad > (0)::numeric)),
+    CONSTRAINT rrhh_permiso_solicitudes_check CHECK ((fecha_fin >= fecha_inicio)),
+    CONSTRAINT rrhh_permiso_solicitudes_check1 CHECK (((((unidad)::text = 'horas'::text) AND (hora_inicio IS NOT NULL) AND (hora_fin IS NOT NULL) AND (hora_fin > hora_inicio) AND (fecha_inicio = fecha_fin)) OR (((unidad)::text = 'dias'::text) AND (hora_inicio IS NULL) AND (hora_fin IS NULL)))),
+    CONSTRAINT rrhh_permiso_solicitudes_estado_check CHECK (((estado)::text = ANY ((ARRAY['pendiente_jefe'::character varying, 'pendiente_rrhh'::character varying, 'aprobada'::character varying, 'rechazada'::character varying, 'cancelada'::character varying])::text[]))),
+    CONSTRAINT rrhh_permiso_solicitudes_unidad_check CHECK (((unidad)::text = ANY ((ARRAY['dias'::character varying, 'horas'::character varying])::text[])))
+);
+
+
+--
+-- Name: rrhh_permiso_solicitudes_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_permiso_solicitudes_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'rrhh_permiso_solicitudes'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rrhh_permiso_solicitudes_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_permiso_solicitudes_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_permiso_solicitudes_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_permiso_solicitudes_auditoria_id_seq OWNED BY public.rrhh_permiso_solicitudes_auditoria.id;
+
+
+--
+-- Name: rrhh_permiso_solicitudes_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_permiso_solicitudes_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_permiso_solicitudes_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_permiso_solicitudes_id_seq OWNED BY public.rrhh_permiso_solicitudes.id;
+
+
+--
+-- Name: rrhh_permiso_tipos; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_permiso_tipos (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    nombre character varying(80) NOT NULL,
+    unidad character varying(5) DEFAULT 'dias'::character varying NOT NULL,
+    con_goce boolean DEFAULT true NOT NULL,
+    max_por_solicitud numeric(6,2),
+    max_por_anio numeric(6,2),
+    descripcion character varying(255),
+    is_active boolean DEFAULT true NOT NULL,
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rrhh_permiso_tipos_max_por_anio_check CHECK (((max_por_anio IS NULL) OR (max_por_anio > (0)::numeric))),
+    CONSTRAINT rrhh_permiso_tipos_max_por_solicitud_check CHECK (((max_por_solicitud IS NULL) OR (max_por_solicitud > (0)::numeric))),
+    CONSTRAINT rrhh_permiso_tipos_unidad_check CHECK (((unidad)::text = ANY ((ARRAY['dias'::character varying, 'horas'::character varying])::text[])))
+);
+
+
+--
+-- Name: rrhh_permiso_tipos_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_permiso_tipos_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'rrhh_permiso_tipos'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rrhh_permiso_tipos_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_permiso_tipos_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_permiso_tipos_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_permiso_tipos_auditoria_id_seq OWNED BY public.rrhh_permiso_tipos_auditoria.id;
+
+
+--
+-- Name: rrhh_permiso_tipos_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_permiso_tipos_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_permiso_tipos_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_permiso_tipos_id_seq OWNED BY public.rrhh_permiso_tipos.id;
+
+
+--
+-- Name: rrhh_puestos; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_puestos (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    nombre character varying(100) NOT NULL,
+    descripcion character varying(255),
+    departamento_id bigint,
+    categoria character varying(20),
+    salario_minimo numeric(14,2),
+    salario_maximo numeric(14,2),
+    is_active boolean DEFAULT true NOT NULL,
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rrhh_puestos_categoria_check CHECK (((categoria)::text = ANY ((ARRAY['no_calificado'::character varying, 'semicalificado'::character varying, 'calificado'::character varying, 'especializado'::character varying])::text[]))),
+    CONSTRAINT rrhh_puestos_check CHECK (((salario_maximo IS NULL) OR (salario_minimo IS NULL) OR (salario_maximo >= salario_minimo))),
+    CONSTRAINT rrhh_puestos_salario_maximo_check CHECK ((salario_maximo >= (0)::numeric)),
+    CONSTRAINT rrhh_puestos_salario_minimo_check CHECK ((salario_minimo >= (0)::numeric))
+);
+
+
+--
+-- Name: rrhh_puestos_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_puestos_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'rrhh_puestos'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rrhh_puestos_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_puestos_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_puestos_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_puestos_auditoria_id_seq OWNED BY public.rrhh_puestos_auditoria.id;
+
+
+--
+-- Name: rrhh_puestos_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_puestos_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_puestos_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_puestos_id_seq OWNED BY public.rrhh_puestos.id;
+
+
+--
+-- Name: rrhh_vacaciones_movimientos; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_vacaciones_movimientos (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    empleado_id bigint NOT NULL,
+    tipo character varying(15) NOT NULL,
+    dias numeric(6,2) NOT NULL,
+    fecha date DEFAULT CURRENT_DATE NOT NULL,
+    motivo character varying(255),
+    usuario_id bigint,
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rrhh_vacaciones_movimientos_dias_check CHECK ((dias <> (0)::numeric)),
+    CONSTRAINT rrhh_vacaciones_movimientos_tipo_check CHECK (((tipo)::text = ANY ((ARRAY['saldo_inicial'::character varying, 'ajuste'::character varying])::text[])))
+);
+
+
+--
+-- Name: rrhh_vacaciones_movimientos_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_vacaciones_movimientos_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'rrhh_vacaciones_movimientos'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rrhh_vacaciones_movimientos_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_vacaciones_movimientos_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_vacaciones_movimientos_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_vacaciones_movimientos_auditoria_id_seq OWNED BY public.rrhh_vacaciones_movimientos_auditoria.id;
+
+
+--
+-- Name: rrhh_vacaciones_movimientos_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_vacaciones_movimientos_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_vacaciones_movimientos_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_vacaciones_movimientos_id_seq OWNED BY public.rrhh_vacaciones_movimientos.id;
+
+
+--
+-- Name: rrhh_vacaciones_solicitudes; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_vacaciones_solicitudes (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    empleado_id bigint NOT NULL,
+    fecha_inicio date NOT NULL,
+    fecha_fin date NOT NULL,
+    dias integer NOT NULL,
+    estado character varying(15) DEFAULT 'pendiente_jefe'::character varying NOT NULL,
+    jefe_id bigint,
+    motivo character varying(255),
+    jefe_resuelto_por bigint,
+    jefe_resuelto_at timestamp without time zone,
+    jefe_nota character varying(255),
+    rrhh_resuelto_por bigint,
+    rrhh_resuelto_at timestamp without time zone,
+    rrhh_nota character varying(255),
+    creada_por bigint,
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rrhh_vacaciones_solicitudes_check CHECK ((fecha_fin >= fecha_inicio)),
+    CONSTRAINT rrhh_vacaciones_solicitudes_dias_check CHECK ((dias > 0)),
+    CONSTRAINT rrhh_vacaciones_solicitudes_estado_check CHECK (((estado)::text = ANY ((ARRAY['pendiente_jefe'::character varying, 'pendiente_rrhh'::character varying, 'aprobada'::character varying, 'rechazada'::character varying, 'cancelada'::character varying])::text[])))
+);
+
+
+--
+-- Name: rrhh_vacaciones_solicitudes_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_vacaciones_solicitudes_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'rrhh_vacaciones_solicitudes'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rrhh_vacaciones_solicitudes_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_vacaciones_solicitudes_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_vacaciones_solicitudes_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_vacaciones_solicitudes_auditoria_id_seq OWNED BY public.rrhh_vacaciones_solicitudes_auditoria.id;
+
+
+--
+-- Name: rrhh_vacaciones_solicitudes_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_vacaciones_solicitudes_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_vacaciones_solicitudes_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_vacaciones_solicitudes_id_seq OWNED BY public.rrhh_vacaciones_solicitudes.id;
+
+
+--
 -- Name: schema_migrations; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -12556,6 +17166,244 @@ ALTER TABLE ONLY public.recibos_adelanto_auditoria ALTER COLUMN id SET DEFAULT n
 
 
 --
+-- Name: rrhh_agentes id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_agentes ALTER COLUMN id SET DEFAULT nextval('public.rrhh_agentes_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_agentes_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_agentes_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rrhh_agentes_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_asistencia_ajustes id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_asistencia_ajustes ALTER COLUMN id SET DEFAULT nextval('public.rrhh_asistencia_ajustes_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_asistencia_ajustes_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_asistencia_ajustes_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rrhh_asistencia_ajustes_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_departamentos id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_departamentos ALTER COLUMN id SET DEFAULT nextval('public.rrhh_departamentos_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_departamentos_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_departamentos_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rrhh_departamentos_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_dispositivo_usuarios id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_dispositivo_usuarios ALTER COLUMN id SET DEFAULT nextval('public.rrhh_dispositivo_usuarios_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_dispositivo_usuarios_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_dispositivo_usuarios_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rrhh_dispositivo_usuarios_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_dispositivos id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_dispositivos ALTER COLUMN id SET DEFAULT nextval('public.rrhh_dispositivos_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_dispositivos_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_dispositivos_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rrhh_dispositivos_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_empleado_horarios id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_empleado_horarios ALTER COLUMN id SET DEFAULT nextval('public.rrhh_empleado_horarios_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_empleado_horarios_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_empleado_horarios_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rrhh_empleado_horarios_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_empleado_movimientos id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_empleado_movimientos ALTER COLUMN id SET DEFAULT nextval('public.rrhh_empleado_movimientos_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_empleado_movimientos_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_empleado_movimientos_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rrhh_empleado_movimientos_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_empleados id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_empleados ALTER COLUMN id SET DEFAULT nextval('public.rrhh_empleados_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_empleados_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_empleados_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rrhh_empleados_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_feriados id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_feriados ALTER COLUMN id SET DEFAULT nextval('public.rrhh_feriados_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_feriados_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_feriados_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rrhh_feriados_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_horarios id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_horarios ALTER COLUMN id SET DEFAULT nextval('public.rrhh_horarios_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_horarios_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_horarios_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rrhh_horarios_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_incapacidades id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_incapacidades ALTER COLUMN id SET DEFAULT nextval('public.rrhh_incapacidades_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_incapacidades_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_incapacidades_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rrhh_incapacidades_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_marcas id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_marcas ALTER COLUMN id SET DEFAULT nextval('public.rrhh_marcas_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_marcas_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_marcas_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rrhh_marcas_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_permiso_solicitudes id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_permiso_solicitudes ALTER COLUMN id SET DEFAULT nextval('public.rrhh_permiso_solicitudes_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_permiso_solicitudes_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_permiso_solicitudes_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rrhh_permiso_solicitudes_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_permiso_tipos id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_permiso_tipos ALTER COLUMN id SET DEFAULT nextval('public.rrhh_permiso_tipos_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_permiso_tipos_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_permiso_tipos_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rrhh_permiso_tipos_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_puestos id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_puestos ALTER COLUMN id SET DEFAULT nextval('public.rrhh_puestos_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_puestos_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_puestos_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rrhh_puestos_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_vacaciones_movimientos id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_vacaciones_movimientos ALTER COLUMN id SET DEFAULT nextval('public.rrhh_vacaciones_movimientos_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_vacaciones_movimientos_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_vacaciones_movimientos_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rrhh_vacaciones_movimientos_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_vacaciones_solicitudes id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_vacaciones_solicitudes ALTER COLUMN id SET DEFAULT nextval('public.rrhh_vacaciones_solicitudes_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_vacaciones_solicitudes_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_vacaciones_solicitudes_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rrhh_vacaciones_solicitudes_auditoria_id_seq'::regclass);
+
+
+--
 -- Name: schema_migrations id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -13447,6 +18295,310 @@ ALTER TABLE ONLY public.recibos_adelanto_auditoria
 
 ALTER TABLE ONLY public.recibos_adelanto
     ADD CONSTRAINT recibos_adelanto_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_agentes_auditoria rrhh_agentes_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_agentes_auditoria
+    ADD CONSTRAINT rrhh_agentes_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_agentes rrhh_agentes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_agentes
+    ADD CONSTRAINT rrhh_agentes_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_asistencia_ajustes_auditoria rrhh_asistencia_ajustes_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_asistencia_ajustes_auditoria
+    ADD CONSTRAINT rrhh_asistencia_ajustes_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_asistencia_ajustes rrhh_asistencia_ajustes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_asistencia_ajustes
+    ADD CONSTRAINT rrhh_asistencia_ajustes_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_departamentos_auditoria rrhh_departamentos_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_departamentos_auditoria
+    ADD CONSTRAINT rrhh_departamentos_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_departamentos rrhh_departamentos_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_departamentos
+    ADD CONSTRAINT rrhh_departamentos_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_dispositivo_usuarios_auditoria rrhh_dispositivo_usuarios_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_dispositivo_usuarios_auditoria
+    ADD CONSTRAINT rrhh_dispositivo_usuarios_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_dispositivo_usuarios rrhh_dispositivo_usuarios_dispositivo_id_empleado_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_dispositivo_usuarios
+    ADD CONSTRAINT rrhh_dispositivo_usuarios_dispositivo_id_empleado_id_key UNIQUE (dispositivo_id, empleado_id);
+
+
+--
+-- Name: rrhh_dispositivo_usuarios rrhh_dispositivo_usuarios_dispositivo_id_id_en_dispositivo_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_dispositivo_usuarios
+    ADD CONSTRAINT rrhh_dispositivo_usuarios_dispositivo_id_id_en_dispositivo_key UNIQUE (dispositivo_id, id_en_dispositivo);
+
+
+--
+-- Name: rrhh_dispositivo_usuarios rrhh_dispositivo_usuarios_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_dispositivo_usuarios
+    ADD CONSTRAINT rrhh_dispositivo_usuarios_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_dispositivos_auditoria rrhh_dispositivos_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_dispositivos_auditoria
+    ADD CONSTRAINT rrhh_dispositivos_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_dispositivos rrhh_dispositivos_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_dispositivos
+    ADD CONSTRAINT rrhh_dispositivos_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_empleado_horarios_auditoria rrhh_empleado_horarios_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_empleado_horarios_auditoria
+    ADD CONSTRAINT rrhh_empleado_horarios_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_empleado_horarios rrhh_empleado_horarios_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_empleado_horarios
+    ADD CONSTRAINT rrhh_empleado_horarios_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_empleado_movimientos_auditoria rrhh_empleado_movimientos_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_empleado_movimientos_auditoria
+    ADD CONSTRAINT rrhh_empleado_movimientos_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_empleado_movimientos rrhh_empleado_movimientos_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_empleado_movimientos
+    ADD CONSTRAINT rrhh_empleado_movimientos_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_empleado_pin rrhh_empleado_pin_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_empleado_pin
+    ADD CONSTRAINT rrhh_empleado_pin_pkey PRIMARY KEY (empleado_id);
+
+
+--
+-- Name: rrhh_empleados_auditoria rrhh_empleados_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_empleados_auditoria
+    ADD CONSTRAINT rrhh_empleados_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_empleados rrhh_empleados_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_empleados
+    ADD CONSTRAINT rrhh_empleados_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_feriados_auditoria rrhh_feriados_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_feriados_auditoria
+    ADD CONSTRAINT rrhh_feriados_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_feriados rrhh_feriados_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_feriados
+    ADD CONSTRAINT rrhh_feriados_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_horario_dias rrhh_horario_dias_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_horario_dias
+    ADD CONSTRAINT rrhh_horario_dias_pkey PRIMARY KEY (horario_id, dia_semana);
+
+
+--
+-- Name: rrhh_horarios_auditoria rrhh_horarios_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_horarios_auditoria
+    ADD CONSTRAINT rrhh_horarios_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_horarios rrhh_horarios_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_horarios
+    ADD CONSTRAINT rrhh_horarios_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_incapacidades_auditoria rrhh_incapacidades_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_incapacidades_auditoria
+    ADD CONSTRAINT rrhh_incapacidades_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_incapacidades rrhh_incapacidades_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_incapacidades
+    ADD CONSTRAINT rrhh_incapacidades_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_marcas_auditoria rrhh_marcas_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_marcas_auditoria
+    ADD CONSTRAINT rrhh_marcas_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_marcas rrhh_marcas_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_marcas
+    ADD CONSTRAINT rrhh_marcas_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_permiso_solicitudes_auditoria rrhh_permiso_solicitudes_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_permiso_solicitudes_auditoria
+    ADD CONSTRAINT rrhh_permiso_solicitudes_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_permiso_solicitudes rrhh_permiso_solicitudes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_permiso_solicitudes
+    ADD CONSTRAINT rrhh_permiso_solicitudes_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_permiso_tipos_auditoria rrhh_permiso_tipos_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_permiso_tipos_auditoria
+    ADD CONSTRAINT rrhh_permiso_tipos_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_permiso_tipos rrhh_permiso_tipos_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_permiso_tipos
+    ADD CONSTRAINT rrhh_permiso_tipos_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_puestos_auditoria rrhh_puestos_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_puestos_auditoria
+    ADD CONSTRAINT rrhh_puestos_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_puestos rrhh_puestos_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_puestos
+    ADD CONSTRAINT rrhh_puestos_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_vacaciones_movimientos_auditoria rrhh_vacaciones_movimientos_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_vacaciones_movimientos_auditoria
+    ADD CONSTRAINT rrhh_vacaciones_movimientos_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_vacaciones_movimientos rrhh_vacaciones_movimientos_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_vacaciones_movimientos
+    ADD CONSTRAINT rrhh_vacaciones_movimientos_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_vacaciones_solicitudes_auditoria rrhh_vacaciones_solicitudes_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_vacaciones_solicitudes_auditoria
+    ADD CONSTRAINT rrhh_vacaciones_solicitudes_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_vacaciones_solicitudes rrhh_vacaciones_solicitudes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_vacaciones_solicitudes
+    ADD CONSTRAINT rrhh_vacaciones_solicitudes_pkey PRIMARY KEY (id);
 
 
 --
@@ -14359,6 +19511,265 @@ CREATE INDEX idx_recibos_adelanto_auditoria_registro ON public.recibos_adelanto_
 
 
 --
+-- Name: idx_rrhh_agentes_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_agentes_auditoria_registro ON public.rrhh_agentes_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_rrhh_ajustes_fecha; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_ajustes_fecha ON public.rrhh_asistencia_ajustes USING btree (empresa_id, fecha) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_rrhh_asistencia_ajustes_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_asistencia_ajustes_auditoria_registro ON public.rrhh_asistencia_ajustes_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_rrhh_departamentos_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_departamentos_auditoria_registro ON public.rrhh_departamentos_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_rrhh_departamentos_padre; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_departamentos_padre ON public.rrhh_departamentos USING btree (departamento_padre_id) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_rrhh_dispositivo_usuarios_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_dispositivo_usuarios_auditoria_registro ON public.rrhh_dispositivo_usuarios_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_rrhh_dispositivos_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_dispositivos_auditoria_registro ON public.rrhh_dispositivos_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_rrhh_emp_horarios_empleado; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_emp_horarios_empleado ON public.rrhh_empleado_horarios USING btree (empleado_id, vigente_desde DESC) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_rrhh_emp_horarios_horario; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_emp_horarios_horario ON public.rrhh_empleado_horarios USING btree (horario_id) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_rrhh_empleado_horarios_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_empleado_horarios_auditoria_registro ON public.rrhh_empleado_horarios_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_rrhh_empleado_movimientos_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_empleado_movimientos_auditoria_registro ON public.rrhh_empleado_movimientos_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_rrhh_empleados_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_empleados_auditoria_registro ON public.rrhh_empleados_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_rrhh_empleados_departamento; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_empleados_departamento ON public.rrhh_empleados USING btree (departamento_id) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_rrhh_empleados_jefe; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_empleados_jefe ON public.rrhh_empleados USING btree (jefe_id) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_rrhh_empleados_puesto; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_empleados_puesto ON public.rrhh_empleados USING btree (puesto_id) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_rrhh_feriados_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_feriados_auditoria_registro ON public.rrhh_feriados_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_rrhh_horarios_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_horarios_auditoria_registro ON public.rrhh_horarios_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_rrhh_inc_empleado; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_inc_empleado ON public.rrhh_incapacidades USING btree (empleado_id, fecha_inicio) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_rrhh_inc_empresa; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_inc_empresa ON public.rrhh_incapacidades USING btree (empresa_id, estado, fecha_inicio) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_rrhh_incapacidades_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_incapacidades_auditoria_registro ON public.rrhh_incapacidades_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_rrhh_marcas_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_marcas_auditoria_registro ON public.rrhh_marcas_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_rrhh_marcas_empleado; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_marcas_empleado ON public.rrhh_marcas USING btree (empleado_id, fecha_hora) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_rrhh_marcas_estado; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_marcas_estado ON public.rrhh_marcas USING btree (empresa_id, estado) WHERE ((deleted_at IS NULL) AND ((estado)::text <> 'valida'::text));
+
+
+--
+-- Name: idx_rrhh_marcas_fecha; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_marcas_fecha ON public.rrhh_marcas USING btree (empresa_id, fecha_hora) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_rrhh_movimientos_empleado; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_movimientos_empleado ON public.rrhh_empleado_movimientos USING btree (empleado_id, fecha DESC, id DESC);
+
+
+--
+-- Name: idx_rrhh_perm_sol_empleado; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_perm_sol_empleado ON public.rrhh_permiso_solicitudes USING btree (empleado_id, fecha_inicio) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_rrhh_perm_sol_estado; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_perm_sol_estado ON public.rrhh_permiso_solicitudes USING btree (empresa_id, estado) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_rrhh_perm_sol_jefe; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_perm_sol_jefe ON public.rrhh_permiso_solicitudes USING btree (jefe_id, estado) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_rrhh_permiso_solicitudes_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_permiso_solicitudes_auditoria_registro ON public.rrhh_permiso_solicitudes_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_rrhh_permiso_tipos_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_permiso_tipos_auditoria_registro ON public.rrhh_permiso_tipos_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_rrhh_puestos_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_puestos_auditoria_registro ON public.rrhh_puestos_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_rrhh_vac_mov_empleado; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_vac_mov_empleado ON public.rrhh_vacaciones_movimientos USING btree (empleado_id) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_rrhh_vac_sol_empleado; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_vac_sol_empleado ON public.rrhh_vacaciones_solicitudes USING btree (empleado_id, fecha_inicio) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_rrhh_vac_sol_estado; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_vac_sol_estado ON public.rrhh_vacaciones_solicitudes USING btree (empresa_id, estado) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_rrhh_vac_sol_jefe; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_vac_sol_jefe ON public.rrhh_vacaciones_solicitudes USING btree (jefe_id, estado) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_rrhh_vacaciones_movimientos_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_vacaciones_movimientos_auditoria_registro ON public.rrhh_vacaciones_movimientos_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_rrhh_vacaciones_solicitudes_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_vacaciones_solicitudes_auditoria_registro ON public.rrhh_vacaciones_solicitudes_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
 -- Name: idx_sucursal_bodegas_auditoria_registro; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -14419,6 +19830,104 @@ CREATE UNIQUE INDEX uq_emp_tipo_imp_empresa_codigo ON public.empresa_tipos_impue
 --
 
 CREATE UNIQUE INDEX uq_fr_clave ON public.facturas_recibidas USING btree (empresa_id, clave) WHERE (clave IS NOT NULL);
+
+
+--
+-- Name: uq_rrhh_agentes_nombre; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_rrhh_agentes_nombre ON public.rrhh_agentes USING btree (empresa_id, lower((nombre)::text)) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: uq_rrhh_agentes_token; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_rrhh_agentes_token ON public.rrhh_agentes USING btree (token_hash) WHERE (token_hash IS NOT NULL);
+
+
+--
+-- Name: uq_rrhh_ajustes; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_rrhh_ajustes ON public.rrhh_asistencia_ajustes USING btree (empleado_id, fecha, tipo) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: uq_rrhh_departamentos_nombre; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_rrhh_departamentos_nombre ON public.rrhh_departamentos USING btree (empresa_id, lower((nombre)::text)) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: uq_rrhh_dispositivos_nombre; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_rrhh_dispositivos_nombre ON public.rrhh_dispositivos USING btree (empresa_id, lower((nombre)::text)) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: uq_rrhh_empleados_codigo; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_rrhh_empleados_codigo ON public.rrhh_empleados USING btree (empresa_id, lower((codigo)::text)) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: uq_rrhh_empleados_funcionario; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_rrhh_empleados_funcionario ON public.rrhh_empleados USING btree (funcionario_id) WHERE ((funcionario_id IS NOT NULL) AND (deleted_at IS NULL));
+
+
+--
+-- Name: uq_rrhh_empleados_identificacion; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_rrhh_empleados_identificacion ON public.rrhh_empleados USING btree (empresa_id, lower((identificacion)::text)) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: uq_rrhh_feriados_fecha; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_rrhh_feriados_fecha ON public.rrhh_feriados USING btree (empresa_id, fecha) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: uq_rrhh_horarios_nombre; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_rrhh_horarios_nombre ON public.rrhh_horarios USING btree (empresa_id, lower((nombre)::text)) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: uq_rrhh_marcas_referencia; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_rrhh_marcas_referencia ON public.rrhh_marcas USING btree (dispositivo_id, referencia_externa) WHERE (referencia_externa IS NOT NULL);
+
+
+--
+-- Name: uq_rrhh_permiso_tipos_nombre; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_rrhh_permiso_tipos_nombre ON public.rrhh_permiso_tipos USING btree (empresa_id, lower((nombre)::text)) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: uq_rrhh_puestos_nombre; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_rrhh_puestos_nombre ON public.rrhh_puestos USING btree (empresa_id, lower((nombre)::text)) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: uq_rrhh_vac_mov_saldo_inicial; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_rrhh_vac_mov_saldo_inicial ON public.rrhh_vacaciones_movimientos USING btree (empleado_id) WHERE (((tipo)::text = 'saldo_inicial'::text) AND (deleted_at IS NULL));
 
 
 --
@@ -14660,6 +20169,125 @@ CREATE TRIGGER trg_recibos_adelanto_auditoria AFTER INSERT OR DELETE OR UPDATE O
 
 
 --
+-- Name: rrhh_agentes trg_rrhh_agentes_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_rrhh_agentes_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rrhh_agentes FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: rrhh_asistencia_ajustes trg_rrhh_asistencia_ajustes_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_rrhh_asistencia_ajustes_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rrhh_asistencia_ajustes FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: rrhh_departamentos trg_rrhh_departamentos_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_rrhh_departamentos_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rrhh_departamentos FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: rrhh_dispositivo_usuarios trg_rrhh_dispositivo_usuarios_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_rrhh_dispositivo_usuarios_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rrhh_dispositivo_usuarios FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: rrhh_dispositivos trg_rrhh_dispositivos_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_rrhh_dispositivos_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rrhh_dispositivos FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: rrhh_empleado_horarios trg_rrhh_empleado_horarios_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_rrhh_empleado_horarios_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rrhh_empleado_horarios FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: rrhh_empleado_movimientos trg_rrhh_empleado_movimientos_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_rrhh_empleado_movimientos_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rrhh_empleado_movimientos FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: rrhh_empleados trg_rrhh_empleados_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_rrhh_empleados_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rrhh_empleados FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: rrhh_feriados trg_rrhh_feriados_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_rrhh_feriados_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rrhh_feriados FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: rrhh_horarios trg_rrhh_horarios_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_rrhh_horarios_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rrhh_horarios FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: rrhh_incapacidades trg_rrhh_incapacidades_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_rrhh_incapacidades_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rrhh_incapacidades FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: rrhh_marcas trg_rrhh_marcas_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_rrhh_marcas_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rrhh_marcas FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: rrhh_permiso_solicitudes trg_rrhh_permiso_solicitudes_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_rrhh_permiso_solicitudes_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rrhh_permiso_solicitudes FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: rrhh_permiso_tipos trg_rrhh_permiso_tipos_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_rrhh_permiso_tipos_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rrhh_permiso_tipos FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: rrhh_puestos trg_rrhh_puestos_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_rrhh_puestos_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rrhh_puestos FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: rrhh_vacaciones_movimientos trg_rrhh_vacaciones_movimientos_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_rrhh_vacaciones_movimientos_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rrhh_vacaciones_movimientos FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: rrhh_vacaciones_solicitudes trg_rrhh_vacaciones_solicitudes_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_rrhh_vacaciones_solicitudes_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rrhh_vacaciones_solicitudes FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
 -- Name: servicios trg_servicios_auditoria; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -14832,6 +20460,14 @@ ALTER TABLE ONLY public.facturas_recibidas
 
 
 --
+-- Name: rrhh_departamentos fk_rrhh_departamentos_jefe; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_departamentos
+    ADD CONSTRAINT fk_rrhh_departamentos_jefe FOREIGN KEY (jefe_empleado_id) REFERENCES public.rrhh_empleados(id);
+
+
+--
 -- Name: funcionario_sucursales funcionario_sucursales_funcionario_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -14936,6 +20572,206 @@ ALTER TABLE ONLY public.recibos_adelanto
 
 
 --
+-- Name: rrhh_asistencia_ajustes rrhh_asistencia_ajustes_empleado_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_asistencia_ajustes
+    ADD CONSTRAINT rrhh_asistencia_ajustes_empleado_id_fkey FOREIGN KEY (empleado_id) REFERENCES public.rrhh_empleados(id);
+
+
+--
+-- Name: rrhh_departamentos rrhh_departamentos_departamento_padre_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_departamentos
+    ADD CONSTRAINT rrhh_departamentos_departamento_padre_id_fkey FOREIGN KEY (departamento_padre_id) REFERENCES public.rrhh_departamentos(id);
+
+
+--
+-- Name: rrhh_dispositivo_usuarios rrhh_dispositivo_usuarios_dispositivo_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_dispositivo_usuarios
+    ADD CONSTRAINT rrhh_dispositivo_usuarios_dispositivo_id_fkey FOREIGN KEY (dispositivo_id) REFERENCES public.rrhh_dispositivos(id);
+
+
+--
+-- Name: rrhh_dispositivo_usuarios rrhh_dispositivo_usuarios_empleado_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_dispositivo_usuarios
+    ADD CONSTRAINT rrhh_dispositivo_usuarios_empleado_id_fkey FOREIGN KEY (empleado_id) REFERENCES public.rrhh_empleados(id);
+
+
+--
+-- Name: rrhh_dispositivos rrhh_dispositivos_agente_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_dispositivos
+    ADD CONSTRAINT rrhh_dispositivos_agente_id_fkey FOREIGN KEY (agente_id) REFERENCES public.rrhh_agentes(id);
+
+
+--
+-- Name: rrhh_empleado_horarios rrhh_empleado_horarios_empleado_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_empleado_horarios
+    ADD CONSTRAINT rrhh_empleado_horarios_empleado_id_fkey FOREIGN KEY (empleado_id) REFERENCES public.rrhh_empleados(id);
+
+
+--
+-- Name: rrhh_empleado_horarios rrhh_empleado_horarios_horario_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_empleado_horarios
+    ADD CONSTRAINT rrhh_empleado_horarios_horario_id_fkey FOREIGN KEY (horario_id) REFERENCES public.rrhh_horarios(id);
+
+
+--
+-- Name: rrhh_empleado_movimientos rrhh_empleado_movimientos_empleado_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_empleado_movimientos
+    ADD CONSTRAINT rrhh_empleado_movimientos_empleado_id_fkey FOREIGN KEY (empleado_id) REFERENCES public.rrhh_empleados(id);
+
+
+--
+-- Name: rrhh_empleado_pin rrhh_empleado_pin_empleado_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_empleado_pin
+    ADD CONSTRAINT rrhh_empleado_pin_empleado_id_fkey FOREIGN KEY (empleado_id) REFERENCES public.rrhh_empleados(id);
+
+
+--
+-- Name: rrhh_empleados rrhh_empleados_departamento_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_empleados
+    ADD CONSTRAINT rrhh_empleados_departamento_id_fkey FOREIGN KEY (departamento_id) REFERENCES public.rrhh_departamentos(id);
+
+
+--
+-- Name: rrhh_empleados rrhh_empleados_funcionario_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_empleados
+    ADD CONSTRAINT rrhh_empleados_funcionario_id_fkey FOREIGN KEY (funcionario_id) REFERENCES public.funcionarios(id);
+
+
+--
+-- Name: rrhh_empleados rrhh_empleados_jefe_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_empleados
+    ADD CONSTRAINT rrhh_empleados_jefe_id_fkey FOREIGN KEY (jefe_id) REFERENCES public.rrhh_empleados(id);
+
+
+--
+-- Name: rrhh_empleados rrhh_empleados_puesto_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_empleados
+    ADD CONSTRAINT rrhh_empleados_puesto_id_fkey FOREIGN KEY (puesto_id) REFERENCES public.rrhh_puestos(id);
+
+
+--
+-- Name: rrhh_horario_dias rrhh_horario_dias_horario_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_horario_dias
+    ADD CONSTRAINT rrhh_horario_dias_horario_id_fkey FOREIGN KEY (horario_id) REFERENCES public.rrhh_horarios(id) ON DELETE CASCADE;
+
+
+--
+-- Name: rrhh_incapacidades rrhh_incapacidades_empleado_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_incapacidades
+    ADD CONSTRAINT rrhh_incapacidades_empleado_id_fkey FOREIGN KEY (empleado_id) REFERENCES public.rrhh_empleados(id);
+
+
+--
+-- Name: rrhh_marcas rrhh_marcas_agente_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_marcas
+    ADD CONSTRAINT rrhh_marcas_agente_id_fkey FOREIGN KEY (agente_id) REFERENCES public.rrhh_agentes(id);
+
+
+--
+-- Name: rrhh_marcas rrhh_marcas_dispositivo_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_marcas
+    ADD CONSTRAINT rrhh_marcas_dispositivo_id_fkey FOREIGN KEY (dispositivo_id) REFERENCES public.rrhh_dispositivos(id);
+
+
+--
+-- Name: rrhh_marcas rrhh_marcas_empleado_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_marcas
+    ADD CONSTRAINT rrhh_marcas_empleado_id_fkey FOREIGN KEY (empleado_id) REFERENCES public.rrhh_empleados(id);
+
+
+--
+-- Name: rrhh_permiso_solicitudes rrhh_permiso_solicitudes_empleado_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_permiso_solicitudes
+    ADD CONSTRAINT rrhh_permiso_solicitudes_empleado_id_fkey FOREIGN KEY (empleado_id) REFERENCES public.rrhh_empleados(id);
+
+
+--
+-- Name: rrhh_permiso_solicitudes rrhh_permiso_solicitudes_jefe_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_permiso_solicitudes
+    ADD CONSTRAINT rrhh_permiso_solicitudes_jefe_id_fkey FOREIGN KEY (jefe_id) REFERENCES public.rrhh_empleados(id);
+
+
+--
+-- Name: rrhh_permiso_solicitudes rrhh_permiso_solicitudes_tipo_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_permiso_solicitudes
+    ADD CONSTRAINT rrhh_permiso_solicitudes_tipo_id_fkey FOREIGN KEY (tipo_id) REFERENCES public.rrhh_permiso_tipos(id);
+
+
+--
+-- Name: rrhh_puestos rrhh_puestos_departamento_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_puestos
+    ADD CONSTRAINT rrhh_puestos_departamento_id_fkey FOREIGN KEY (departamento_id) REFERENCES public.rrhh_departamentos(id);
+
+
+--
+-- Name: rrhh_vacaciones_movimientos rrhh_vacaciones_movimientos_empleado_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_vacaciones_movimientos
+    ADD CONSTRAINT rrhh_vacaciones_movimientos_empleado_id_fkey FOREIGN KEY (empleado_id) REFERENCES public.rrhh_empleados(id);
+
+
+--
+-- Name: rrhh_vacaciones_solicitudes rrhh_vacaciones_solicitudes_empleado_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_vacaciones_solicitudes
+    ADD CONSTRAINT rrhh_vacaciones_solicitudes_empleado_id_fkey FOREIGN KEY (empleado_id) REFERENCES public.rrhh_empleados(id);
+
+
+--
+-- Name: rrhh_vacaciones_solicitudes rrhh_vacaciones_solicitudes_jefe_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_vacaciones_solicitudes
+    ADD CONSTRAINT rrhh_vacaciones_solicitudes_jefe_id_fkey FOREIGN KEY (jefe_id) REFERENCES public.rrhh_empleados(id);
+
+
+--
 -- Name: sucursal_bodegas sucursal_bodegas_bodega_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -14947,5 +20783,5 @@ ALTER TABLE ONLY public.sucursal_bodegas
 -- PostgreSQL database dump complete
 --
 
-\unrestrict k2b14o6M4h9Et1l4P4dHQeMvTbEhfI0gEOvh5impdVJrC97zsOmXA0UKptd02Sy
+\unrestrict S4AwWs2c0EmEUxOtmI4GUq8VGbKe5sTQ73Dpe2K1ucxmIDdtEGTsPpqQrEqbdO1
 
