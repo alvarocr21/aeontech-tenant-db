@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict TVrCVA9biMVdIffWRLnMiN4dXxDvkKcU4LAmvSzwb5jYSwYoxnx6X6EJbCBV7D6
+\restrict wnQo50ueRvQMNo8kg1hxSaeVFU1NpnPPPpGvuC49QizrVdemQVxaxodKEJhrsb3
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
@@ -173,6 +173,30 @@ BEGIN
   WHERE ecv.empresa_id = p_empresa_id
   ORDER BY ecv.codigo;
 END;
+$$;
+
+
+--
+-- Name: fn_rrhh_cesantia_dias_anio(integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_rrhh_cesantia_dias_anio(p_anios integer) RETURNS numeric
+    LANGUAGE sql IMMUTABLE
+    AS $$
+    SELECT CASE
+        WHEN p_anios <= 0 THEN 0
+        WHEN p_anios = 1 THEN 19.5
+        WHEN p_anios = 2 THEN 20
+        WHEN p_anios = 3 THEN 20.5
+        WHEN p_anios = 4 THEN 21
+        WHEN p_anios = 5 THEN 21.24
+        WHEN p_anios = 6 THEN 21.5
+        WHEN p_anios BETWEEN 7 AND 9 THEN 22
+        WHEN p_anios = 10 THEN 21.5
+        WHEN p_anios = 11 THEN 21
+        WHEN p_anios = 12 THEN 20.5
+        ELSE 20
+    END::NUMERIC;
 $$;
 
 
@@ -8258,6 +8282,317 @@ END; $$;
 
 
 --
+-- Name: sp_rrhh_aguinaldo_calcular(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_aguinaldo_calcular(p_empresa_id bigint, p_id bigint) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_a        RECORD;
+    v_e        RECORD;
+    v_base_pl  NUMERIC;
+    v_npl      INTEGER;
+    v_meses    INTEGER;
+    v_desglose JSONB;
+    v_pend     INTEGER;
+    v_aj       NUMERIC;
+    v_base     NUMERIC;
+    v_agui     NUMERIC;
+    v_adv      TEXT[];
+    v_n        INTEGER := 0;
+BEGIN
+    SELECT * INTO v_a FROM rrhh_aguinaldos a WHERE a.id = p_id AND a.empresa_id = p_empresa_id AND a.deleted_at IS NULL FOR UPDATE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'AGUINALDO_INVALIDO: El aguinaldo no existe.'; END IF;
+    IF v_a.estado NOT IN ('borrador', 'calculado') THEN RAISE EXCEPTION 'AGUINALDO_INVALIDO: Solo se puede calcular un aguinaldo en borrador o calculado.'; END IF;
+
+    DELETE FROM rrhh_aguinaldo_empleados WHERE aguinaldo_id = p_id;
+
+    FOR v_e IN
+        SELECT e.*, d.nombre AS depto, pu.nombre AS puesto_nombre
+          FROM rrhh_empleados e
+          LEFT JOIN rrhh_departamentos d ON d.id = e.departamento_id
+          LEFT JOIN rrhh_puestos pu ON pu.id = e.puesto_id
+         WHERE e.empresa_id = p_empresa_id AND e.deleted_at IS NULL AND e.moneda = v_a.moneda
+           AND e.fecha_ingreso <= v_a.fecha_fin AND (e.fecha_salida IS NULL OR e.fecha_salida >= v_a.fecha_inicio)
+           AND (e.estado = 'activo' OR (e.estado = 'liquidado' AND e.fecha_salida IS NOT NULL))
+         ORDER BY e.codigo
+    LOOP
+        v_adv := ARRAY[]::TEXT[];
+
+        -- Base: lo reportado a la CCSS en planillas aprobadas o pagadas cuya fecha final cae en el período
+        SELECT COALESCE(SUM(x.base), 0), COALESCE(SUM(x.n), 0)::INTEGER, COUNT(*)::INTEGER,
+               COALESCE(jsonb_agg(jsonb_build_object('mes', x.mes, 'base', x.base) ORDER BY x.mes), '[]'::JSONB)
+          INTO v_base_pl, v_npl, v_meses, v_desglose
+          FROM (SELECT to_char(pl.fecha_fin, 'YYYY-MM') AS mes, SUM(pe.base_ccss) AS base, COUNT(*) AS n
+                  FROM rrhh_planilla_empleados pe JOIN rrhh_planillas pl ON pl.id = pe.planilla_id
+                 WHERE pe.empleado_id = v_e.id AND pl.empresa_id = p_empresa_id AND pl.deleted_at IS NULL AND pl.moneda = v_a.moneda
+                   AND pl.estado IN ('aprobada', 'pagada') AND pl.fecha_fin BETWEEN v_a.fecha_inicio AND v_a.fecha_fin
+                 GROUP BY 1) x;
+
+        SELECT COUNT(*)::INTEGER INTO v_pend
+          FROM rrhh_planilla_empleados pe JOIN rrhh_planillas pl ON pl.id = pe.planilla_id
+         WHERE pe.empleado_id = v_e.id AND pl.empresa_id = p_empresa_id AND pl.deleted_at IS NULL AND pl.moneda = v_a.moneda
+           AND pl.estado = 'calculada' AND pl.fecha_fin BETWEEN v_a.fecha_inicio AND v_a.fecha_fin;
+
+        SELECT COALESCE(SUM(CASE WHEN l.tipo = 'suma' THEN l.monto ELSE -l.monto END), 0) INTO v_aj
+          FROM rrhh_aguinaldo_lineas l WHERE l.aguinaldo_id = p_id AND l.empleado_id = v_e.id;
+
+        v_base := GREATEST(v_base_pl + v_aj, 0);
+        v_agui := round(v_base / 12, 2);
+
+        IF v_pend > 0 THEN
+            v_adv := array_append(v_adv, ('Hay ' || v_pend || ' planilla(s) calculada(s) sin aprobar en el período; no suman a la base.')::TEXT);
+        END IF;
+        IF v_base_pl = 0 AND v_aj = 0 THEN
+            v_adv := array_append(v_adv, 'Sin planillas aprobadas ni ajustes en el período: el aguinaldo es cero.'::TEXT);
+        END IF;
+        IF v_base_pl + v_aj < 0 THEN v_adv := array_append(v_adv, 'Los ajustes dejan la base en negativo; se toma cero.'::TEXT); END IF;
+        IF v_e.fecha_ingreso > v_a.fecha_inicio OR (v_e.fecha_salida IS NOT NULL AND v_e.fecha_salida < v_a.fecha_fin) THEN
+            v_adv := array_append(v_adv, 'Ingresó o salió dentro del período: el aguinaldo es proporcional a lo devengado.'::TEXT);
+        END IF;
+        IF v_e.banco IS NULL OR v_e.iban IS NULL THEN v_adv := array_append(v_adv, 'Sin banco o cuenta IBAN para el pago.'::TEXT); END IF;
+
+        INSERT INTO rrhh_aguinaldo_empleados (
+            aguinaldo_id, empleado_id, codigo, nombre, tipo_identificacion, identificacion, departamento, puesto, banco, iban,
+            fecha_ingreso, fecha_salida, planillas, meses_con_pago, base_planillas, ajustes, base_total, aguinaldo, desglose, advertencias
+        ) VALUES (
+            p_id, v_e.id, v_e.codigo, btrim(v_e.nombre || ' ' || v_e.apellido1 || ' ' || COALESCE(v_e.apellido2, '')), v_e.tipo_identificacion,
+            v_e.identificacion, v_e.depto, v_e.puesto_nombre, v_e.banco, v_e.iban,
+            v_e.fecha_ingreso, v_e.fecha_salida, v_npl, v_meses, v_base_pl, v_aj, v_base, v_agui, v_desglose, to_jsonb(v_adv)
+        );
+        v_n := v_n + 1;
+    END LOOP;
+
+    -- Ajustes de empleados que ya no entran en el aguinaldo
+    DELETE FROM rrhh_aguinaldo_lineas l
+     WHERE l.aguinaldo_id = p_id AND NOT EXISTS (SELECT 1 FROM rrhh_aguinaldo_empleados ae WHERE ae.aguinaldo_id = p_id AND ae.empleado_id = l.empleado_id);
+
+    UPDATE rrhh_aguinaldos a
+       SET estado = 'calculado', calculado_at = NOW(), updated_at = NOW(), total_empleados = v_n,
+           total_base = COALESCE((SELECT SUM(ae.base_total) FROM rrhh_aguinaldo_empleados ae WHERE ae.aguinaldo_id = p_id), 0),
+           total_aguinaldo = COALESCE((SELECT SUM(ae.aguinaldo) FROM rrhh_aguinaldo_empleados ae WHERE ae.aguinaldo_id = p_id), 0)
+     WHERE a.id = p_id;
+    RETURN v_n;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_aguinaldo_create(bigint, character varying, integer, date, character varying, character varying, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_aguinaldo_create(p_empresa_id bigint, p_nombre character varying, p_anio integer, p_pago date, p_moneda character varying, p_notas character varying, p_user_id bigint) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_id BIGINT; v_nom VARCHAR := btrim(COALESCE(p_nombre, '')); v_ini DATE; v_fin DATE; v_mon VARCHAR := COALESCE(NULLIF(btrim(p_moneda), ''), 'CRC');
+BEGIN
+    IF v_nom = '' THEN RAISE EXCEPTION 'AGUINALDO_INVALIDO: Indique el nombre del aguinaldo.'; END IF;
+    IF p_anio IS NULL OR p_anio NOT BETWEEN 2000 AND 2100 THEN RAISE EXCEPTION 'AGUINALDO_INVALIDO: Indique un año válido.'; END IF;
+    v_ini := make_date(p_anio - 1, 12, 1);
+    v_fin := make_date(p_anio, 11, 30);
+    IF p_pago IS NULL OR p_pago < v_fin THEN RAISE EXCEPTION 'FECHA_INVALIDA: La fecha de pago no puede ser anterior al cierre del período (30 de noviembre).'; END IF;
+    IF EXISTS (SELECT 1 FROM rrhh_aguinaldos a WHERE a.empresa_id = p_empresa_id AND a.deleted_at IS NULL AND a.estado <> 'anulado' AND a.anio = p_anio AND a.moneda = v_mon) THEN
+        RAISE EXCEPTION 'AGUINALDO_INVALIDO: Ya existe un aguinaldo % en % para ese período.', p_anio, v_mon;
+    END IF;
+    INSERT INTO rrhh_aguinaldos (empresa_id, nombre, anio, fecha_inicio, fecha_fin, fecha_pago, moneda, notas, creado_por)
+    VALUES (p_empresa_id, v_nom, p_anio, v_ini, v_fin, p_pago, v_mon, NULLIF(btrim(COALESCE(p_notas, '')), ''), p_user_id)
+    RETURNING rrhh_aguinaldos.id INTO v_id;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_aguinaldo_delete(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_aguinaldo_delete(p_empresa_id bigint, p_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_estado VARCHAR;
+BEGIN
+    SELECT a.estado INTO v_estado FROM rrhh_aguinaldos a WHERE a.id = p_id AND a.empresa_id = p_empresa_id AND a.deleted_at IS NULL;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    IF v_estado NOT IN ('borrador', 'calculado', 'anulado') THEN RAISE EXCEPTION 'AGUINALDO_INVALIDO: Un aguinaldo aprobado o pagado no se elimina; anúlelo si corresponde.'; END IF;
+    DELETE FROM rrhh_aguinaldo_lineas WHERE aguinaldo_id = p_id;
+    DELETE FROM rrhh_aguinaldo_empleados WHERE aguinaldo_id = p_id;
+    UPDATE rrhh_aguinaldos SET deleted_at = NOW(), updated_at = NOW() WHERE id = p_id;
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_aguinaldo_empleados(bigint, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_aguinaldo_empleados(p_empresa_id bigint, p_id bigint, p_empleado_id bigint DEFAULT NULL::bigint) RETURNS TABLE(empleado_id bigint, codigo character varying, nombre character varying, tipo_identificacion character varying, identificacion character varying, departamento character varying, puesto character varying, banco character varying, iban character varying, fecha_ingreso date, fecha_salida date, planillas integer, meses_con_pago integer, base_planillas numeric, ajustes numeric, base_total numeric, aguinaldo numeric, desglose jsonb, advertencias jsonb)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT ae.empleado_id, ae.codigo::VARCHAR, ae.nombre::VARCHAR, ae.tipo_identificacion::VARCHAR, ae.identificacion::VARCHAR, ae.departamento::VARCHAR,
+           ae.puesto::VARCHAR, ae.banco::VARCHAR, ae.iban::VARCHAR, ae.fecha_ingreso, ae.fecha_salida, ae.planillas, ae.meses_con_pago, ae.base_planillas,
+           ae.ajustes, ae.base_total, ae.aguinaldo, ae.desglose, ae.advertencias
+      FROM rrhh_aguinaldo_empleados ae JOIN rrhh_aguinaldos a ON a.id = ae.aguinaldo_id
+     WHERE a.id = p_id AND a.empresa_id = p_empresa_id AND a.deleted_at IS NULL AND (p_empleado_id IS NULL OR ae.empleado_id = p_empleado_id)
+     ORDER BY ae.codigo;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_aguinaldo_estado(bigint, bigint, character varying, bigint, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_aguinaldo_estado(p_empresa_id bigint, p_id bigint, p_accion character varying, p_user_id bigint, p_nota character varying DEFAULT NULL::character varying) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_a RECORD;
+BEGIN
+    SELECT * INTO v_a FROM rrhh_aguinaldos a WHERE a.id = p_id AND a.empresa_id = p_empresa_id AND a.deleted_at IS NULL FOR UPDATE;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+
+    IF p_accion = 'aprobar' THEN
+        IF v_a.estado <> 'calculado' THEN RAISE EXCEPTION 'AGUINALDO_INVALIDO: Solo se puede aprobar un aguinaldo calculado.'; END IF;
+        IF v_a.total_empleados = 0 THEN RAISE EXCEPTION 'AGUINALDO_INVALIDO: El aguinaldo no tiene empleados.'; END IF;
+        UPDATE rrhh_aguinaldos SET estado = 'aprobado', aprobado_por = p_user_id, aprobado_at = NOW(), updated_at = NOW() WHERE id = p_id;
+    ELSIF p_accion = 'reabrir' THEN
+        IF v_a.estado <> 'aprobado' THEN RAISE EXCEPTION 'AGUINALDO_INVALIDO: Solo se puede reabrir un aguinaldo aprobado.'; END IF;
+        UPDATE rrhh_aguinaldos SET estado = 'calculado', aprobado_por = NULL, aprobado_at = NULL, updated_at = NOW() WHERE id = p_id;
+    ELSIF p_accion = 'pagar' THEN
+        IF v_a.estado <> 'aprobado' THEN RAISE EXCEPTION 'AGUINALDO_INVALIDO: Solo se puede marcar como pagado un aguinaldo aprobado.'; END IF;
+        UPDATE rrhh_aguinaldos SET estado = 'pagado', pagado_por = p_user_id, pagado_at = NOW(), updated_at = NOW() WHERE id = p_id;
+    ELSIF p_accion = 'anular' THEN
+        IF v_a.estado NOT IN ('borrador', 'calculado', 'aprobado') THEN RAISE EXCEPTION 'AGUINALDO_INVALIDO: No se puede anular un aguinaldo %.', v_a.estado; END IF;
+        IF btrim(COALESCE(p_nota, '')) = '' THEN RAISE EXCEPTION 'AGUINALDO_INVALIDO: Indique el motivo de la anulación.'; END IF;
+        UPDATE rrhh_aguinaldos SET estado = 'anulado', anulado_por = p_user_id, anulado_at = NOW(), anulado_nota = btrim(p_nota), updated_at = NOW() WHERE id = p_id;
+    ELSE
+        RAISE EXCEPTION 'AGUINALDO_INVALIDO: Acción desconocida.';
+    END IF;
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_aguinaldo_get(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_aguinaldo_get(p_empresa_id bigint, p_id bigint) RETURNS TABLE(id bigint, nombre character varying, anio integer, fecha_inicio date, fecha_fin date, fecha_pago date, moneda character varying, estado character varying, notas character varying, total_empleados integer, total_base numeric, total_aguinaldo numeric, planillas_pendientes integer, calculado_at timestamp without time zone, aprobado_at timestamp without time zone, pagado_at timestamp without time zone, anulado_nota character varying, created_at timestamp without time zone)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT a.id, a.nombre::VARCHAR, a.anio, a.fecha_inicio, a.fecha_fin, a.fecha_pago, a.moneda::VARCHAR, a.estado::VARCHAR, a.notas::VARCHAR, a.total_empleados, a.total_base, a.total_aguinaldo, (SELECT COUNT(*)::INTEGER FROM rrhh_planillas pl WHERE pl.empresa_id = a.empresa_id AND pl.deleted_at IS NULL AND pl.moneda = a.moneda AND pl.estado IN ('borrador', 'calculada') AND pl.fecha_fin BETWEEN a.fecha_inicio AND a.fecha_fin), a.calculado_at, a.aprobado_at, a.pagado_at, a.anulado_nota::VARCHAR, a.created_at FROM rrhh_aguinaldos a WHERE a.empresa_id = p_empresa_id AND a.id = p_id AND a.deleted_at IS NULL;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_aguinaldo_linea_create(bigint, bigint, bigint, character varying, character varying, numeric, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_aguinaldo_linea_create(p_empresa_id bigint, p_id bigint, p_empleado_id bigint, p_descripcion character varying, p_tipo character varying, p_monto numeric, p_user_id bigint) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_estado VARCHAR; v_id BIGINT; v_desc VARCHAR := btrim(COALESCE(p_descripcion, ''));
+BEGIN
+    SELECT a.estado INTO v_estado FROM rrhh_aguinaldos a WHERE a.id = p_id AND a.empresa_id = p_empresa_id AND a.deleted_at IS NULL FOR UPDATE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'AGUINALDO_INVALIDO: El aguinaldo no existe.'; END IF;
+    IF v_estado NOT IN ('borrador', 'calculado') THEN RAISE EXCEPTION 'AGUINALDO_INVALIDO: Solo se pueden agregar ajustes a un aguinaldo en borrador o calculado.'; END IF;
+    IF NOT EXISTS (SELECT 1 FROM rrhh_aguinaldo_empleados ae WHERE ae.aguinaldo_id = p_id AND ae.empleado_id = p_empleado_id) THEN
+        RAISE EXCEPTION 'AGUINALDO_INVALIDO: El empleado no está en el aguinaldo; calcúlelo primero.';
+    END IF;
+    IF p_tipo NOT IN ('suma', 'resta') THEN RAISE EXCEPTION 'AGUINALDO_INVALIDO: El ajuste debe sumar o restar a la base.'; END IF;
+    IF COALESCE(p_monto, 0) <= 0 THEN RAISE EXCEPTION 'AGUINALDO_INVALIDO: El monto debe ser mayor que cero.'; END IF;
+    IF v_desc = '' THEN RAISE EXCEPTION 'AGUINALDO_INVALIDO: Indique la descripción del ajuste.'; END IF;
+    INSERT INTO rrhh_aguinaldo_lineas (aguinaldo_id, empleado_id, descripcion, tipo, monto, creada_por)
+    VALUES (p_id, p_empleado_id, v_desc, p_tipo, p_monto, p_user_id)
+    RETURNING rrhh_aguinaldo_lineas.id INTO v_id;
+    UPDATE rrhh_aguinaldos SET estado = 'borrador', updated_at = NOW() WHERE id = p_id;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_aguinaldo_linea_delete(bigint, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_aguinaldo_linea_delete(p_empresa_id bigint, p_id bigint, p_linea_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_estado VARCHAR; v_n INTEGER;
+BEGIN
+    SELECT a.estado INTO v_estado FROM rrhh_aguinaldos a WHERE a.id = p_id AND a.empresa_id = p_empresa_id AND a.deleted_at IS NULL FOR UPDATE;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    IF v_estado NOT IN ('borrador', 'calculado') THEN RAISE EXCEPTION 'AGUINALDO_INVALIDO: Solo se pueden quitar ajustes de un aguinaldo en borrador o calculado.'; END IF;
+    DELETE FROM rrhh_aguinaldo_lineas WHERE id = p_linea_id AND aguinaldo_id = p_id;
+    GET DIAGNOSTICS v_n = ROW_COUNT;
+    IF v_n > 0 THEN UPDATE rrhh_aguinaldos SET estado = 'borrador', updated_at = NOW() WHERE id = p_id; END IF;
+    RETURN v_n > 0;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_aguinaldo_lineas(bigint, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_aguinaldo_lineas(p_empresa_id bigint, p_id bigint, p_empleado_id bigint DEFAULT NULL::bigint) RETURNS TABLE(id bigint, empleado_id bigint, descripcion character varying, tipo character varying, monto numeric)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT l.id, l.empleado_id, l.descripcion::VARCHAR, l.tipo::VARCHAR, l.monto
+      FROM rrhh_aguinaldo_lineas l JOIN rrhh_aguinaldos a ON a.id = l.aguinaldo_id
+     WHERE a.id = p_id AND a.empresa_id = p_empresa_id AND a.deleted_at IS NULL AND (p_empleado_id IS NULL OR l.empleado_id = p_empleado_id)
+     ORDER BY l.empleado_id, l.id;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_aguinaldo_list(bigint, character varying, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_aguinaldo_list(p_empresa_id bigint, p_estado character varying DEFAULT NULL::character varying, p_anio integer DEFAULT NULL::integer) RETURNS TABLE(id bigint, nombre character varying, anio integer, fecha_inicio date, fecha_fin date, fecha_pago date, moneda character varying, estado character varying, notas character varying, total_empleados integer, total_base numeric, total_aguinaldo numeric, planillas_pendientes integer, calculado_at timestamp without time zone, aprobado_at timestamp without time zone, pagado_at timestamp without time zone, anulado_nota character varying, created_at timestamp without time zone)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT a.id, a.nombre::VARCHAR, a.anio, a.fecha_inicio, a.fecha_fin, a.fecha_pago, a.moneda::VARCHAR, a.estado::VARCHAR, a.notas::VARCHAR, a.total_empleados, a.total_base, a.total_aguinaldo, (SELECT COUNT(*)::INTEGER FROM rrhh_planillas pl WHERE pl.empresa_id = a.empresa_id AND pl.deleted_at IS NULL AND pl.moneda = a.moneda AND pl.estado IN ('borrador', 'calculada') AND pl.fecha_fin BETWEEN a.fecha_inicio AND a.fecha_fin), a.calculado_at, a.aprobado_at, a.pagado_at, a.anulado_nota::VARCHAR, a.created_at FROM rrhh_aguinaldos a
+     WHERE a.empresa_id = p_empresa_id AND a.deleted_at IS NULL
+       AND (p_estado IS NULL OR a.estado = p_estado)
+       AND (p_anio IS NULL OR a.anio = p_anio)
+     ORDER BY a.anio DESC, a.id DESC;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_aguinaldo_update(bigint, bigint, character varying, date, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_aguinaldo_update(p_empresa_id bigint, p_id bigint, p_nombre character varying, p_pago date, p_notas character varying) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_a RECORD; v_nom VARCHAR := btrim(COALESCE(p_nombre, ''));
+BEGIN
+    SELECT * INTO v_a FROM rrhh_aguinaldos a WHERE a.id = p_id AND a.empresa_id = p_empresa_id AND a.deleted_at IS NULL FOR UPDATE;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    IF v_a.estado NOT IN ('borrador', 'calculado') THEN RAISE EXCEPTION 'AGUINALDO_INVALIDO: Solo se puede editar un aguinaldo en borrador o calculado.'; END IF;
+    IF v_nom = '' THEN RAISE EXCEPTION 'AGUINALDO_INVALIDO: Indique el nombre del aguinaldo.'; END IF;
+    IF p_pago IS NULL OR p_pago < v_a.fecha_fin THEN RAISE EXCEPTION 'FECHA_INVALIDA: La fecha de pago no puede ser anterior al cierre del período (30 de noviembre).'; END IF;
+    UPDATE rrhh_aguinaldos SET nombre = v_nom, fecha_pago = p_pago, notas = NULLIF(btrim(COALESCE(p_notas, '')), ''), updated_at = NOW() WHERE id = p_id;
+    RETURN TRUE;
+END; $$;
+
+
+--
 -- Name: sp_rrhh_ajuste_eliminar(bigint, bigint, date, character varying); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -9824,6 +10159,437 @@ BEGIN
     END IF;
     IF p_tipo NOT IN ('enfermedad', 'maternidad', 'riesgo_trabajo') OR p_fin < p_inicio OR p_fin - p_inicio > 730 THEN RETURN; END IF;
     RETURN QUERY SELECT * FROM fn_rrhh_inc_tramos(p_empleado_id, p_tipo, p_inicio, p_fin, COALESCE(fn_rrhh_inc_valor_dia(p_empleado_id), 0), COALESCE(p_completa, TRUE), NULL);
+END; $$;
+
+
+--
+-- Name: sp_rrhh_liquidacion_calcular(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_liquidacion_calcular(p_empresa_id bigint, p_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_l       RECORD;
+    v_e       RECORD;
+    v_edad    INTERVAL;
+    v_anios   INTEGER;
+    v_meses_r INTEGER;
+    v_dias_r  INTEGER;
+    v_meses_t INTEGER;
+    v_win_ini DATE;
+    v_win_dia INTEGER;
+    v_sum     NUMERIC;
+    v_cub     INTEGER;
+    v_prom    NUMERIC;
+    v_orig    VARCHAR;
+    v_diario  NUMERIC;
+    v_pre_d   NUMERIC := 0;
+    v_pre_m   NUMERIC := 0;
+    v_pre_n   TEXT;
+    v_n       INTEGER;
+    v_ces_d   NUMERIC := 0;
+    v_ces_m   NUMERIC := 0;
+    v_ces_n   TEXT;
+    v_vac_d   NUMERIC;
+    v_vac_t   NUMERIC;
+    v_vac_m   NUMERIC;
+    v_vac_n   TEXT;
+    v_disf    NUMERIC;
+    v_fut     NUMERIC;
+    v_pend    INTEGER;
+    v_pct     NUMERIC;
+    v_ccss    NUMERIC;
+    v_ag_ini  DATE;
+    v_ag_base NUMERIC;
+    v_ag_m    NUMERIC;
+    v_aj      NUMERIC;
+    v_total   NUMERIC;
+    v_pl_pend INTEGER;
+    v_doble   TEXT;
+    v_adv     TEXT[] := ARRAY[]::TEXT[];
+BEGIN
+    SELECT * INTO v_l FROM rrhh_liquidaciones l WHERE l.id = p_id AND l.empresa_id = p_empresa_id AND l.deleted_at IS NULL FOR UPDATE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'LIQUIDACION_INVALIDA: La liquidación no existe.'; END IF;
+    IF v_l.estado NOT IN ('borrador', 'calculada') THEN RAISE EXCEPTION 'LIQUIDACION_INVALIDA: Solo se puede calcular una liquidación en borrador o calculada.'; END IF;
+
+    SELECT e.*, d.nombre AS depto, pu.nombre AS puesto_nombre INTO v_e
+      FROM rrhh_empleados e
+      LEFT JOIN rrhh_departamentos d ON d.id = e.departamento_id
+      LEFT JOIN rrhh_puestos pu ON pu.id = e.puesto_id
+     WHERE e.id = v_l.empleado_id AND e.empresa_id = p_empresa_id AND e.deleted_at IS NULL;
+    IF NOT FOUND THEN RAISE EXCEPTION 'LIQUIDACION_INVALIDA: El empleado no existe.'; END IF;
+
+    -- Antigüedad: ambos extremos cuentan como día trabajado
+    v_edad    := age(v_l.fecha_salida + 1, v_e.fecha_ingreso);
+    v_anios   := EXTRACT(YEAR FROM v_edad)::INTEGER;
+    v_meses_r := EXTRACT(MONTH FROM v_edad)::INTEGER;
+    v_dias_r  := EXTRACT(DAY FROM v_edad)::INTEGER;
+    v_meses_t := v_anios * 12 + v_meses_r;
+
+    -- Promedio mensual de los últimos 6 meses (o del tiempo servido si es menor)
+    v_win_ini := GREATEST(v_e.fecha_ingreso, (v_l.fecha_salida - INTERVAL '6 months')::DATE + 1);
+    v_win_dia := v_l.fecha_salida - v_win_ini + 1;
+    SELECT COALESCE(SUM(pe.base_ccss), 0),
+           COALESCE(SUM(GREATEST(LEAST(pl.fecha_fin, v_l.fecha_salida) - GREATEST(pl.fecha_inicio, v_win_ini) + 1, 0)), 0)::INTEGER
+      INTO v_sum, v_cub
+      FROM rrhh_planilla_empleados pe JOIN rrhh_planillas pl ON pl.id = pe.planilla_id
+     WHERE pe.empleado_id = v_e.id AND pl.empresa_id = p_empresa_id AND pl.deleted_at IS NULL AND pl.moneda = v_l.moneda
+       AND pl.estado IN ('aprobada', 'pagada') AND pl.fecha_fin >= v_win_ini AND pl.fecha_inicio <= v_l.fecha_salida;
+
+    IF v_l.promedio_manual IS NOT NULL THEN
+        v_prom := v_l.promedio_manual; v_orig := 'manual';
+    ELSIF v_sum > 0 AND v_cub >= v_win_dia * 0.85 THEN
+        v_prom := round(v_sum / v_cub * 30, 2); v_orig := 'planillas';
+    ELSE
+        v_prom := round(v_e.salario_base * (CASE v_e.periodo_pago WHEN 'mensual' THEN 1 WHEN 'quincenal' THEN 2 ELSE 52.0 / 12 END), 2);
+        v_orig := 'salario';
+        v_adv := array_append(v_adv, ('Las planillas aprobadas cubren ' || v_cub || ' de ' || v_win_dia || ' días del período de promedio; se usó el salario base. Indique un promedio manual si el real es distinto.')::TEXT);
+    END IF;
+    v_diario := round(v_prom / 30, 2);
+
+    -- Preaviso (art. 28)
+    IF NOT v_l.aplica_preaviso THEN
+        v_pre_n := 'No aplica por el motivo de salida.';
+    ELSIF v_meses_t < 3 THEN
+        v_pre_n := 'Menos de 3 meses de servicio.';
+    ELSE
+        v_pre_d := CASE WHEN v_meses_t < 6 THEN 7 WHEN v_meses_t < 12 THEN 15 ELSE 30 END;
+        v_pre_m := round(v_pre_d * v_prom / 30, 2);
+        v_pre_n := 'Art. 28 del Código de Trabajo.';
+    END IF;
+
+    -- Cesantía (art. 29)
+    IF NOT v_l.aplica_cesantia THEN
+        v_ces_n := 'No aplica por el motivo de salida.';
+    ELSIF v_meses_t < 3 THEN
+        v_ces_n := 'Menos de 3 meses de servicio.';
+    ELSE
+        IF v_meses_t < 6 THEN
+            v_ces_d := 7; v_ces_n := 'De 3 a 6 meses de servicio: 7 días.';
+        ELSIF v_meses_t < 12 THEN
+            v_ces_d := 14; v_ces_n := 'De 6 meses a 1 año de servicio: 14 días.';
+        ELSE
+            v_n := v_anios + (CASE WHEN v_meses_r > 6 OR (v_meses_r = 6 AND v_dias_r > 0) THEN 1 ELSE 0 END);
+            v_ces_d := LEAST(v_n, 8) * fn_rrhh_cesantia_dias_anio(v_n);
+            v_ces_n := LEAST(v_n, 8) || ' año(s) reconocidos × ' || fn_rrhh_cesantia_dias_anio(v_n) || ' días por año (tabla del art. 29, ' || v_n || ' año(s) de servicio; tope de 8 años).';
+        END IF;
+        v_ces_m := round(v_ces_d * v_prom / 30 * v_l.factor_cesantia / 100, 2);
+        IF v_l.factor_cesantia < 100 THEN v_ces_n := v_ces_n || ' Se paga el ' || v_l.factor_cesantia || ' %.'; END IF;
+    END IF;
+
+    -- Vacaciones pendientes: lo devengado y ajustado menos lo ya disfrutado a la fecha de salida
+    SELECT COALESCE(SUM(s.dias) FILTER (WHERE s.estado = 'aprobada' AND s.fecha_fin <= v_l.fecha_salida), 0),
+           COALESCE(SUM(s.dias) FILTER (WHERE s.estado = 'aprobada' AND s.fecha_fin > v_l.fecha_salida), 0),
+           COUNT(*) FILTER (WHERE s.estado IN ('pendiente_jefe', 'pendiente_rrhh'))::INTEGER
+      INTO v_disf, v_fut, v_pend
+      FROM rrhh_vacaciones_solicitudes s WHERE s.empleado_id = v_e.id AND s.deleted_at IS NULL;
+    v_vac_d := GREATEST(fn_rrhh_vac_devengado(v_e.id, v_l.fecha_salida) + fn_rrhh_vac_movimientos(v_e.id) - v_disf, 0);
+    SELECT COALESCE(t.promedio_dia, 0) INTO v_vac_t FROM fn_rrhh_vac_tarifa(p_empresa_id, v_e.id, v_l.fecha_salida) t;
+    v_vac_t := COALESCE(v_vac_t, 0);
+    v_vac_m := round(v_vac_d * v_vac_t, 2);
+    v_vac_n := 'Saldo del módulo de vacaciones a la fecha de salida × promedio diario (art. 157).';
+    IF v_fut > 0 THEN v_adv := array_append(v_adv, ('Tiene ' || v_fut || ' día(s) de vacaciones aprobadas después de la fecha de salida; se pagan como pendientes.')::TEXT); END IF;
+    IF v_pend > 0 THEN v_adv := array_append(v_adv, ('Tiene ' || v_pend || ' solicitud(es) de vacaciones sin resolver; ciérrelas antes de aprobar.')::TEXT); END IF;
+
+    SELECT COALESCE(SUM(c.porcentaje), 0) INTO v_pct FROM rrhh_cargas_sociales c
+     WHERE c.empresa_id = p_empresa_id AND c.parte = 'obrero'
+       AND c.anio = (SELECT MAX(c2.anio) FROM rrhh_cargas_sociales c2 WHERE c2.empresa_id = p_empresa_id AND c2.anio <= EXTRACT(YEAR FROM v_l.fecha_salida));
+    IF v_vac_m > 0 AND v_pct = 0 THEN v_adv := array_append(v_adv, 'No hay tasas de cargas sociales cargadas para el año de salida; no se rebajó CCSS a las vacaciones.'::TEXT); END IF;
+    v_ccss := round(v_vac_m * v_pct / 100, 2);
+
+    -- Aguinaldo proporcional: desde el 1 de diciembre anterior a la fecha de salida
+    v_ag_ini := CASE WHEN EXTRACT(MONTH FROM v_l.fecha_salida) = 12
+                     THEN make_date(EXTRACT(YEAR FROM v_l.fecha_salida)::INTEGER, 12, 1)
+                     ELSE make_date(EXTRACT(YEAR FROM v_l.fecha_salida)::INTEGER - 1, 12, 1) END;
+    SELECT COALESCE(SUM(pe.base_ccss), 0) INTO v_ag_base
+      FROM rrhh_planilla_empleados pe JOIN rrhh_planillas pl ON pl.id = pe.planilla_id
+     WHERE pe.empleado_id = v_e.id AND pl.empresa_id = p_empresa_id AND pl.deleted_at IS NULL AND pl.moneda = v_l.moneda
+       AND pl.estado IN ('aprobada', 'pagada') AND pl.fecha_fin >= v_ag_ini AND pl.fecha_inicio <= v_l.fecha_salida;
+    v_ag_m := round(v_ag_base / 12, 2);
+
+    SELECT COUNT(*)::INTEGER INTO v_pl_pend FROM rrhh_planillas pl
+     WHERE pl.empresa_id = p_empresa_id AND pl.deleted_at IS NULL AND pl.moneda = v_l.moneda AND pl.estado IN ('borrador', 'calculada')
+       AND pl.fecha_fin >= LEAST(v_ag_ini, v_win_ini) AND pl.fecha_inicio <= v_l.fecha_salida;
+    IF v_pl_pend > 0 THEN
+        v_adv := array_append(v_adv, ('Hay ' || v_pl_pend || ' planilla(s) sin aprobar hasta la fecha de salida; lo que contengan no suma al promedio ni al aguinaldo. Apruebe la planilla final y recalcule.')::TEXT);
+    END IF;
+    SELECT a.nombre INTO v_doble FROM rrhh_aguinaldo_empleados ae JOIN rrhh_aguinaldos a ON a.id = ae.aguinaldo_id
+     WHERE ae.empleado_id = v_e.id AND a.empresa_id = p_empresa_id AND a.deleted_at IS NULL AND a.estado IN ('calculado', 'aprobado', 'pagado')
+       AND a.fecha_inicio <= v_l.fecha_salida AND a.fecha_fin >= v_ag_ini LIMIT 1;
+    IF v_doble IS NOT NULL THEN
+        v_adv := array_append(v_adv, ('El empleado ya está incluido en el aguinaldo «' || v_doble || '»; verifique que el aguinaldo no se pague dos veces.')::TEXT);
+    END IF;
+
+    SELECT COALESCE(SUM(CASE WHEN l.tipo = 'suma' THEN l.monto ELSE -l.monto END), 0) INTO v_aj
+      FROM rrhh_liquidacion_lineas l WHERE l.liquidacion_id = p_id;
+
+    v_total := v_pre_m + v_ces_m + v_vac_m - v_ccss + v_ag_m + v_aj;
+
+    IF v_l.fecha_salida > CURRENT_DATE THEN v_adv := array_append(v_adv, 'La fecha de salida es futura: solo se podrá aprobar a partir de esa fecha.'::TEXT); END IF;
+    IF v_l.motivo = 'renuncia' THEN
+        v_adv := array_append(v_adv, 'Renuncia: el trabajador debe dar preaviso (art. 28); si no lo cumple, el patrono puede descontarlo con un ajuste.'::TEXT);
+    END IF;
+    IF v_total < 0 THEN v_adv := array_append(v_adv, 'Los ajustes dejan el total en negativo.'::TEXT); END IF;
+    IF v_e.banco IS NULL OR v_e.iban IS NULL THEN v_adv := array_append(v_adv, 'Sin banco o cuenta IBAN para el pago.'::TEXT); END IF;
+
+    UPDATE rrhh_liquidaciones SET
+        estado = 'calculada', calculado_at = NOW(), updated_at = NOW(),
+        codigo = v_e.codigo, nombre = btrim(v_e.nombre || ' ' || v_e.apellido1 || ' ' || COALESCE(v_e.apellido2, '')),
+        tipo_identificacion = v_e.tipo_identificacion, identificacion = v_e.identificacion, departamento = v_e.depto, puesto = v_e.puesto_nombre,
+        banco = v_e.banco, iban = v_e.iban, fecha_ingreso = v_e.fecha_ingreso, salario_base = v_e.salario_base, periodo_pago = v_e.periodo_pago,
+        anios_servicio = v_anios, meses_servicio = v_meses_r, dias_servicio = v_dias_r,
+        promedio_mensual = v_prom, promedio_diario = v_diario, promedio_origen = v_orig,
+        preaviso_dias = v_pre_d, preaviso_monto = v_pre_m, cesantia_dias = v_ces_d, cesantia_monto = v_ces_m,
+        vacaciones_dias = v_vac_d, vacaciones_tarifa = v_vac_t, vacaciones_monto = v_vac_m, ccss_vacaciones = v_ccss,
+        aguinaldo_base = v_ag_base, aguinaldo_monto = v_ag_m, ajustes = v_aj, total = v_total,
+        desglose = jsonb_build_array(
+            jsonb_build_object('clave', 'preaviso', 'concepto', 'Preaviso', 'dias', v_pre_d, 'tarifa', v_diario, 'monto', v_pre_m, 'nota', v_pre_n),
+            jsonb_build_object('clave', 'cesantia', 'concepto', 'Cesantía', 'dias', v_ces_d, 'tarifa', v_diario, 'monto', v_ces_m, 'nota', v_ces_n),
+            jsonb_build_object('clave', 'vacaciones', 'concepto', 'Vacaciones pendientes', 'dias', v_vac_d, 'tarifa', v_vac_t, 'monto', v_vac_m, 'nota', v_vac_n),
+            jsonb_build_object('clave', 'ccss_vacaciones', 'concepto', 'CCSS obrera sobre vacaciones', 'dias', 0, 'tarifa', v_pct, 'monto', -v_ccss, 'nota', 'Porcentaje obrero vigente en el año de salida.'),
+            jsonb_build_object('clave', 'aguinaldo', 'concepto', 'Aguinaldo proporcional', 'dias', 0, 'tarifa', 0, 'monto', v_ag_m,
+                'nota', 'Doceava parte de lo devengado desde el ' || to_char(v_ag_ini, 'DD/MM/YYYY') || '.'),
+            jsonb_build_object('clave', 'ajustes', 'concepto', 'Ajustes manuales', 'dias', 0, 'tarifa', 0, 'monto', v_aj, 'nota', '')
+        ),
+        advertencias = to_jsonb(v_adv)
+     WHERE id = p_id;
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_liquidacion_create(bigint, bigint, date, character varying, boolean, boolean, numeric, numeric, date, character varying, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_liquidacion_create(p_empresa_id bigint, p_empleado_id bigint, p_fecha_salida date, p_motivo character varying, p_aplica_preaviso boolean, p_aplica_cesantia boolean, p_factor numeric, p_promedio_manual numeric, p_fecha_pago date, p_notas character varying, p_user_id bigint) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_e RECORD; v_id BIGINT;
+BEGIN
+    SELECT e.*, d.nombre AS depto, pu.nombre AS puesto_nombre INTO v_e
+      FROM rrhh_empleados e
+      LEFT JOIN rrhh_departamentos d ON d.id = e.departamento_id
+      LEFT JOIN rrhh_puestos pu ON pu.id = e.puesto_id
+     WHERE e.id = p_empleado_id AND e.empresa_id = p_empresa_id AND e.deleted_at IS NULL;
+    IF NOT FOUND THEN RAISE EXCEPTION 'LIQUIDACION_INVALIDA: El empleado no existe.'; END IF;
+    IF v_e.estado = 'liquidado' THEN RAISE EXCEPTION 'EMPLEADO_LIQUIDADO: El expediente ya está liquidado.'; END IF;
+    IF p_motivo NOT IN ('despido_responsabilidad','despido_justificado','renuncia','mutuo_acuerdo','fin_contrato','pension','fallecimiento','otro') THEN
+        RAISE EXCEPTION 'LIQUIDACION_INVALIDA: Motivo de salida no válido.';
+    END IF;
+    IF p_fecha_salida IS NULL OR p_fecha_salida < v_e.fecha_ingreso THEN RAISE EXCEPTION 'FECHA_INVALIDA: La fecha de salida no puede ser anterior al ingreso.'; END IF;
+    IF p_fecha_pago IS NULL OR p_fecha_pago < p_fecha_salida THEN RAISE EXCEPTION 'FECHA_INVALIDA: La fecha de pago no puede ser anterior a la salida.'; END IF;
+    IF p_factor IS NOT NULL AND (p_factor < 0 OR p_factor > 100) THEN RAISE EXCEPTION 'LIQUIDACION_INVALIDA: El porcentaje de cesantía debe estar entre 0 y 100.'; END IF;
+    IF p_promedio_manual IS NOT NULL AND p_promedio_manual <= 0 THEN RAISE EXCEPTION 'LIQUIDACION_INVALIDA: El promedio manual debe ser mayor que cero.'; END IF;
+    IF EXISTS (SELECT 1 FROM rrhh_liquidaciones l WHERE l.empleado_id = p_empleado_id AND l.deleted_at IS NULL AND l.estado <> 'anulada') THEN
+        RAISE EXCEPTION 'LIQUIDACION_INVALIDA: El empleado ya tiene una liquidación vigente.';
+    END IF;
+
+    INSERT INTO rrhh_liquidaciones (
+        empresa_id, empleado_id, fecha_salida, motivo, aplica_preaviso, aplica_cesantia, factor_cesantia, promedio_manual, fecha_pago, moneda, notas,
+        codigo, nombre, tipo_identificacion, identificacion, departamento, puesto, banco, iban, fecha_ingreso, salario_base, periodo_pago, creado_por
+    ) VALUES (
+        p_empresa_id, p_empleado_id, p_fecha_salida, p_motivo,
+        COALESCE(p_aplica_preaviso, p_motivo = 'despido_responsabilidad'),
+        COALESCE(p_aplica_cesantia, p_motivo IN ('despido_responsabilidad', 'pension', 'fallecimiento')),
+        COALESCE(p_factor, CASE WHEN p_motivo = 'fallecimiento' THEN 50 ELSE 100 END),
+        p_promedio_manual, p_fecha_pago, v_e.moneda, NULLIF(btrim(COALESCE(p_notas, '')), ''),
+        v_e.codigo, btrim(v_e.nombre || ' ' || v_e.apellido1 || ' ' || COALESCE(v_e.apellido2, '')), v_e.tipo_identificacion, v_e.identificacion,
+        v_e.depto, v_e.puesto_nombre, v_e.banco, v_e.iban, v_e.fecha_ingreso, v_e.salario_base, v_e.periodo_pago, p_user_id
+    ) RETURNING rrhh_liquidaciones.id INTO v_id;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_liquidacion_delete(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_liquidacion_delete(p_empresa_id bigint, p_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_estado VARCHAR;
+BEGIN
+    SELECT l.estado INTO v_estado FROM rrhh_liquidaciones l WHERE l.id = p_id AND l.empresa_id = p_empresa_id AND l.deleted_at IS NULL;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    IF v_estado NOT IN ('borrador', 'calculada', 'anulada') THEN RAISE EXCEPTION 'LIQUIDACION_INVALIDA: Una liquidación aprobada o pagada no se elimina; anúlela si corresponde.'; END IF;
+    DELETE FROM rrhh_liquidacion_lineas WHERE liquidacion_id = p_id;
+    UPDATE rrhh_liquidaciones SET deleted_at = NOW(), updated_at = NOW() WHERE id = p_id;
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_liquidacion_estado(bigint, bigint, character varying, bigint, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_liquidacion_estado(p_empresa_id bigint, p_id bigint, p_accion character varying, p_user_id bigint, p_nota character varying DEFAULT NULL::character varying) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_l RECORD; v_emp_estado VARCHAR;
+BEGIN
+    SELECT * INTO v_l FROM rrhh_liquidaciones l WHERE l.id = p_id AND l.empresa_id = p_empresa_id AND l.deleted_at IS NULL FOR UPDATE;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+
+    IF p_accion = 'aprobar' THEN
+        IF v_l.estado <> 'calculada' THEN RAISE EXCEPTION 'LIQUIDACION_INVALIDA: Solo se puede aprobar una liquidación calculada.'; END IF;
+        IF v_l.fecha_salida > CURRENT_DATE THEN RAISE EXCEPTION 'LIQUIDACION_INVALIDA: La liquidación se aprueba a partir de la fecha de salida (%).', to_char(v_l.fecha_salida, 'DD/MM/YYYY'); END IF;
+        IF v_l.total < 0 THEN RAISE EXCEPTION 'LIQUIDACION_INVALIDA: El total no puede ser negativo; revise los ajustes.'; END IF;
+        SELECT e.estado INTO v_emp_estado FROM rrhh_empleados e WHERE e.id = v_l.empleado_id AND e.empresa_id = p_empresa_id AND e.deleted_at IS NULL FOR UPDATE;
+        IF NOT FOUND THEN RAISE EXCEPTION 'LIQUIDACION_INVALIDA: El empleado no existe.'; END IF;
+        IF v_emp_estado = 'liquidado' THEN RAISE EXCEPTION 'EMPLEADO_LIQUIDADO: El expediente ya está liquidado.'; END IF;
+        UPDATE rrhh_empleados SET estado = 'liquidado', fecha_salida = v_l.fecha_salida, motivo_salida = v_l.motivo, updated_at = NOW() WHERE id = v_l.empleado_id;
+        PERFORM fn_rrhh_movimiento(p_empresa_id, v_l.empleado_id, 'liquidacion', 'Liquidación aprobada (' || v_l.motivo || ')',
+            jsonb_build_object('estado', v_emp_estado), jsonb_build_object('estado', 'liquidado', 'fecha_salida', v_l.fecha_salida, 'motivo', v_l.motivo), v_l.fecha_salida);
+        UPDATE rrhh_liquidaciones SET estado = 'aprobada', estado_previo = v_emp_estado, aprobado_por = p_user_id, aprobado_at = NOW(), updated_at = NOW() WHERE id = p_id;
+    ELSIF p_accion = 'reabrir' THEN
+        IF v_l.estado <> 'aprobada' THEN RAISE EXCEPTION 'LIQUIDACION_INVALIDA: Solo se puede reabrir una liquidación aprobada.'; END IF;
+        UPDATE rrhh_empleados SET estado = COALESCE(v_l.estado_previo, 'activo'), fecha_salida = NULL, motivo_salida = NULL, updated_at = NOW() WHERE id = v_l.empleado_id;
+        PERFORM fn_rrhh_movimiento(p_empresa_id, v_l.empleado_id, 'liquidacion_revertida', 'Liquidación reabierta: el expediente vuelve a ' || COALESCE(v_l.estado_previo, 'activo'),
+            jsonb_build_object('estado', 'liquidado'), jsonb_build_object('estado', COALESCE(v_l.estado_previo, 'activo')));
+        UPDATE rrhh_liquidaciones SET estado = 'calculada', estado_previo = NULL, aprobado_por = NULL, aprobado_at = NULL, updated_at = NOW() WHERE id = p_id;
+    ELSIF p_accion = 'pagar' THEN
+        IF v_l.estado <> 'aprobada' THEN RAISE EXCEPTION 'LIQUIDACION_INVALIDA: Solo se puede marcar como pagada una liquidación aprobada.'; END IF;
+        UPDATE rrhh_liquidaciones SET estado = 'pagada', pagado_por = p_user_id, pagado_at = NOW(), updated_at = NOW() WHERE id = p_id;
+    ELSIF p_accion = 'anular' THEN
+        IF v_l.estado NOT IN ('borrador', 'calculada', 'aprobada') THEN RAISE EXCEPTION 'LIQUIDACION_INVALIDA: No se puede anular una liquidación %.', v_l.estado; END IF;
+        IF btrim(COALESCE(p_nota, '')) = '' THEN RAISE EXCEPTION 'LIQUIDACION_INVALIDA: Indique el motivo de la anulación.'; END IF;
+        IF v_l.estado = 'aprobada' THEN
+            UPDATE rrhh_empleados SET estado = COALESCE(v_l.estado_previo, 'activo'), fecha_salida = NULL, motivo_salida = NULL, updated_at = NOW() WHERE id = v_l.empleado_id;
+            PERFORM fn_rrhh_movimiento(p_empresa_id, v_l.empleado_id, 'liquidacion_revertida', 'Liquidación anulada: el expediente vuelve a ' || COALESCE(v_l.estado_previo, 'activo'),
+                jsonb_build_object('estado', 'liquidado'), jsonb_build_object('estado', COALESCE(v_l.estado_previo, 'activo')));
+        END IF;
+        UPDATE rrhh_liquidaciones SET estado = 'anulada', anulado_por = p_user_id, anulado_at = NOW(), anulado_nota = btrim(p_nota), updated_at = NOW() WHERE id = p_id;
+    ELSE
+        RAISE EXCEPTION 'LIQUIDACION_INVALIDA: Acción desconocida.';
+    END IF;
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_liquidacion_get(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_liquidacion_get(p_empresa_id bigint, p_id bigint) RETURNS TABLE(id bigint, empleado_id bigint, codigo character varying, nombre character varying, tipo_identificacion character varying, identificacion character varying, departamento character varying, puesto character varying, banco character varying, iban character varying, fecha_ingreso date, fecha_salida date, motivo character varying, aplica_preaviso boolean, aplica_cesantia boolean, factor_cesantia numeric, promedio_manual numeric, fecha_pago date, moneda character varying, estado character varying, notas character varying, salario_base numeric, periodo_pago character varying, anios_servicio integer, meses_servicio integer, dias_servicio integer, promedio_mensual numeric, promedio_diario numeric, promedio_origen character varying, preaviso_dias numeric, preaviso_monto numeric, cesantia_dias numeric, cesantia_monto numeric, vacaciones_dias numeric, vacaciones_tarifa numeric, vacaciones_monto numeric, ccss_vacaciones numeric, aguinaldo_base numeric, aguinaldo_monto numeric, ajustes numeric, total numeric, desglose jsonb, advertencias jsonb, calculado_at timestamp without time zone, aprobado_at timestamp without time zone, pagado_at timestamp without time zone, anulado_nota character varying, created_at timestamp without time zone)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT l.id, l.empleado_id, l.codigo::VARCHAR, l.nombre::VARCHAR, l.tipo_identificacion::VARCHAR, l.identificacion::VARCHAR, l.departamento::VARCHAR, l.puesto::VARCHAR, l.banco::VARCHAR, l.iban::VARCHAR, l.fecha_ingreso, l.fecha_salida, l.motivo::VARCHAR, l.aplica_preaviso, l.aplica_cesantia, l.factor_cesantia, l.promedio_manual, l.fecha_pago, l.moneda::VARCHAR, l.estado::VARCHAR, l.notas::VARCHAR, l.salario_base, l.periodo_pago::VARCHAR, l.anios_servicio, l.meses_servicio, l.dias_servicio, l.promedio_mensual, l.promedio_diario, l.promedio_origen::VARCHAR, l.preaviso_dias, l.preaviso_monto, l.cesantia_dias, l.cesantia_monto, l.vacaciones_dias, l.vacaciones_tarifa, l.vacaciones_monto, l.ccss_vacaciones, l.aguinaldo_base, l.aguinaldo_monto, l.ajustes, l.total, l.desglose, l.advertencias, l.calculado_at, l.aprobado_at, l.pagado_at, l.anulado_nota::VARCHAR, l.created_at FROM rrhh_liquidaciones l WHERE l.empresa_id = p_empresa_id AND l.id = p_id AND l.deleted_at IS NULL;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_liquidacion_linea_create(bigint, bigint, character varying, character varying, numeric, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_liquidacion_linea_create(p_empresa_id bigint, p_id bigint, p_descripcion character varying, p_tipo character varying, p_monto numeric, p_user_id bigint) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_estado VARCHAR; v_id BIGINT; v_desc VARCHAR := btrim(COALESCE(p_descripcion, ''));
+BEGIN
+    SELECT l.estado INTO v_estado FROM rrhh_liquidaciones l WHERE l.id = p_id AND l.empresa_id = p_empresa_id AND l.deleted_at IS NULL FOR UPDATE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'LIQUIDACION_INVALIDA: La liquidación no existe.'; END IF;
+    IF v_estado NOT IN ('borrador', 'calculada') THEN RAISE EXCEPTION 'LIQUIDACION_INVALIDA: Solo se pueden agregar ajustes a una liquidación en borrador o calculada.'; END IF;
+    IF p_tipo NOT IN ('suma', 'resta') THEN RAISE EXCEPTION 'LIQUIDACION_INVALIDA: El ajuste debe sumar o restar al total.'; END IF;
+    IF COALESCE(p_monto, 0) <= 0 THEN RAISE EXCEPTION 'LIQUIDACION_INVALIDA: El monto debe ser mayor que cero.'; END IF;
+    IF v_desc = '' THEN RAISE EXCEPTION 'LIQUIDACION_INVALIDA: Indique la descripción del ajuste.'; END IF;
+    INSERT INTO rrhh_liquidacion_lineas (liquidacion_id, descripcion, tipo, monto, creada_por)
+    VALUES (p_id, v_desc, p_tipo, p_monto, p_user_id)
+    RETURNING rrhh_liquidacion_lineas.id INTO v_id;
+    UPDATE rrhh_liquidaciones SET estado = 'borrador', updated_at = NOW() WHERE id = p_id;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_liquidacion_linea_delete(bigint, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_liquidacion_linea_delete(p_empresa_id bigint, p_id bigint, p_linea_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_estado VARCHAR; v_n INTEGER;
+BEGIN
+    SELECT l.estado INTO v_estado FROM rrhh_liquidaciones l WHERE l.id = p_id AND l.empresa_id = p_empresa_id AND l.deleted_at IS NULL FOR UPDATE;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    IF v_estado NOT IN ('borrador', 'calculada') THEN RAISE EXCEPTION 'LIQUIDACION_INVALIDA: Solo se pueden quitar ajustes de una liquidación en borrador o calculada.'; END IF;
+    DELETE FROM rrhh_liquidacion_lineas WHERE id = p_linea_id AND liquidacion_id = p_id;
+    GET DIAGNOSTICS v_n = ROW_COUNT;
+    IF v_n > 0 THEN UPDATE rrhh_liquidaciones SET estado = 'borrador', updated_at = NOW() WHERE id = p_id; END IF;
+    RETURN v_n > 0;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_liquidacion_lineas(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_liquidacion_lineas(p_empresa_id bigint, p_id bigint) RETURNS TABLE(id bigint, descripcion character varying, tipo character varying, monto numeric)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT x.id, x.descripcion::VARCHAR, x.tipo::VARCHAR, x.monto
+      FROM rrhh_liquidacion_lineas x JOIN rrhh_liquidaciones l ON l.id = x.liquidacion_id
+     WHERE l.id = p_id AND l.empresa_id = p_empresa_id AND l.deleted_at IS NULL
+     ORDER BY x.id;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_liquidacion_list(bigint, character varying, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_liquidacion_list(p_empresa_id bigint, p_estado character varying DEFAULT NULL::character varying, p_empleado_id bigint DEFAULT NULL::bigint) RETURNS TABLE(id bigint, empleado_id bigint, codigo character varying, nombre character varying, tipo_identificacion character varying, identificacion character varying, departamento character varying, puesto character varying, banco character varying, iban character varying, fecha_ingreso date, fecha_salida date, motivo character varying, aplica_preaviso boolean, aplica_cesantia boolean, factor_cesantia numeric, promedio_manual numeric, fecha_pago date, moneda character varying, estado character varying, notas character varying, salario_base numeric, periodo_pago character varying, anios_servicio integer, meses_servicio integer, dias_servicio integer, promedio_mensual numeric, promedio_diario numeric, promedio_origen character varying, preaviso_dias numeric, preaviso_monto numeric, cesantia_dias numeric, cesantia_monto numeric, vacaciones_dias numeric, vacaciones_tarifa numeric, vacaciones_monto numeric, ccss_vacaciones numeric, aguinaldo_base numeric, aguinaldo_monto numeric, ajustes numeric, total numeric, desglose jsonb, advertencias jsonb, calculado_at timestamp without time zone, aprobado_at timestamp without time zone, pagado_at timestamp without time zone, anulado_nota character varying, created_at timestamp without time zone)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT l.id, l.empleado_id, l.codigo::VARCHAR, l.nombre::VARCHAR, l.tipo_identificacion::VARCHAR, l.identificacion::VARCHAR, l.departamento::VARCHAR, l.puesto::VARCHAR, l.banco::VARCHAR, l.iban::VARCHAR, l.fecha_ingreso, l.fecha_salida, l.motivo::VARCHAR, l.aplica_preaviso, l.aplica_cesantia, l.factor_cesantia, l.promedio_manual, l.fecha_pago, l.moneda::VARCHAR, l.estado::VARCHAR, l.notas::VARCHAR, l.salario_base, l.periodo_pago::VARCHAR, l.anios_servicio, l.meses_servicio, l.dias_servicio, l.promedio_mensual, l.promedio_diario, l.promedio_origen::VARCHAR, l.preaviso_dias, l.preaviso_monto, l.cesantia_dias, l.cesantia_monto, l.vacaciones_dias, l.vacaciones_tarifa, l.vacaciones_monto, l.ccss_vacaciones, l.aguinaldo_base, l.aguinaldo_monto, l.ajustes, l.total, l.desglose, l.advertencias, l.calculado_at, l.aprobado_at, l.pagado_at, l.anulado_nota::VARCHAR, l.created_at FROM rrhh_liquidaciones l
+     WHERE l.empresa_id = p_empresa_id AND l.deleted_at IS NULL
+       AND (p_estado IS NULL OR l.estado = p_estado)
+       AND (p_empleado_id IS NULL OR l.empleado_id = p_empleado_id)
+     ORDER BY l.fecha_salida DESC, l.id DESC;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_liquidacion_update(bigint, bigint, date, character varying, boolean, boolean, numeric, numeric, date, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_liquidacion_update(p_empresa_id bigint, p_id bigint, p_fecha_salida date, p_motivo character varying, p_aplica_preaviso boolean, p_aplica_cesantia boolean, p_factor numeric, p_promedio_manual numeric, p_fecha_pago date, p_notas character varying) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_l RECORD;
+BEGIN
+    SELECT * INTO v_l FROM rrhh_liquidaciones l WHERE l.id = p_id AND l.empresa_id = p_empresa_id AND l.deleted_at IS NULL FOR UPDATE;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    IF v_l.estado NOT IN ('borrador', 'calculada') THEN RAISE EXCEPTION 'LIQUIDACION_INVALIDA: Solo se puede editar una liquidación en borrador o calculada.'; END IF;
+    IF p_motivo NOT IN ('despido_responsabilidad','despido_justificado','renuncia','mutuo_acuerdo','fin_contrato','pension','fallecimiento','otro') THEN
+        RAISE EXCEPTION 'LIQUIDACION_INVALIDA: Motivo de salida no válido.';
+    END IF;
+    IF p_fecha_salida IS NULL OR p_fecha_salida < v_l.fecha_ingreso THEN RAISE EXCEPTION 'FECHA_INVALIDA: La fecha de salida no puede ser anterior al ingreso.'; END IF;
+    IF p_fecha_pago IS NULL OR p_fecha_pago < p_fecha_salida THEN RAISE EXCEPTION 'FECHA_INVALIDA: La fecha de pago no puede ser anterior a la salida.'; END IF;
+    IF p_factor IS NULL OR p_factor < 0 OR p_factor > 100 THEN RAISE EXCEPTION 'LIQUIDACION_INVALIDA: El porcentaje de cesantía debe estar entre 0 y 100.'; END IF;
+    IF p_promedio_manual IS NOT NULL AND p_promedio_manual <= 0 THEN RAISE EXCEPTION 'LIQUIDACION_INVALIDA: El promedio manual debe ser mayor que cero.'; END IF;
+    UPDATE rrhh_liquidaciones SET
+        fecha_salida = p_fecha_salida, motivo = p_motivo, aplica_preaviso = COALESCE(p_aplica_preaviso, FALSE), aplica_cesantia = COALESCE(p_aplica_cesantia, FALSE),
+        factor_cesantia = p_factor, promedio_manual = p_promedio_manual, fecha_pago = p_fecha_pago, notas = NULLIF(btrim(COALESCE(p_notas, '')), ''),
+        estado = 'borrador', updated_at = NOW()
+     WHERE id = p_id;
+    RETURN TRUE;
 END; $$;
 
 
@@ -15631,6 +16397,183 @@ ALTER SEQUENCE public.rrhh_agentes_id_seq OWNED BY public.rrhh_agentes.id;
 
 
 --
+-- Name: rrhh_aguinaldo_empleados; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_aguinaldo_empleados (
+    id bigint NOT NULL,
+    aguinaldo_id bigint NOT NULL,
+    empleado_id bigint NOT NULL,
+    codigo character varying(20) NOT NULL,
+    nombre character varying(260) NOT NULL,
+    tipo_identificacion character varying(10) NOT NULL,
+    identificacion character varying(30) NOT NULL,
+    departamento character varying(100),
+    puesto character varying(100),
+    banco character varying(60),
+    iban character varying(34),
+    fecha_ingreso date NOT NULL,
+    fecha_salida date,
+    planillas integer DEFAULT 0 NOT NULL,
+    meses_con_pago integer DEFAULT 0 NOT NULL,
+    base_planillas numeric(14,2) DEFAULT 0 NOT NULL,
+    ajustes numeric(14,2) DEFAULT 0 NOT NULL,
+    base_total numeric(14,2) DEFAULT 0 NOT NULL,
+    aguinaldo numeric(14,2) DEFAULT 0 NOT NULL,
+    desglose jsonb DEFAULT '[]'::jsonb NOT NULL,
+    advertencias jsonb DEFAULT '[]'::jsonb NOT NULL
+);
+
+
+--
+-- Name: rrhh_aguinaldo_empleados_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_aguinaldo_empleados_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_aguinaldo_empleados_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_aguinaldo_empleados_id_seq OWNED BY public.rrhh_aguinaldo_empleados.id;
+
+
+--
+-- Name: rrhh_aguinaldo_lineas; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_aguinaldo_lineas (
+    id bigint NOT NULL,
+    aguinaldo_id bigint NOT NULL,
+    empleado_id bigint NOT NULL,
+    descripcion character varying(120) NOT NULL,
+    tipo character varying(5) NOT NULL,
+    monto numeric(14,2) NOT NULL,
+    creada_por bigint,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rrhh_aguinaldo_lineas_monto_check CHECK ((monto > (0)::numeric)),
+    CONSTRAINT rrhh_aguinaldo_lineas_tipo_check CHECK (((tipo)::text = ANY ((ARRAY['suma'::character varying, 'resta'::character varying])::text[])))
+);
+
+
+--
+-- Name: rrhh_aguinaldo_lineas_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_aguinaldo_lineas_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_aguinaldo_lineas_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_aguinaldo_lineas_id_seq OWNED BY public.rrhh_aguinaldo_lineas.id;
+
+
+--
+-- Name: rrhh_aguinaldos; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_aguinaldos (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    nombre character varying(100) NOT NULL,
+    anio integer NOT NULL,
+    fecha_inicio date NOT NULL,
+    fecha_fin date NOT NULL,
+    fecha_pago date NOT NULL,
+    moneda character varying(3) DEFAULT 'CRC'::character varying NOT NULL,
+    estado character varying(10) DEFAULT 'borrador'::character varying NOT NULL,
+    notas character varying(255),
+    total_empleados integer DEFAULT 0 NOT NULL,
+    total_base numeric(16,2) DEFAULT 0 NOT NULL,
+    total_aguinaldo numeric(16,2) DEFAULT 0 NOT NULL,
+    calculado_at timestamp without time zone,
+    aprobado_por bigint,
+    aprobado_at timestamp without time zone,
+    pagado_por bigint,
+    pagado_at timestamp without time zone,
+    anulado_por bigint,
+    anulado_at timestamp without time zone,
+    anulado_nota character varying(255),
+    creado_por bigint,
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rrhh_aguinaldos_anio_check CHECK (((anio >= 2000) AND (anio <= 2100))),
+    CONSTRAINT rrhh_aguinaldos_check CHECK ((fecha_fin >= fecha_inicio)),
+    CONSTRAINT rrhh_aguinaldos_estado_check CHECK (((estado)::text = ANY ((ARRAY['borrador'::character varying, 'calculado'::character varying, 'aprobado'::character varying, 'pagado'::character varying, 'anulado'::character varying])::text[])))
+);
+
+
+--
+-- Name: rrhh_aguinaldos_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_aguinaldos_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'rrhh_aguinaldos'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rrhh_aguinaldos_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_aguinaldos_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_aguinaldos_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_aguinaldos_auditoria_id_seq OWNED BY public.rrhh_aguinaldos_auditoria.id;
+
+
+--
+-- Name: rrhh_aguinaldos_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_aguinaldos_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_aguinaldos_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_aguinaldos_id_seq OWNED BY public.rrhh_aguinaldos.id;
+
+
+--
 -- Name: rrhh_asistencia_ajustes; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -16706,6 +17649,170 @@ CREATE SEQUENCE public.rrhh_incapacidades_id_seq
 --
 
 ALTER SEQUENCE public.rrhh_incapacidades_id_seq OWNED BY public.rrhh_incapacidades.id;
+
+
+--
+-- Name: rrhh_liquidacion_lineas; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_liquidacion_lineas (
+    id bigint NOT NULL,
+    liquidacion_id bigint NOT NULL,
+    descripcion character varying(120) NOT NULL,
+    tipo character varying(5) NOT NULL,
+    monto numeric(14,2) NOT NULL,
+    creada_por bigint,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rrhh_liquidacion_lineas_monto_check CHECK ((monto > (0)::numeric)),
+    CONSTRAINT rrhh_liquidacion_lineas_tipo_check CHECK (((tipo)::text = ANY ((ARRAY['suma'::character varying, 'resta'::character varying])::text[])))
+);
+
+
+--
+-- Name: rrhh_liquidacion_lineas_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_liquidacion_lineas_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_liquidacion_lineas_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_liquidacion_lineas_id_seq OWNED BY public.rrhh_liquidacion_lineas.id;
+
+
+--
+-- Name: rrhh_liquidaciones; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_liquidaciones (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    empleado_id bigint NOT NULL,
+    fecha_salida date NOT NULL,
+    motivo character varying(30) NOT NULL,
+    aplica_preaviso boolean DEFAULT false NOT NULL,
+    aplica_cesantia boolean DEFAULT false NOT NULL,
+    factor_cesantia numeric(5,2) DEFAULT 100 NOT NULL,
+    promedio_manual numeric(14,2),
+    fecha_pago date NOT NULL,
+    moneda character varying(3) DEFAULT 'CRC'::character varying NOT NULL,
+    estado character varying(10) DEFAULT 'borrador'::character varying NOT NULL,
+    estado_previo character varying(12),
+    notas character varying(255),
+    codigo character varying(20) NOT NULL,
+    nombre character varying(260) NOT NULL,
+    tipo_identificacion character varying(10) NOT NULL,
+    identificacion character varying(30) NOT NULL,
+    departamento character varying(100),
+    puesto character varying(100),
+    banco character varying(60),
+    iban character varying(34),
+    fecha_ingreso date NOT NULL,
+    salario_base numeric(14,2) DEFAULT 0 NOT NULL,
+    periodo_pago character varying(10),
+    anios_servicio integer DEFAULT 0 NOT NULL,
+    meses_servicio integer DEFAULT 0 NOT NULL,
+    dias_servicio integer DEFAULT 0 NOT NULL,
+    promedio_mensual numeric(14,2) DEFAULT 0 NOT NULL,
+    promedio_diario numeric(14,2) DEFAULT 0 NOT NULL,
+    promedio_origen character varying(10),
+    preaviso_dias numeric(6,2) DEFAULT 0 NOT NULL,
+    preaviso_monto numeric(14,2) DEFAULT 0 NOT NULL,
+    cesantia_dias numeric(7,2) DEFAULT 0 NOT NULL,
+    cesantia_monto numeric(14,2) DEFAULT 0 NOT NULL,
+    vacaciones_dias numeric(6,2) DEFAULT 0 NOT NULL,
+    vacaciones_tarifa numeric(14,2) DEFAULT 0 NOT NULL,
+    vacaciones_monto numeric(14,2) DEFAULT 0 NOT NULL,
+    ccss_vacaciones numeric(14,2) DEFAULT 0 NOT NULL,
+    aguinaldo_base numeric(14,2) DEFAULT 0 NOT NULL,
+    aguinaldo_monto numeric(14,2) DEFAULT 0 NOT NULL,
+    ajustes numeric(14,2) DEFAULT 0 NOT NULL,
+    total numeric(14,2) DEFAULT 0 NOT NULL,
+    desglose jsonb DEFAULT '[]'::jsonb NOT NULL,
+    advertencias jsonb DEFAULT '[]'::jsonb NOT NULL,
+    calculado_at timestamp without time zone,
+    aprobado_por bigint,
+    aprobado_at timestamp without time zone,
+    pagado_por bigint,
+    pagado_at timestamp without time zone,
+    anulado_por bigint,
+    anulado_at timestamp without time zone,
+    anulado_nota character varying(255),
+    creado_por bigint,
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rrhh_liquidaciones_check CHECK ((fecha_salida >= fecha_ingreso)),
+    CONSTRAINT rrhh_liquidaciones_check1 CHECK ((fecha_pago >= fecha_salida)),
+    CONSTRAINT rrhh_liquidaciones_estado_check CHECK (((estado)::text = ANY ((ARRAY['borrador'::character varying, 'calculada'::character varying, 'aprobada'::character varying, 'pagada'::character varying, 'anulada'::character varying])::text[]))),
+    CONSTRAINT rrhh_liquidaciones_factor_cesantia_check CHECK (((factor_cesantia >= (0)::numeric) AND (factor_cesantia <= (100)::numeric))),
+    CONSTRAINT rrhh_liquidaciones_motivo_check CHECK (((motivo)::text = ANY ((ARRAY['despido_responsabilidad'::character varying, 'despido_justificado'::character varying, 'renuncia'::character varying, 'mutuo_acuerdo'::character varying, 'fin_contrato'::character varying, 'pension'::character varying, 'fallecimiento'::character varying, 'otro'::character varying])::text[]))),
+    CONSTRAINT rrhh_liquidaciones_promedio_manual_check CHECK (((promedio_manual IS NULL) OR (promedio_manual > (0)::numeric))),
+    CONSTRAINT rrhh_liquidaciones_promedio_origen_check CHECK (((promedio_origen)::text = ANY ((ARRAY['planillas'::character varying, 'salario'::character varying, 'manual'::character varying])::text[])))
+);
+
+
+--
+-- Name: rrhh_liquidaciones_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_liquidaciones_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'rrhh_liquidaciones'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rrhh_liquidaciones_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_liquidaciones_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_liquidaciones_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_liquidaciones_auditoria_id_seq OWNED BY public.rrhh_liquidaciones_auditoria.id;
+
+
+--
+-- Name: rrhh_liquidaciones_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_liquidaciones_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_liquidaciones_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_liquidaciones_id_seq OWNED BY public.rrhh_liquidaciones.id;
 
 
 --
@@ -18593,6 +19700,34 @@ ALTER TABLE ONLY public.rrhh_agentes_auditoria ALTER COLUMN id SET DEFAULT nextv
 
 
 --
+-- Name: rrhh_aguinaldo_empleados id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_aguinaldo_empleados ALTER COLUMN id SET DEFAULT nextval('public.rrhh_aguinaldo_empleados_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_aguinaldo_lineas id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_aguinaldo_lineas ALTER COLUMN id SET DEFAULT nextval('public.rrhh_aguinaldo_lineas_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_aguinaldos id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_aguinaldos ALTER COLUMN id SET DEFAULT nextval('public.rrhh_aguinaldos_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_aguinaldos_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_aguinaldos_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rrhh_aguinaldos_auditoria_id_seq'::regclass);
+
+
+--
 -- Name: rrhh_asistencia_ajustes id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -18772,6 +19907,27 @@ ALTER TABLE ONLY public.rrhh_incapacidades ALTER COLUMN id SET DEFAULT nextval('
 --
 
 ALTER TABLE ONLY public.rrhh_incapacidades_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rrhh_incapacidades_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_liquidacion_lineas id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_liquidacion_lineas ALTER COLUMN id SET DEFAULT nextval('public.rrhh_liquidacion_lineas_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_liquidaciones id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_liquidaciones ALTER COLUMN id SET DEFAULT nextval('public.rrhh_liquidaciones_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_liquidaciones_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_liquidaciones_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rrhh_liquidaciones_auditoria_id_seq'::regclass);
 
 
 --
@@ -19825,6 +20981,46 @@ ALTER TABLE ONLY public.rrhh_agentes
 
 
 --
+-- Name: rrhh_aguinaldo_empleados rrhh_aguinaldo_empleados_aguinaldo_id_empleado_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_aguinaldo_empleados
+    ADD CONSTRAINT rrhh_aguinaldo_empleados_aguinaldo_id_empleado_id_key UNIQUE (aguinaldo_id, empleado_id);
+
+
+--
+-- Name: rrhh_aguinaldo_empleados rrhh_aguinaldo_empleados_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_aguinaldo_empleados
+    ADD CONSTRAINT rrhh_aguinaldo_empleados_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_aguinaldo_lineas rrhh_aguinaldo_lineas_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_aguinaldo_lineas
+    ADD CONSTRAINT rrhh_aguinaldo_lineas_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_aguinaldos_auditoria rrhh_aguinaldos_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_aguinaldos_auditoria
+    ADD CONSTRAINT rrhh_aguinaldos_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_aguinaldos rrhh_aguinaldos_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_aguinaldos
+    ADD CONSTRAINT rrhh_aguinaldos_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: rrhh_asistencia_ajustes_auditoria rrhh_asistencia_ajustes_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -20062,6 +21258,30 @@ ALTER TABLE ONLY public.rrhh_incapacidades_auditoria
 
 ALTER TABLE ONLY public.rrhh_incapacidades
     ADD CONSTRAINT rrhh_incapacidades_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_liquidacion_lineas rrhh_liquidacion_lineas_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_liquidacion_lineas
+    ADD CONSTRAINT rrhh_liquidacion_lineas_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_liquidaciones_auditoria rrhh_liquidaciones_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_liquidaciones_auditoria
+    ADD CONSTRAINT rrhh_liquidaciones_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_liquidaciones rrhh_liquidaciones_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_liquidaciones
+    ADD CONSTRAINT rrhh_liquidaciones_pkey PRIMARY KEY (id);
 
 
 --
@@ -21157,6 +22377,34 @@ CREATE INDEX idx_rrhh_agentes_auditoria_registro ON public.rrhh_agentes_auditori
 
 
 --
+-- Name: idx_rrhh_aguinaldo_emp_empleado; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_aguinaldo_emp_empleado ON public.rrhh_aguinaldo_empleados USING btree (empleado_id);
+
+
+--
+-- Name: idx_rrhh_aguinaldo_lineas; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_aguinaldo_lineas ON public.rrhh_aguinaldo_lineas USING btree (aguinaldo_id, empleado_id);
+
+
+--
+-- Name: idx_rrhh_aguinaldos_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_aguinaldos_auditoria_registro ON public.rrhh_aguinaldos_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_rrhh_aguinaldos_empresa; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_aguinaldos_empresa ON public.rrhh_aguinaldos USING btree (empresa_id, anio DESC) WHERE (deleted_at IS NULL);
+
+
+--
 -- Name: idx_rrhh_ajustes_fecha; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -21322,6 +22570,27 @@ CREATE INDEX idx_rrhh_inc_empresa ON public.rrhh_incapacidades USING btree (empr
 --
 
 CREATE INDEX idx_rrhh_incapacidades_auditoria_registro ON public.rrhh_incapacidades_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_rrhh_liquidacion_lineas; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_liquidacion_lineas ON public.rrhh_liquidacion_lineas USING btree (liquidacion_id);
+
+
+--
+-- Name: idx_rrhh_liquidaciones_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_liquidaciones_auditoria_registro ON public.rrhh_liquidaciones_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_rrhh_liquidaciones_empresa; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_liquidaciones_empresa ON public.rrhh_liquidaciones USING btree (empresa_id, fecha_salida DESC) WHERE (deleted_at IS NULL);
 
 
 --
@@ -21633,6 +22902,13 @@ CREATE UNIQUE INDEX uq_rrhh_horarios_nombre ON public.rrhh_horarios USING btree 
 
 
 --
+-- Name: uq_rrhh_liquidaciones_empleado; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_rrhh_liquidaciones_empleado ON public.rrhh_liquidaciones USING btree (empleado_id) WHERE ((deleted_at IS NULL) AND ((estado)::text <> 'anulada'::text));
+
+
+--
 -- Name: uq_rrhh_marcas_referencia; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -21906,6 +23182,13 @@ CREATE TRIGGER trg_rrhh_agentes_auditoria AFTER INSERT OR DELETE OR UPDATE ON pu
 
 
 --
+-- Name: rrhh_aguinaldos trg_rrhh_aguinaldos_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_rrhh_aguinaldos_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rrhh_aguinaldos FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
 -- Name: rrhh_asistencia_ajustes trg_rrhh_asistencia_ajustes_auditoria; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -21994,6 +23277,13 @@ CREATE TRIGGER trg_rrhh_horarios_auditoria AFTER INSERT OR DELETE OR UPDATE ON p
 --
 
 CREATE TRIGGER trg_rrhh_incapacidades_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rrhh_incapacidades FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: rrhh_liquidaciones trg_rrhh_liquidaciones_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_rrhh_liquidaciones_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rrhh_liquidaciones FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
 
 
 --
@@ -22344,6 +23634,38 @@ ALTER TABLE ONLY public.recibos_adelanto
 
 
 --
+-- Name: rrhh_aguinaldo_empleados rrhh_aguinaldo_empleados_aguinaldo_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_aguinaldo_empleados
+    ADD CONSTRAINT rrhh_aguinaldo_empleados_aguinaldo_id_fkey FOREIGN KEY (aguinaldo_id) REFERENCES public.rrhh_aguinaldos(id) ON DELETE CASCADE;
+
+
+--
+-- Name: rrhh_aguinaldo_empleados rrhh_aguinaldo_empleados_empleado_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_aguinaldo_empleados
+    ADD CONSTRAINT rrhh_aguinaldo_empleados_empleado_id_fkey FOREIGN KEY (empleado_id) REFERENCES public.rrhh_empleados(id);
+
+
+--
+-- Name: rrhh_aguinaldo_lineas rrhh_aguinaldo_lineas_aguinaldo_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_aguinaldo_lineas
+    ADD CONSTRAINT rrhh_aguinaldo_lineas_aguinaldo_id_fkey FOREIGN KEY (aguinaldo_id) REFERENCES public.rrhh_aguinaldos(id) ON DELETE CASCADE;
+
+
+--
+-- Name: rrhh_aguinaldo_lineas rrhh_aguinaldo_lineas_empleado_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_aguinaldo_lineas
+    ADD CONSTRAINT rrhh_aguinaldo_lineas_empleado_id_fkey FOREIGN KEY (empleado_id) REFERENCES public.rrhh_empleados(id);
+
+
+--
 -- Name: rrhh_asistencia_ajustes rrhh_asistencia_ajustes_empleado_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -22480,6 +23802,22 @@ ALTER TABLE ONLY public.rrhh_incapacidades
 
 
 --
+-- Name: rrhh_liquidacion_lineas rrhh_liquidacion_lineas_liquidacion_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_liquidacion_lineas
+    ADD CONSTRAINT rrhh_liquidacion_lineas_liquidacion_id_fkey FOREIGN KEY (liquidacion_id) REFERENCES public.rrhh_liquidaciones(id) ON DELETE CASCADE;
+
+
+--
+-- Name: rrhh_liquidaciones rrhh_liquidaciones_empleado_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_liquidaciones
+    ADD CONSTRAINT rrhh_liquidaciones_empleado_id_fkey FOREIGN KEY (empleado_id) REFERENCES public.rrhh_empleados(id);
+
+
+--
 -- Name: rrhh_marcas rrhh_marcas_agente_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -22611,5 +23949,5 @@ ALTER TABLE ONLY public.sucursal_bodegas
 -- PostgreSQL database dump complete
 --
 
-\unrestrict TVrCVA9biMVdIffWRLnMiN4dXxDvkKcU4LAmvSzwb5jYSwYoxnx6X6EJbCBV7D6
+\unrestrict wnQo50ueRvQMNo8kg1hxSaeVFU1NpnPPPpGvuC49QizrVdemQVxaxodKEJhrsb3
 
