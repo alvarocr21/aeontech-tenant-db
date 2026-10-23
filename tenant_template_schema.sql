@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict fRJHuJ5yg2HBKc79gFpMOQTRF520sIUKB10hiUk6jgfGsLIZIOoa8syuIvGcpwx
+\restrict Y3rmd3xJuU2ujwWMSSGIAlOgJicnwLdVkeDePp1fPs4tXxY0a4H2vtWbtZEPbXa
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
@@ -1662,47 +1662,48 @@ $$;
 CREATE FUNCTION public.sp_cierre_caja_calcular(p_empresa_id bigint, p_sucursal_id bigint, p_caja_id bigint) RETURNS TABLE(fecha_inicio timestamp without time zone, fecha_fin timestamp without time zone, total_documentos integer, medios_pago jsonb)
     LANGUAGE plpgsql
     AS $$
-            DECLARE
-                v_fecha_inicio timestamp;
-                v_fecha_fin    timestamp := NOW();
-            BEGIN
-                SELECT COALESCE(MAX(cc.fecha_fin), '1970-01-01 00:00:00'::timestamp)
-                INTO v_fecha_inicio
-                FROM caja_cierres cc
-                WHERE cc.empresa_id = p_empresa_id
-                  AND cc.caja_id    = p_caja_id;
+DECLARE
+    v_fecha_inicio timestamp;
+    v_fecha_fin    timestamp := NOW();
+BEGIN
+    SELECT COALESCE(MAX(cc.fecha_fin), '1970-01-01 00:00:00'::timestamp)
+    INTO v_fecha_inicio
+    FROM caja_cierres cc
+    WHERE cc.empresa_id = p_empresa_id
+      AND cc.caja_id    = p_caja_id;
 
-                RETURN QUERY
-                SELECT
-                    v_fecha_inicio,
-                    v_fecha_fin,
-                    (SELECT COUNT(*)::integer
-                     FROM documentos_electronicos d
-                     WHERE d.empresa_id  = p_empresa_id
-                       AND d.caja_id     = p_caja_id
-                       AND d.fecha_emision > v_fecha_inicio
-                       AND d.fecha_emision <= v_fecha_fin
-                       AND d.estado = 'aceptado'),
-                    (SELECT COALESCE(jsonb_agg(
-                        jsonb_build_object(
-                            'tipo_medio_pago', sub.tipo_medio_pago,
-                            'moneda',          sub.moneda,
-                            'monto_sistema',   sub.monto
-                        ) ORDER BY sub.moneda, sub.tipo_medio_pago
-                     ), '[]'::jsonb)
-                     FROM (
-                         SELECT mp.tipo_medio_pago, d.moneda, SUM(mp.total_medio_pago) AS monto
-                         FROM documento_medios_pago mp
-                         JOIN documentos_electronicos d ON d.id = mp.documento_id
-                         WHERE d.empresa_id  = p_empresa_id
-                           AND d.caja_id     = p_caja_id
-                           AND d.fecha_emision > v_fecha_inicio
-                           AND d.fecha_emision <= v_fecha_fin
-                           AND d.estado = 'aceptado'
-                         GROUP BY mp.tipo_medio_pago, d.moneda
-                     ) sub);
-            END;
-            $$;
+    RETURN QUERY
+    SELECT
+        v_fecha_inicio,
+        v_fecha_fin,
+        (SELECT COUNT(*)::integer
+         FROM documentos_electronicos d
+         WHERE d.empresa_id  = p_empresa_id
+           AND d.caja_id     = p_caja_id
+           AND d.fecha_emision > v_fecha_inicio
+           AND d.fecha_emision <= v_fecha_fin
+           AND d.estado = 'aceptado'),
+        (SELECT COALESCE(jsonb_agg(
+            jsonb_build_object(
+                'tipo_medio_pago', sub.tipo_medio_pago,
+                'moneda',          sub.moneda,
+                'monto_sistema',   sub.monto
+            ) ORDER BY sub.moneda, sub.tipo_medio_pago
+         ), '[]'::jsonb)
+         FROM (
+             SELECT mp.tipo_medio_pago, COALESCE(d.moneda, 'CRC') AS moneda,
+                    SUM(CASE WHEN d.tipo_documento = '03' THEN -mp.total_medio_pago ELSE mp.total_medio_pago END) AS monto
+             FROM documento_medios_pago mp
+             JOIN documentos_electronicos d ON d.id = mp.documento_id
+             WHERE d.empresa_id  = p_empresa_id
+               AND d.caja_id     = p_caja_id
+               AND d.fecha_emision > v_fecha_inicio
+               AND d.fecha_emision <= v_fecha_fin
+               AND d.estado = 'aceptado'
+             GROUP BY mp.tipo_medio_pago, COALESCE(d.moneda, 'CRC')
+         ) sub);
+END;
+$$;
 
 
 --
@@ -2324,71 +2325,73 @@ $$;
 CREATE FUNCTION public.sp_cliente_resumen(p_cliente_id bigint, p_empresa_id bigint) RETURNS TABLE(total_citas bigint, citas_completadas bigint, citas_canceladas bigint, citas_pendientes bigint, total_facturas bigint, total_facturado numeric, total_facturado_moneda json, total_notas_credito bigint, top_servicios json, top_productos json, top_funcionarios json)
     LANGUAGE plpgsql
     AS $$
-            BEGIN
-                RETURN QUERY
-                SELECT
-                    (SELECT COUNT(*) FROM agenda_eventos e
-                       WHERE e.cliente_id = p_cliente_id AND e.empresa_id = p_empresa_id AND e.deleted_at IS NULL),
-                    (SELECT COUNT(*) FROM agenda_eventos e
-                       WHERE e.cliente_id = p_cliente_id AND e.empresa_id = p_empresa_id AND e.deleted_at IS NULL
-                         AND e.estado = 'completado'),
-                    (SELECT COUNT(*) FROM agenda_eventos e
-                       WHERE e.cliente_id = p_cliente_id AND e.empresa_id = p_empresa_id AND e.deleted_at IS NULL
-                         AND e.estado = 'cancelado'),
-                    (SELECT COUNT(*) FROM agenda_eventos e
-                       WHERE e.cliente_id = p_cliente_id AND e.empresa_id = p_empresa_id AND e.deleted_at IS NULL
-                         AND e.estado IN ('agendado','confirmado')),
-                    (SELECT COUNT(*) FROM documentos_electronicos d
-                       WHERE d.receptor_cliente_id = p_cliente_id AND d.empresa_id = p_empresa_id AND d.deleted_at IS NULL
-                         AND d.tipo_documento = '01' AND d.estado = 'aceptado'),
-                    (SELECT COALESCE(SUM(d.total_comprobante), 0) FROM documentos_electronicos d
-                       WHERE d.receptor_cliente_id = p_cliente_id AND d.empresa_id = p_empresa_id AND d.deleted_at IS NULL
-                         AND d.tipo_documento = '01' AND d.estado = 'aceptado'),
-                    (SELECT COALESCE(json_object_agg(t.moneda, t.total), '{}'::json) FROM (
-                        SELECT COALESCE(d.moneda, 'CRC') AS moneda, SUM(d.total_comprobante) AS total
-                        FROM documentos_electronicos d
-                        WHERE d.receptor_cliente_id = p_cliente_id AND d.empresa_id = p_empresa_id AND d.deleted_at IS NULL
-                          AND d.tipo_documento = '01' AND d.estado = 'aceptado'
-                        GROUP BY COALESCE(d.moneda, 'CRC')
-                    ) t),
-                    (SELECT COUNT(*) FROM documentos_electronicos d
-                       WHERE d.receptor_cliente_id = p_cliente_id AND d.empresa_id = p_empresa_id AND d.deleted_at IS NULL
-                         AND d.tipo_documento = '03' AND d.estado = 'aceptado'),
-                    (SELECT COALESCE(json_agg(t), '[]'::json) FROM (
-                        SELECT s.id, s.name, COUNT(*) AS veces
-                        FROM agenda_evento_lineas ael
-                        JOIN agenda_eventos e ON e.id = ael.evento_id
-                        JOIN servicios s ON s.id = ael.servicio_id
-                        WHERE e.cliente_id = p_cliente_id AND e.empresa_id = p_empresa_id AND e.deleted_at IS NULL
-                          AND e.estado <> 'cancelado'
-                        GROUP BY s.id, s.name
-                        ORDER BY veces DESC
-                        LIMIT 5
-                    ) t),
-                    (SELECT COALESCE(json_agg(t), '[]'::json) FROM (
-                        SELECT p.id, p.name, SUM(dl.cantidad) AS cantidad
-                        FROM documento_lineas dl
-                        JOIN documentos_electronicos d ON d.id = dl.documento_id
-                        JOIN productos p ON p.id = dl.producto_id
-                        WHERE d.receptor_cliente_id = p_cliente_id AND d.empresa_id = p_empresa_id AND d.deleted_at IS NULL
-                          AND d.estado = 'aceptado' AND dl.producto_id IS NOT NULL
-                        GROUP BY p.id, p.name
-                        ORDER BY cantidad DESC
-                        LIMIT 5
-                    ) t),
-                    (SELECT COALESCE(json_agg(t), '[]'::json) FROM (
-                        SELECT f.id, f.name, COUNT(*) AS veces
-                        FROM agenda_evento_lineas ael
-                        JOIN agenda_eventos e ON e.id = ael.evento_id
-                        JOIN funcionarios f ON f.id = ael.funcionario_id
-                        WHERE e.cliente_id = p_cliente_id AND e.empresa_id = p_empresa_id AND e.deleted_at IS NULL
-                          AND e.estado <> 'cancelado' AND ael.funcionario_id IS NOT NULL
-                        GROUP BY f.id, f.name
-                        ORDER BY veces DESC
-                        LIMIT 5
-                    ) t);
-            END;
-            $$;
+BEGIN
+    RETURN QUERY
+    SELECT
+        (SELECT COUNT(*) FROM agenda_eventos e
+           WHERE e.cliente_id = p_cliente_id AND e.empresa_id = p_empresa_id AND e.deleted_at IS NULL),
+        (SELECT COUNT(*) FROM agenda_eventos e
+           WHERE e.cliente_id = p_cliente_id AND e.empresa_id = p_empresa_id AND e.deleted_at IS NULL
+             AND e.estado = 'completado'),
+        (SELECT COUNT(*) FROM agenda_eventos e
+           WHERE e.cliente_id = p_cliente_id AND e.empresa_id = p_empresa_id AND e.deleted_at IS NULL
+             AND e.estado = 'cancelado'),
+        (SELECT COUNT(*) FROM agenda_eventos e
+           WHERE e.cliente_id = p_cliente_id AND e.empresa_id = p_empresa_id AND e.deleted_at IS NULL
+             AND e.estado IN ('agendado','confirmado')),
+        (SELECT COUNT(*) FROM documentos_electronicos d
+           WHERE d.receptor_cliente_id = p_cliente_id AND d.empresa_id = p_empresa_id AND d.deleted_at IS NULL
+             AND d.tipo_documento = '01' AND d.estado = 'aceptado'),
+        (SELECT COALESCE(SUM(CASE WHEN d.tipo_documento = '03' THEN -d.total_comprobante ELSE d.total_comprobante END), 0)
+           FROM documentos_electronicos d
+           WHERE d.receptor_cliente_id = p_cliente_id AND d.empresa_id = p_empresa_id AND d.deleted_at IS NULL
+             AND d.tipo_documento IN ('01','02','03') AND d.estado = 'aceptado'),
+        (SELECT COALESCE(json_object_agg(t.moneda, t.total), '{}'::json) FROM (
+            SELECT COALESCE(d.moneda, 'CRC') AS moneda,
+                   SUM(CASE WHEN d.tipo_documento = '03' THEN -d.total_comprobante ELSE d.total_comprobante END) AS total
+            FROM documentos_electronicos d
+            WHERE d.receptor_cliente_id = p_cliente_id AND d.empresa_id = p_empresa_id AND d.deleted_at IS NULL
+              AND d.tipo_documento IN ('01','02','03') AND d.estado = 'aceptado'
+            GROUP BY COALESCE(d.moneda, 'CRC')
+        ) t),
+        (SELECT COUNT(*) FROM documentos_electronicos d
+           WHERE d.receptor_cliente_id = p_cliente_id AND d.empresa_id = p_empresa_id AND d.deleted_at IS NULL
+             AND d.tipo_documento = '03' AND d.estado = 'aceptado'),
+        (SELECT COALESCE(json_agg(t), '[]'::json) FROM (
+            SELECT s.id, s.name, COUNT(*) AS veces
+            FROM agenda_evento_lineas ael
+            JOIN agenda_eventos e ON e.id = ael.evento_id
+            JOIN servicios s ON s.id = ael.servicio_id
+            WHERE e.cliente_id = p_cliente_id AND e.empresa_id = p_empresa_id AND e.deleted_at IS NULL
+              AND e.estado <> 'cancelado'
+            GROUP BY s.id, s.name
+            ORDER BY veces DESC
+            LIMIT 5
+        ) t),
+        (SELECT COALESCE(json_agg(t), '[]'::json) FROM (
+            SELECT p.id, p.name, SUM(CASE WHEN d.tipo_documento = '03' THEN -dl.cantidad ELSE dl.cantidad END) AS cantidad
+            FROM documento_lineas dl
+            JOIN documentos_electronicos d ON d.id = dl.documento_id
+            JOIN productos p ON p.id = dl.producto_id
+            WHERE d.receptor_cliente_id = p_cliente_id AND d.empresa_id = p_empresa_id AND d.deleted_at IS NULL
+              AND d.estado = 'aceptado' AND dl.producto_id IS NOT NULL
+            GROUP BY p.id, p.name
+            ORDER BY cantidad DESC
+            LIMIT 5
+        ) t),
+        (SELECT COALESCE(json_agg(t), '[]'::json) FROM (
+            SELECT f.id, f.name, COUNT(*) AS veces
+            FROM agenda_evento_lineas ael
+            JOIN agenda_eventos e ON e.id = ael.evento_id
+            JOIN funcionarios f ON f.id = ael.funcionario_id
+            WHERE e.cliente_id = p_cliente_id AND e.empresa_id = p_empresa_id AND e.deleted_at IS NULL
+              AND e.estado <> 'cancelado' AND ael.funcionario_id IS NOT NULL
+            GROUP BY f.id, f.name
+            ORDER BY veces DESC
+            LIMIT 5
+        ) t);
+END;
+$$;
 
 
 --
@@ -14943,5 +14946,5 @@ ALTER TABLE ONLY public.sucursal_bodegas
 -- PostgreSQL database dump complete
 --
 
-\unrestrict fRJHuJ5yg2HBKc79gFpMOQTRF520sIUKB10hiUk6jgfGsLIZIOoa8syuIvGcpwx
+\unrestrict Y3rmd3xJuU2ujwWMSSGIAlOgJicnwLdVkeDePp1fPs4tXxY0a4H2vtWbtZEPbXa
 
