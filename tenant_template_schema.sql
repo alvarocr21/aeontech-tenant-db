@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict wnQo50ueRvQMNo8kg1hxSaeVFU1NpnPPPpGvuC49QizrVdemQVxaxodKEJhrsb3
+\restrict SX0gqeGCeKqLgiVcawJnCe67UosaDbsLTbUaFfY0qScSoEEI8sjK3O02Jy6V1MI
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
@@ -9273,6 +9273,154 @@ END; $$;
 
 
 --
+-- Name: sp_rrhh_doc_actualizar(bigint, bigint, character varying, character varying, date, date, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_doc_actualizar(p_empresa_id bigint, p_id bigint, p_tipo character varying, p_titulo character varying, p_emision date, p_vencimiento date, p_notas character varying) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_titulo VARCHAR := NULLIF(btrim(COALESCE(p_titulo, '')), '');
+BEGIN
+    IF v_titulo IS NULL THEN RAISE EXCEPTION 'DOCUMENTO_INVALIDO: Indique el título del documento.'; END IF;
+    IF p_emision IS NOT NULL AND p_vencimiento IS NOT NULL AND p_vencimiento < p_emision THEN
+        RAISE EXCEPTION 'DOCUMENTO_INVALIDO: El vencimiento no puede ser anterior a la emisión.';
+    END IF;
+    UPDATE rrhh_empleado_documentos
+       SET tipo = p_tipo, titulo = v_titulo, fecha_emision = p_emision, fecha_vencimiento = p_vencimiento,
+           notas = NULLIF(btrim(COALESCE(p_notas, '')), ''), updated_at = NOW()
+     WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
+    RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_doc_eliminar(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_doc_eliminar(p_empresa_id bigint, p_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_adjunto BIGINT;
+BEGIN
+    UPDATE rrhh_empleado_documentos SET deleted_at = NOW(), updated_at = NOW()
+     WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL
+    RETURNING adjunto_id INTO v_adjunto;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    UPDATE documentos_adjuntos SET deleted_at = NOW(), updated_at = NOW() WHERE id = v_adjunto AND deleted_at IS NULL;
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_doc_get(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_doc_get(p_empresa_id bigint, p_id bigint) RETURNS TABLE(id bigint, empleado_id bigint, titulo character varying, nombre character varying, clave character varying)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT d.id, d.empleado_id, d.titulo, a.nombre, a.clave
+    FROM rrhh_empleado_documentos d
+    JOIN documentos_adjuntos a ON a.id = d.adjunto_id AND a.deleted_at IS NULL
+    WHERE d.id = p_id AND d.empresa_id = p_empresa_id AND d.deleted_at IS NULL;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_doc_list(bigint, bigint, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_doc_list(p_empresa_id bigint, p_empleado_id bigint, p_aviso_dias integer DEFAULT 30) RETURNS TABLE(id bigint, empleado_id bigint, tipo character varying, titulo character varying, fecha_emision date, fecha_vencimiento date, notas character varying, nombre character varying, tamano_bytes bigint, created_at timestamp without time zone, dias_restantes integer, estado_venc character varying, reemplazado boolean)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_hoy DATE := (NOW() AT TIME ZONE 'America/Costa_Rica')::DATE;
+BEGIN
+    RETURN QUERY
+    SELECT d.id, d.empleado_id, d.tipo, d.titulo, d.fecha_emision, d.fecha_vencimiento,
+           d.notas, a.nombre, a.tamano_bytes, d.created_at,
+           (d.fecha_vencimiento - v_hoy)::INT,
+           (CASE WHEN d.fecha_vencimiento IS NULL THEN 'sin_vencimiento'
+                 WHEN d.fecha_vencimiento < v_hoy THEN 'vencido'
+                 WHEN d.fecha_vencimiento - v_hoy <= p_aviso_dias THEN 'por_vencer'
+                 ELSE 'vigente' END)::VARCHAR,
+           (d.fecha_vencimiento IS NOT NULL AND EXISTS (
+                SELECT 1 FROM rrhh_empleado_documentos o
+                WHERE o.empleado_id = d.empleado_id AND o.tipo = d.tipo AND o.id <> d.id AND o.deleted_at IS NULL
+                  AND (o.fecha_vencimiento IS NULL OR o.fecha_vencimiento > d.fecha_vencimiento)))
+    FROM rrhh_empleado_documentos d
+    JOIN documentos_adjuntos a ON a.id = d.adjunto_id
+    WHERE d.empresa_id = p_empresa_id AND d.empleado_id = p_empleado_id AND d.deleted_at IS NULL
+    ORDER BY d.tipo, d.fecha_vencimiento DESC NULLS FIRST, d.id DESC;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_doc_registrar(bigint, bigint, character varying, character varying, date, date, character varying, character varying, character varying, bigint, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_doc_registrar(p_empresa_id bigint, p_empleado_id bigint, p_tipo character varying, p_titulo character varying, p_emision date, p_vencimiento date, p_notas character varying, p_nombre character varying, p_clave character varying, p_tamano bigint, p_sha256 character varying) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_user    BIGINT := NULLIF(current_setting('app.current_user_id', true), '')::BIGINT;
+    v_titulo  VARCHAR := NULLIF(btrim(COALESCE(p_titulo, '')), '');
+    v_adjunto BIGINT;
+    v_id      BIGINT;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM rrhh_empleados WHERE id = p_empleado_id AND empresa_id = p_empresa_id AND deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'DOCUMENTO_INVALIDO: El empleado no existe.';
+    END IF;
+    IF v_titulo IS NULL THEN RAISE EXCEPTION 'DOCUMENTO_INVALIDO: Indique el título del documento.'; END IF;
+    IF p_emision IS NOT NULL AND p_vencimiento IS NOT NULL AND p_vencimiento < p_emision THEN
+        RAISE EXCEPTION 'DOCUMENTO_INVALIDO: El vencimiento no puede ser anterior a la emisión.';
+    END IF;
+
+    INSERT INTO documentos_adjuntos (empresa_id, entidad, entidad_id, nombre, clave, tamano_bytes, sha256, created_by)
+    VALUES (p_empresa_id, 'rrhh_empleado', p_empleado_id, p_nombre, p_clave, p_tamano, p_sha256, v_user)
+    RETURNING documentos_adjuntos.id INTO v_adjunto;
+
+    INSERT INTO rrhh_empleado_documentos (empresa_id, empleado_id, tipo, titulo, fecha_emision, fecha_vencimiento, notas, adjunto_id, created_by)
+    VALUES (p_empresa_id, p_empleado_id, p_tipo, v_titulo, p_emision, p_vencimiento, NULLIF(btrim(COALESCE(p_notas, '')), ''), v_adjunto, v_user)
+    RETURNING rrhh_empleado_documentos.id INTO v_id;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_rrhh_doc_vencimientos(bigint, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rrhh_doc_vencimientos(p_empresa_id bigint, p_aviso_dias integer DEFAULT 30) RETURNS TABLE(id bigint, empleado_id bigint, empleado_nombre character varying, empleado_codigo character varying, departamento_nombre character varying, tipo character varying, titulo character varying, fecha_vencimiento date, dias_restantes integer, estado_venc character varying)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_hoy DATE := (NOW() AT TIME ZONE 'America/Costa_Rica')::DATE;
+BEGIN
+    RETURN QUERY
+    SELECT d.id, e.id,
+           (e.nombre || ' ' || e.apellido1 || COALESCE(' ' || e.apellido2, ''))::VARCHAR, e.codigo, dp.nombre,
+           d.tipo, d.titulo, d.fecha_vencimiento, (d.fecha_vencimiento - v_hoy)::INT,
+           (CASE WHEN d.fecha_vencimiento < v_hoy THEN 'vencido' ELSE 'por_vencer' END)::VARCHAR
+    FROM rrhh_empleado_documentos d
+    JOIN rrhh_empleados e ON e.id = d.empleado_id AND e.deleted_at IS NULL AND e.estado <> 'liquidado'
+    LEFT JOIN rrhh_departamentos dp ON dp.id = e.departamento_id
+    WHERE d.empresa_id = p_empresa_id AND d.deleted_at IS NULL
+      AND d.fecha_vencimiento IS NOT NULL AND d.fecha_vencimiento - v_hoy <= p_aviso_dias
+      AND NOT EXISTS (
+            SELECT 1 FROM rrhh_empleado_documentos o
+            WHERE o.empleado_id = d.empleado_id AND o.tipo = d.tipo AND o.id <> d.id AND o.deleted_at IS NULL
+              AND (o.fecha_vencimiento IS NULL OR o.fecha_vencimiento > d.fecha_vencimiento))
+    ORDER BY d.fecha_vencimiento, e.apellido1, e.nombre;
+END; $$;
+
+
+--
 -- Name: sp_rrhh_emp_concepto_create(bigint, bigint, bigint, numeric, date, date, character varying); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -16320,6 +16468,42 @@ ALTER SEQUENCE public.recibos_adelanto_auditoria_id_seq OWNED BY public.recibos_
 
 
 --
+-- Name: reportes_dinamicos; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.reportes_dinamicos (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    user_id bigint NOT NULL,
+    nombre character varying(100) NOT NULL,
+    fuente character varying(30) NOT NULL,
+    definicion jsonb NOT NULL,
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: reportes_dinamicos_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.reportes_dinamicos_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: reportes_dinamicos_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.reportes_dinamicos_id_seq OWNED BY public.reportes_dinamicos.id;
+
+
+--
 -- Name: rrhh_agentes; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -17109,6 +17293,85 @@ CREATE SEQUENCE public.rrhh_empleado_conceptos_id_seq
 --
 
 ALTER SEQUENCE public.rrhh_empleado_conceptos_id_seq OWNED BY public.rrhh_empleado_conceptos.id;
+
+
+--
+-- Name: rrhh_empleado_documentos; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_empleado_documentos (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    empleado_id bigint NOT NULL,
+    tipo character varying(20) NOT NULL,
+    titulo character varying(150) NOT NULL,
+    fecha_emision date,
+    fecha_vencimiento date,
+    notas character varying(500),
+    adjunto_id bigint NOT NULL,
+    created_by bigint,
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rrhh_empleado_documentos_check CHECK (((fecha_vencimiento IS NULL) OR (fecha_emision IS NULL) OR (fecha_vencimiento >= fecha_emision))),
+    CONSTRAINT rrhh_empleado_documentos_tipo_check CHECK (((tipo)::text = ANY ((ARRAY['identificacion'::character varying, 'contrato'::character varying, 'titulo'::character varying, 'curriculum'::character varying, 'antecedentes'::character varying, 'licencia'::character varying, 'carne'::character varying, 'medico'::character varying, 'constancia'::character varying, 'amonestacion'::character varying, 'otro'::character varying])::text[])))
+);
+
+
+--
+-- Name: rrhh_empleado_documentos_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rrhh_empleado_documentos_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'rrhh_empleado_documentos'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rrhh_empleado_documentos_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_empleado_documentos_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_empleado_documentos_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_empleado_documentos_auditoria_id_seq OWNED BY public.rrhh_empleado_documentos_auditoria.id;
+
+
+--
+-- Name: rrhh_empleado_documentos_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rrhh_empleado_documentos_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rrhh_empleado_documentos_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rrhh_empleado_documentos_id_seq OWNED BY public.rrhh_empleado_documentos.id;
 
 
 --
@@ -19686,6 +19949,13 @@ ALTER TABLE ONLY public.recibos_adelanto_auditoria ALTER COLUMN id SET DEFAULT n
 
 
 --
+-- Name: reportes_dinamicos id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.reportes_dinamicos ALTER COLUMN id SET DEFAULT nextval('public.reportes_dinamicos_id_seq'::regclass);
+
+
+--
 -- Name: rrhh_agentes id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -19823,6 +20093,20 @@ ALTER TABLE ONLY public.rrhh_empleado_conceptos ALTER COLUMN id SET DEFAULT next
 --
 
 ALTER TABLE ONLY public.rrhh_empleado_conceptos_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rrhh_empleado_conceptos_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_empleado_documentos id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_empleado_documentos ALTER COLUMN id SET DEFAULT nextval('public.rrhh_empleado_documentos_id_seq'::regclass);
+
+
+--
+-- Name: rrhh_empleado_documentos_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_empleado_documentos_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rrhh_empleado_documentos_auditoria_id_seq'::regclass);
 
 
 --
@@ -20965,6 +21249,14 @@ ALTER TABLE ONLY public.recibos_adelanto
 
 
 --
+-- Name: reportes_dinamicos reportes_dinamicos_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.reportes_dinamicos
+    ADD CONSTRAINT reportes_dinamicos_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: rrhh_agentes_auditoria rrhh_agentes_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -21146,6 +21438,22 @@ ALTER TABLE ONLY public.rrhh_empleado_conceptos_auditoria
 
 ALTER TABLE ONLY public.rrhh_empleado_conceptos
     ADD CONSTRAINT rrhh_empleado_conceptos_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_empleado_documentos_auditoria rrhh_empleado_documentos_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_empleado_documentos_auditoria
+    ADD CONSTRAINT rrhh_empleado_documentos_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rrhh_empleado_documentos rrhh_empleado_documentos_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_empleado_documentos
+    ADD CONSTRAINT rrhh_empleado_documentos_pkey PRIMARY KEY (id);
 
 
 --
@@ -22370,6 +22678,13 @@ CREATE INDEX idx_recibos_adelanto_auditoria_registro ON public.recibos_adelanto_
 
 
 --
+-- Name: idx_reportes_dinamicos_usuario; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_reportes_dinamicos_usuario ON public.reportes_dinamicos USING btree (empresa_id, user_id) WHERE (deleted_at IS NULL);
+
+
+--
 -- Name: idx_rrhh_agentes_auditoria_registro; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -22475,6 +22790,20 @@ CREATE INDEX idx_rrhh_emp_conceptos_empleado ON public.rrhh_empleado_conceptos U
 
 
 --
+-- Name: idx_rrhh_emp_documentos_empleado; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_emp_documentos_empleado ON public.rrhh_empleado_documentos USING btree (empresa_id, empleado_id, tipo) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_rrhh_emp_documentos_vence; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_emp_documentos_vence ON public.rrhh_empleado_documentos USING btree (empresa_id, fecha_vencimiento) WHERE ((deleted_at IS NULL) AND (fecha_vencimiento IS NOT NULL));
+
+
+--
 -- Name: idx_rrhh_emp_horarios_empleado; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -22493,6 +22822,13 @@ CREATE INDEX idx_rrhh_emp_horarios_horario ON public.rrhh_empleado_horarios USIN
 --
 
 CREATE INDEX idx_rrhh_empleado_conceptos_auditoria_registro ON public.rrhh_empleado_conceptos_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_rrhh_empleado_documentos_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rrhh_empleado_documentos_auditoria_registro ON public.rrhh_empleado_documentos_auditoria USING btree (registro_id, created_at DESC);
 
 
 --
@@ -22822,6 +23158,13 @@ CREATE UNIQUE INDEX uq_emp_tipo_imp_empresa_codigo ON public.empresa_tipos_impue
 --
 
 CREATE UNIQUE INDEX uq_fr_clave ON public.facturas_recibidas USING btree (empresa_id, clave) WHERE (clave IS NOT NULL);
+
+
+--
+-- Name: uq_reportes_dinamicos_nombre; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_reportes_dinamicos_nombre ON public.reportes_dinamicos USING btree (empresa_id, user_id, lower((nombre)::text)) WHERE (deleted_at IS NULL);
 
 
 --
@@ -23235,6 +23578,13 @@ CREATE TRIGGER trg_rrhh_dispositivos_auditoria AFTER INSERT OR DELETE OR UPDATE 
 --
 
 CREATE TRIGGER trg_rrhh_empleado_conceptos_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rrhh_empleado_conceptos FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: rrhh_empleado_documentos trg_rrhh_empleado_documentos_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_rrhh_empleado_documentos_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rrhh_empleado_documentos FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
 
 
 --
@@ -23722,6 +24072,22 @@ ALTER TABLE ONLY public.rrhh_empleado_conceptos
 
 
 --
+-- Name: rrhh_empleado_documentos rrhh_empleado_documentos_adjunto_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_empleado_documentos
+    ADD CONSTRAINT rrhh_empleado_documentos_adjunto_id_fkey FOREIGN KEY (adjunto_id) REFERENCES public.documentos_adjuntos(id);
+
+
+--
+-- Name: rrhh_empleado_documentos rrhh_empleado_documentos_empleado_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rrhh_empleado_documentos
+    ADD CONSTRAINT rrhh_empleado_documentos_empleado_id_fkey FOREIGN KEY (empleado_id) REFERENCES public.rrhh_empleados(id);
+
+
+--
 -- Name: rrhh_empleado_horarios rrhh_empleado_horarios_empleado_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -23949,5 +24315,5 @@ ALTER TABLE ONLY public.sucursal_bodegas
 -- PostgreSQL database dump complete
 --
 
-\unrestrict wnQo50ueRvQMNo8kg1hxSaeVFU1NpnPPPpGvuC49QizrVdemQVxaxodKEJhrsb3
+\unrestrict SX0gqeGCeKqLgiVcawJnCe67UosaDbsLTbUaFfY0qScSoEEI8sjK3O02Jy6V1MI
 
