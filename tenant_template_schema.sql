@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict SX0gqeGCeKqLgiVcawJnCe67UosaDbsLTbUaFfY0qScSoEEI8sjK3O02Jy6V1MI
+\restrict n5hwqgBub50oU1fg0N3ci0T4GKItzkjc4TuiyelILiMqMmfozYTQ3afjJVx62j7
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
@@ -8179,6 +8179,725 @@ BEGIN
     ORDER BY COALESCE(d.moneda, 'CRC'), SUM(d.total_comprobante) DESC;
 END;
 $$;
+
+
+--
+-- Name: sp_rest_categoria_asignaciones(bigint, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rest_categoria_asignaciones(p_empresa_id bigint, p_solo_activas boolean DEFAULT true) RETURNS TABLE(categoria_id bigint, item_tipo character varying, item_id bigint)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT i.categoria_id, i.item_tipo, i.item_id
+    FROM rest_categoria_items i
+    JOIN rest_categorias c ON c.id = i.categoria_id
+    WHERE i.empresa_id = p_empresa_id AND c.deleted_at IS NULL AND (NOT p_solo_activas OR c.is_active)
+    ORDER BY i.categoria_id, i.id;
+END; $$;
+
+
+--
+-- Name: sp_rest_categoria_asignar(bigint, bigint, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rest_categoria_asignar(p_empresa_id bigint, p_categoria_id bigint, p_items jsonb) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_total INT;
+BEGIN
+    PERFORM 1 FROM rest_categorias c
+     WHERE c.id = p_categoria_id AND c.empresa_id = p_empresa_id AND c.deleted_at IS NULL FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'CATEGORIA_NO_ENCONTRADA: La categoría no existe o fue eliminada.';
+    END IF;
+
+    CREATE TEMP TABLE IF NOT EXISTS tmp_rest_cat_items (item_tipo VARCHAR(10), item_id BIGINT) ON COMMIT DROP;
+    TRUNCATE tmp_rest_cat_items;
+    INSERT INTO tmp_rest_cat_items (item_tipo, item_id)
+    SELECT DISTINCT x.tipo, x.id
+    FROM jsonb_to_recordset(COALESCE(p_items, '[]'::jsonb)) AS x(tipo TEXT, id BIGINT)
+    WHERE (x.tipo = 'Producto' AND EXISTS (SELECT 1 FROM productos p WHERE p.id = x.id AND p.empresa_id = p_empresa_id AND p.deleted_at IS NULL))
+       OR (x.tipo = 'Servicio' AND EXISTS (SELECT 1 FROM servicios s WHERE s.id = x.id AND s.empresa_id = p_empresa_id AND s.deleted_at IS NULL));
+
+    DELETE FROM rest_categoria_items i
+     WHERE i.categoria_id = p_categoria_id
+       AND NOT EXISTS (SELECT 1 FROM tmp_rest_cat_items t WHERE t.item_tipo = i.item_tipo AND t.item_id = i.item_id);
+
+    INSERT INTO rest_categoria_items (empresa_id, categoria_id, item_tipo, item_id)
+    SELECT p_empresa_id, p_categoria_id, t.item_tipo, t.item_id FROM tmp_rest_cat_items t
+    ON CONFLICT (empresa_id, item_tipo, item_id) DO UPDATE SET categoria_id = EXCLUDED.categoria_id;
+
+    SELECT COUNT(*) INTO v_total FROM rest_categoria_items WHERE categoria_id = p_categoria_id;
+    RETURN v_total;
+END; $$;
+
+
+--
+-- Name: sp_rest_categoria_create(bigint, character varying, character varying, character varying, character varying, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rest_categoria_create(p_empresa_id bigint, p_nombre character varying, p_color character varying, p_imagen_url character varying, p_imagen_public_id character varying, p_orden integer) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_id BIGINT;
+BEGIN
+    INSERT INTO rest_categorias (empresa_id, nombre, color, imagen_url, imagen_public_id, orden)
+    VALUES (p_empresa_id, btrim(p_nombre), upper(p_color), NULLIF(p_imagen_url, ''), NULLIF(p_imagen_public_id, ''), COALESCE(p_orden, 0))
+    RETURNING rest_categorias.id INTO v_id;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_rest_categoria_list(bigint, boolean, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rest_categoria_list(p_empresa_id bigint, p_eliminados boolean DEFAULT false, p_solo_activos boolean DEFAULT false) RETURNS TABLE(id bigint, empresa_id bigint, nombre character varying, color character varying, imagen_url character varying, imagen_public_id character varying, orden integer, is_active boolean, deleted_at timestamp without time zone, items_total bigint)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT c.id, c.empresa_id, c.nombre, c.color, c.imagen_url, c.imagen_public_id, c.orden, c.is_active, c.deleted_at,
+           (SELECT COUNT(*) FROM rest_categoria_items i WHERE i.categoria_id = c.id)
+    FROM rest_categorias c
+    WHERE c.empresa_id = p_empresa_id
+      AND ((p_eliminados AND c.deleted_at IS NOT NULL) OR (NOT p_eliminados AND c.deleted_at IS NULL))
+      AND (NOT p_solo_activos OR c.is_active)
+    ORDER BY c.orden, lower(c.nombre), c.id;
+END; $$;
+
+
+--
+-- Name: sp_rest_categoria_restore(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rest_categoria_restore(p_id bigint, p_empresa_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    UPDATE rest_categorias SET deleted_at = NULL, is_active = TRUE, updated_at = NOW()
+     WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NOT NULL;
+    RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: sp_rest_categoria_soft_delete(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rest_categoria_soft_delete(p_id bigint, p_empresa_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    UPDATE rest_categorias SET is_active = FALSE, deleted_at = NOW(), updated_at = NOW()
+     WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
+    RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: sp_rest_categoria_update(bigint, bigint, character varying, character varying, character varying, character varying, integer, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rest_categoria_update(p_id bigint, p_empresa_id bigint, p_nombre character varying, p_color character varying, p_imagen_url character varying, p_imagen_public_id character varying, p_orden integer, p_is_active boolean) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    UPDATE rest_categorias
+       SET nombre = btrim(p_nombre), color = upper(p_color),
+           imagen_url = NULLIF(p_imagen_url, ''), imagen_public_id = NULLIF(p_imagen_public_id, ''),
+           orden = COALESCE(p_orden, 0), is_active = p_is_active, updated_at = NOW()
+     WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
+    RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: sp_rest_cuenta_abrir(bigint, bigint, character varying, integer, bigint, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rest_cuenta_abrir(p_empresa_id bigint, p_puesto_id bigint, p_nombre character varying, p_comensales integer, p_usuario_id bigint, p_usuario_nombre character varying) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_id  BIGINT;
+    v_num INT;
+BEGIN
+    PERFORM 1 FROM rest_puestos p
+     WHERE p.id = p_puesto_id AND p.empresa_id = p_empresa_id AND p.deleted_at IS NULL AND p.is_active;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'PUESTO_NO_DISPONIBLE: La mesa o silla no existe o está desactivada.';
+    END IF;
+
+    PERFORM pg_advisory_xact_lock(hashtext('rest_puesto'), p_puesto_id::int);
+
+    SELECT COALESCE(MAX(c.numero_cuenta), 0) + 1 INTO v_num FROM rest_cuentas c
+     WHERE c.puesto_id = p_puesto_id AND c.estado = 'abierta';
+
+    INSERT INTO rest_cuentas (empresa_id, puesto_id, numero_cuenta, nombre, comensales, abierta_por, abierta_por_nombre)
+    VALUES (p_empresa_id, p_puesto_id, v_num, NULLIF(btrim(COALESCE(p_nombre, '')), ''), p_comensales,
+            p_usuario_id, p_usuario_nombre)
+    RETURNING rest_cuentas.id INTO v_id;
+
+    INSERT INTO rest_cuenta_eventos (empresa_id, cuenta_id, tipo, detalle, usuario_id)
+    VALUES (p_empresa_id, v_id, 'abrir', jsonb_build_object('puesto_id', p_puesto_id), p_usuario_id);
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_rest_cuenta_cancelar(bigint, bigint, character varying, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rest_cuenta_cancelar(p_empresa_id bigint, p_cuenta_id bigint, p_motivo character varying, p_usuario_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    UPDATE rest_cuentas SET estado = 'cancelada', closed_at = NOW(), updated_at = NOW()
+     WHERE id = p_cuenta_id AND empresa_id = p_empresa_id AND estado = 'abierta';
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+
+    INSERT INTO rest_cuenta_eventos (empresa_id, cuenta_id, tipo, detalle, usuario_id)
+    VALUES (p_empresa_id, p_cuenta_id, 'cancelar', jsonb_build_object('motivo', NULLIF(btrim(COALESCE(p_motivo, '')), '')), p_usuario_id);
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_rest_cuenta_cobrada(bigint, bigint, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rest_cuenta_cobrada(p_empresa_id bigint, p_cuenta_id bigint, p_documento_id bigint, p_usuario_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    PERFORM 1 FROM documentos_electronicos d WHERE d.id = p_documento_id AND d.empresa_id = p_empresa_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'DOCUMENTO_NO_ENCONTRADO: El documento indicado no existe.';
+    END IF;
+    IF EXISTS (SELECT 1 FROM rest_cuentas c WHERE c.documento_id = p_documento_id) THEN
+        RAISE EXCEPTION 'DOCUMENTO_YA_LIGADO: El documento ya está ligado a otra cuenta.';
+    END IF;
+
+    UPDATE rest_cuentas SET estado = 'cobrada', documento_id = p_documento_id, closed_at = NOW(), updated_at = NOW()
+     WHERE id = p_cuenta_id AND empresa_id = p_empresa_id AND estado = 'abierta';
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+
+    INSERT INTO rest_cuenta_eventos (empresa_id, cuenta_id, tipo, detalle, usuario_id)
+    VALUES (p_empresa_id, p_cuenta_id, 'cobrar', jsonb_build_object('documento_id', p_documento_id), p_usuario_id);
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_rest_cuenta_dividir(bigint, bigint, jsonb, character varying, bigint, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rest_cuenta_dividir(p_empresa_id bigint, p_cuenta_id bigint, p_items jsonb, p_nombre character varying, p_usuario_id bigint, p_usuario_nombre character varying) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_puesto  BIGINT;
+    v_nueva   BIGINT;
+    v_item    JSONB;
+    v_linea   rest_cuenta_lineas%ROWTYPE;
+    v_cant    NUMERIC;
+    v_movidas INT := 0;
+BEGIN
+    SELECT c.puesto_id INTO v_puesto FROM rest_cuentas c
+     WHERE c.id = p_cuenta_id AND c.empresa_id = p_empresa_id AND c.estado = 'abierta' FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'CUENTA_NO_ABIERTA: La cuenta ya no está abierta.';
+    END IF;
+    IF p_items IS NULL OR jsonb_typeof(p_items) <> 'array' OR jsonb_array_length(p_items) = 0 THEN
+        RAISE EXCEPTION 'DIVISION_VACIA: Seleccione al menos un producto para la nueva cuenta.';
+    END IF;
+
+    v_nueva := sp_rest_cuenta_abrir(p_empresa_id, v_puesto, p_nombre, NULL, p_usuario_id, p_usuario_nombre);
+
+    FOR v_item IN SELECT * FROM jsonb_array_elements(p_items) LOOP
+        v_cant := (v_item ->> 'cantidad')::NUMERIC;
+        SELECT * INTO v_linea FROM rest_cuenta_lineas l
+         WHERE l.id = (v_item ->> 'linea_id')::BIGINT AND l.cuenta_id = p_cuenta_id FOR UPDATE;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'LINEA_NO_ENCONTRADA: Un producto seleccionado ya no está en la cuenta.';
+        END IF;
+        IF v_cant IS NULL OR v_cant <= 0 OR v_cant > v_linea.cantidad THEN
+            RAISE EXCEPTION 'CANTIDAD_INVALIDA: La cantidad a pasar de «%» debe ser mayor que 0 y no exceder %.',
+                v_linea.detalle, trim(trailing '.' FROM trim(trailing '0' FROM v_linea.cantidad::TEXT));
+        END IF;
+
+        IF v_cant = v_linea.cantidad THEN
+            UPDATE rest_cuenta_lineas SET cuenta_id = v_nueva, updated_at = NOW() WHERE id = v_linea.id;
+        ELSE
+            UPDATE rest_cuenta_lineas SET cantidad = cantidad - v_cant, updated_at = NOW() WHERE id = v_linea.id;
+            INSERT INTO rest_cuenta_lineas (cuenta_id, item_tipo, item_id, detalle, precio_unitario, cantidad, notas)
+            VALUES (v_nueva, v_linea.item_tipo, v_linea.item_id, v_linea.detalle, v_linea.precio_unitario, v_cant, v_linea.notas);
+        END IF;
+        v_movidas := v_movidas + 1;
+    END LOOP;
+
+    INSERT INTO rest_cuenta_eventos (empresa_id, cuenta_id, tipo, detalle, usuario_id)
+    VALUES (p_empresa_id, p_cuenta_id, 'dividir', jsonb_build_object('cuenta_nueva_id', v_nueva, 'items', p_items), p_usuario_id);
+    RETURN v_nueva;
+END; $$;
+
+
+--
+-- Name: sp_rest_cuenta_get(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rest_cuenta_get(p_id bigint, p_empresa_id bigint) RETURNS TABLE(id bigint, puesto_id bigint, numero_cuenta integer, nombre character varying, comensales integer, notas character varying, estado character varying, documento_id bigint, opened_at timestamp without time zone, closed_at timestamp without time zone, puesto_numero integer, sector_id bigint, sector_nombre character varying, sector_tipo character varying)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT c.id, c.puesto_id, c.numero_cuenta, c.nombre, c.comensales, c.notas, c.estado, c.documento_id,
+           c.opened_at, c.closed_at, p.numero, s.id, s.nombre, s.tipo
+    FROM rest_cuentas c
+    JOIN rest_puestos p ON p.id = c.puesto_id
+    JOIN rest_sectores s ON s.id = p.sector_id
+    WHERE c.id = p_id AND c.empresa_id = p_empresa_id;
+END; $$;
+
+
+--
+-- Name: sp_rest_cuenta_lineas(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rest_cuenta_lineas(p_cuenta_id bigint, p_empresa_id bigint) RETURNS TABLE(id bigint, cuenta_id bigint, item_tipo character varying, item_id bigint, detalle character varying, precio_unitario numeric, cantidad numeric, notas character varying)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT l.id, l.cuenta_id, l.item_tipo, l.item_id, l.detalle, l.precio_unitario, l.cantidad, l.notas
+    FROM rest_cuenta_lineas l
+    JOIN rest_cuentas c ON c.id = l.cuenta_id AND c.empresa_id = p_empresa_id
+    WHERE l.cuenta_id = p_cuenta_id
+    ORDER BY l.id;
+END; $$;
+
+
+--
+-- Name: sp_rest_cuenta_list(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rest_cuenta_list(p_empresa_id bigint, p_puesto_id bigint) RETURNS TABLE(id bigint, puesto_id bigint, numero_cuenta integer, nombre character varying, comensales integer, notas character varying, opened_at timestamp without time zone, abierta_por_nombre character varying, total numeric, lineas bigint)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT c.id, c.puesto_id, c.numero_cuenta, c.nombre, c.comensales, c.notas, c.opened_at, c.abierta_por_nombre,
+           COALESCE((SELECT SUM(l.cantidad * l.precio_unitario) FROM rest_cuenta_lineas l WHERE l.cuenta_id = c.id), 0)::NUMERIC,
+           (SELECT COUNT(*) FROM rest_cuenta_lineas l WHERE l.cuenta_id = c.id)
+    FROM rest_cuentas c
+    WHERE c.empresa_id = p_empresa_id AND c.puesto_id = p_puesto_id AND c.estado = 'abierta'
+    ORDER BY c.numero_cuenta, c.id;
+END; $$;
+
+
+--
+-- Name: sp_rest_cuenta_mover(bigint, bigint, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rest_cuenta_mover(p_empresa_id bigint, p_cuenta_id bigint, p_puesto_destino_id bigint, p_usuario_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_origen BIGINT;
+    v_num    INT;
+BEGIN
+    SELECT c.puesto_id INTO v_origen FROM rest_cuentas c
+     WHERE c.id = p_cuenta_id AND c.empresa_id = p_empresa_id AND c.estado = 'abierta' FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'CUENTA_NO_ABIERTA: La cuenta ya no está abierta.';
+    END IF;
+    IF v_origen = p_puesto_destino_id THEN
+        RAISE EXCEPTION 'MISMO_PUESTO: La cuenta ya está en ese lugar.';
+    END IF;
+
+    PERFORM 1 FROM rest_puestos p
+     WHERE p.id = p_puesto_destino_id AND p.empresa_id = p_empresa_id AND p.deleted_at IS NULL AND p.is_active;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'PUESTO_NO_DISPONIBLE: La mesa o silla de destino no existe o está desactivada.';
+    END IF;
+
+    PERFORM pg_advisory_xact_lock(hashtext('rest_puesto'), p_puesto_destino_id::int);
+
+    SELECT COALESCE(MAX(c.numero_cuenta), 0) + 1 INTO v_num FROM rest_cuentas c
+     WHERE c.puesto_id = p_puesto_destino_id AND c.estado = 'abierta';
+
+    UPDATE rest_cuentas SET puesto_id = p_puesto_destino_id, numero_cuenta = v_num, updated_at = NOW()
+     WHERE id = p_cuenta_id;
+
+    INSERT INTO rest_cuenta_eventos (empresa_id, cuenta_id, tipo, detalle, usuario_id)
+    VALUES (p_empresa_id, p_cuenta_id, 'mover',
+            jsonb_build_object('desde_puesto_id', v_origen, 'hacia_puesto_id', p_puesto_destino_id), p_usuario_id);
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_rest_cuenta_update(bigint, bigint, character varying, integer, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rest_cuenta_update(p_id bigint, p_empresa_id bigint, p_nombre character varying, p_comensales integer, p_notas character varying) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    UPDATE rest_cuentas SET nombre = NULLIF(btrim(COALESCE(p_nombre, '')), ''), comensales = p_comensales,
+           notas = NULLIF(btrim(COALESCE(p_notas, '')), ''), updated_at = NOW()
+     WHERE id = p_id AND empresa_id = p_empresa_id AND estado = 'abierta';
+    RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: sp_rest_item_get(bigint, character varying, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rest_item_get(p_empresa_id bigint, p_item_tipo character varying, p_item_id bigint) RETURNS TABLE(id bigint, name character varying, price numeric, moneda character varying)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    IF p_item_tipo = 'Producto' THEN
+        RETURN QUERY SELECT x.id, x.name, x.price, x.moneda FROM productos x
+                      WHERE x.id = p_item_id AND x.empresa_id = p_empresa_id AND x.deleted_at IS NULL AND x.is_active;
+    ELSE
+        RETURN QUERY SELECT x.id, x.name, x.price, x.moneda FROM servicios x
+                      WHERE x.id = p_item_id AND x.empresa_id = p_empresa_id AND x.deleted_at IS NULL AND x.is_active;
+    END IF;
+END; $$;
+
+
+--
+-- Name: sp_rest_linea_actualizar(bigint, bigint, bigint, numeric, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rest_linea_actualizar(p_empresa_id bigint, p_cuenta_id bigint, p_linea_id bigint, p_cantidad numeric, p_notas character varying) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    PERFORM 1 FROM rest_cuentas c WHERE c.id = p_cuenta_id AND c.empresa_id = p_empresa_id AND c.estado = 'abierta' FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'CUENTA_NO_ABIERTA: La cuenta ya no está abierta.';
+    END IF;
+    UPDATE rest_cuenta_lineas SET cantidad = p_cantidad, notas = NULLIF(btrim(COALESCE(p_notas, '')), ''), updated_at = NOW()
+     WHERE id = p_linea_id AND cuenta_id = p_cuenta_id;
+    RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: sp_rest_linea_agregar(bigint, bigint, character varying, bigint, character varying, numeric, numeric, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rest_linea_agregar(p_empresa_id bigint, p_cuenta_id bigint, p_item_tipo character varying, p_item_id bigint, p_detalle character varying, p_precio numeric, p_cantidad numeric, p_notas character varying) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_id    BIGINT;
+    v_notas VARCHAR := NULLIF(btrim(COALESCE(p_notas, '')), '');
+BEGIN
+    PERFORM 1 FROM rest_cuentas c WHERE c.id = p_cuenta_id AND c.empresa_id = p_empresa_id AND c.estado = 'abierta' FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'CUENTA_NO_ABIERTA: La cuenta ya no está abierta.';
+    END IF;
+
+    SELECT l.id INTO v_id FROM rest_cuenta_lineas l
+     WHERE l.cuenta_id = p_cuenta_id AND l.item_tipo = p_item_tipo AND l.item_id = p_item_id
+       AND l.precio_unitario = p_precio AND l.notas IS NOT DISTINCT FROM v_notas
+     ORDER BY l.id LIMIT 1;
+
+    IF FOUND THEN
+        UPDATE rest_cuenta_lineas SET cantidad = cantidad + p_cantidad, updated_at = NOW() WHERE id = v_id;
+    ELSE
+        INSERT INTO rest_cuenta_lineas (cuenta_id, item_tipo, item_id, detalle, precio_unitario, cantidad, notas)
+        VALUES (p_cuenta_id, p_item_tipo, p_item_id, left(p_detalle, 200), p_precio, p_cantidad, v_notas)
+        RETURNING rest_cuenta_lineas.id INTO v_id;
+    END IF;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_rest_linea_quitar(bigint, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rest_linea_quitar(p_empresa_id bigint, p_cuenta_id bigint, p_linea_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    PERFORM 1 FROM rest_cuentas c WHERE c.id = p_cuenta_id AND c.empresa_id = p_empresa_id AND c.estado = 'abierta' FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'CUENTA_NO_ABIERTA: La cuenta ya no está abierta.';
+    END IF;
+    DELETE FROM rest_cuenta_lineas WHERE id = p_linea_id AND cuenta_id = p_cuenta_id;
+    RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: sp_rest_mapa(bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rest_mapa(p_empresa_id bigint) RETURNS TABLE(puesto_id bigint, sector_id bigint, sector_nombre character varying, sector_tipo character varying, sector_orden integer, numero integer, capacidad integer, cuentas_abiertas bigint, total_abierto numeric, abierta_desde timestamp without time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT p.id, s.id, s.nombre, s.tipo, s.orden, p.numero, p.capacidad,
+           COUNT(c.id),
+           COALESCE(SUM(t.total), 0)::NUMERIC,
+           MIN(c.opened_at)
+    FROM rest_puestos p
+    JOIN rest_sectores s ON s.id = p.sector_id AND s.deleted_at IS NULL AND s.is_active
+    LEFT JOIN rest_cuentas c ON c.puesto_id = p.id AND c.estado = 'abierta'
+    LEFT JOIN LATERAL (SELECT SUM(l.cantidad * l.precio_unitario) AS total
+                         FROM rest_cuenta_lineas l WHERE l.cuenta_id = c.id) t ON TRUE
+    WHERE p.empresa_id = p_empresa_id AND p.deleted_at IS NULL AND p.is_active
+    GROUP BY p.id, s.id, s.nombre, s.tipo, s.orden, p.numero, p.capacidad
+    ORDER BY s.orden, lower(s.nombre), s.id, p.numero;
+END; $$;
+
+
+--
+-- Name: sp_rest_puesto_crear_lote(bigint, bigint, integer, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rest_puesto_crear_lote(p_empresa_id bigint, p_sector_id bigint, p_cantidad integer, p_capacidad integer DEFAULT NULL::integer) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_max INT;
+BEGIN
+    PERFORM 1 FROM rest_sectores s
+     WHERE s.id = p_sector_id AND s.empresa_id = p_empresa_id AND s.deleted_at IS NULL FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'SECTOR_NO_ENCONTRADO: El sector no existe o fue eliminado.';
+    END IF;
+    IF p_cantidad IS NULL OR p_cantidad < 1 OR p_cantidad > 200 THEN
+        RAISE EXCEPTION 'CANTIDAD_INVALIDA: La cantidad debe estar entre 1 y 200.';
+    END IF;
+
+    SELECT COALESCE(MAX(p.numero), 0) INTO v_max FROM rest_puestos p
+     WHERE p.sector_id = p_sector_id AND p.deleted_at IS NULL;
+
+    INSERT INTO rest_puestos (empresa_id, sector_id, numero, capacidad)
+    SELECT p_empresa_id, p_sector_id, v_max + g, p_capacidad FROM generate_series(1, p_cantidad) g;
+    RETURN p_cantidad;
+END; $$;
+
+
+--
+-- Name: sp_rest_puesto_list(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rest_puesto_list(p_empresa_id bigint, p_sector_id bigint) RETURNS TABLE(id bigint, sector_id bigint, numero integer, capacidad integer, is_active boolean, cuentas_abiertas bigint)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT p.id, p.sector_id, p.numero, p.capacidad, p.is_active,
+           (SELECT COUNT(*) FROM rest_cuentas c WHERE c.puesto_id = p.id AND c.estado = 'abierta')
+    FROM rest_puestos p
+    WHERE p.empresa_id = p_empresa_id AND p.sector_id = p_sector_id AND p.deleted_at IS NULL
+    ORDER BY p.numero;
+END; $$;
+
+
+--
+-- Name: sp_rest_puesto_mover_todo(bigint, bigint, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rest_puesto_mover_todo(p_empresa_id bigint, p_puesto_origen_id bigint, p_puesto_destino_id bigint, p_usuario_id bigint) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_c      RECORD;
+    v_movidas INT := 0;
+BEGIN
+    IF p_puesto_origen_id = p_puesto_destino_id THEN
+        RAISE EXCEPTION 'MISMO_PUESTO: La cuenta ya está en ese lugar.';
+    END IF;
+    FOR v_c IN SELECT c.id FROM rest_cuentas c
+                WHERE c.empresa_id = p_empresa_id AND c.puesto_id = p_puesto_origen_id AND c.estado = 'abierta'
+                ORDER BY c.numero_cuenta, c.id LOOP
+        PERFORM sp_rest_cuenta_mover(p_empresa_id, v_c.id, p_puesto_destino_id, p_usuario_id);
+        v_movidas := v_movidas + 1;
+    END LOOP;
+    RETURN v_movidas;
+END; $$;
+
+
+--
+-- Name: sp_rest_puesto_soft_delete(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rest_puesto_soft_delete(p_id bigint, p_empresa_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    PERFORM 1 FROM rest_puestos p WHERE p.id = p_id AND p.empresa_id = p_empresa_id AND p.deleted_at IS NULL;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    IF EXISTS (SELECT 1 FROM rest_cuentas c WHERE c.puesto_id = p_id AND c.estado = 'abierta') THEN
+        RAISE EXCEPTION 'CUENTAS_ABIERTAS: El puesto tiene cuentas abiertas. Cóbrelas o muévalas antes de eliminarlo.';
+    END IF;
+    UPDATE rest_puestos SET is_active = FALSE, deleted_at = NOW(), updated_at = NOW() WHERE id = p_id;
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_rest_puesto_update(bigint, bigint, integer, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rest_puesto_update(p_id bigint, p_empresa_id bigint, p_capacidad integer, p_is_active boolean) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    IF NOT p_is_active AND EXISTS (SELECT 1 FROM rest_cuentas c WHERE c.puesto_id = p_id AND c.estado = 'abierta') THEN
+        RAISE EXCEPTION 'CUENTAS_ABIERTAS: El puesto tiene cuentas abiertas. Cóbrelas o muévalas antes de desactivarlo.';
+    END IF;
+    UPDATE rest_puestos SET capacidad = p_capacidad, is_active = p_is_active, updated_at = NOW()
+     WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
+    RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: sp_rest_sector_create(bigint, character varying, character varying, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rest_sector_create(p_empresa_id bigint, p_nombre character varying, p_tipo character varying, p_orden integer) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_id BIGINT;
+BEGIN
+    INSERT INTO rest_sectores (empresa_id, nombre, tipo, orden)
+    VALUES (p_empresa_id, btrim(p_nombre), p_tipo, COALESCE(p_orden, 0))
+    RETURNING rest_sectores.id INTO v_id;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_rest_sector_list(bigint, boolean, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rest_sector_list(p_empresa_id bigint, p_eliminados boolean DEFAULT false, p_solo_activos boolean DEFAULT false) RETURNS TABLE(id bigint, empresa_id bigint, nombre character varying, tipo character varying, orden integer, is_active boolean, deleted_at timestamp without time zone, puestos_total bigint)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT s.id, s.empresa_id, s.nombre, s.tipo, s.orden, s.is_active, s.deleted_at,
+           (SELECT COUNT(*) FROM rest_puestos p WHERE p.sector_id = s.id AND p.deleted_at IS NULL)
+    FROM rest_sectores s
+    WHERE s.empresa_id = p_empresa_id
+      AND ((p_eliminados AND s.deleted_at IS NOT NULL) OR (NOT p_eliminados AND s.deleted_at IS NULL))
+      AND (NOT p_solo_activos OR s.is_active)
+    ORDER BY s.orden, lower(s.nombre), s.id;
+END; $$;
+
+
+--
+-- Name: sp_rest_sector_restore(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rest_sector_restore(p_id bigint, p_empresa_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_deleted TIMESTAMP;
+BEGIN
+    SELECT s.deleted_at INTO v_deleted FROM rest_sectores s
+     WHERE s.id = p_id AND s.empresa_id = p_empresa_id AND s.deleted_at IS NOT NULL;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+
+    UPDATE rest_sectores SET deleted_at = NULL, is_active = TRUE, updated_at = NOW() WHERE id = p_id;
+    UPDATE rest_puestos SET deleted_at = NULL, is_active = TRUE, updated_at = NOW()
+     WHERE sector_id = p_id AND deleted_at IS NOT NULL AND deleted_at >= v_deleted - INTERVAL '1 second';
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_rest_sector_soft_delete(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rest_sector_soft_delete(p_id bigint, p_empresa_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    PERFORM 1 FROM rest_sectores s WHERE s.id = p_id AND s.empresa_id = p_empresa_id AND s.deleted_at IS NULL;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+
+    IF EXISTS (SELECT 1 FROM rest_cuentas c JOIN rest_puestos p ON p.id = c.puesto_id
+                WHERE p.sector_id = p_id AND c.estado = 'abierta') THEN
+        RAISE EXCEPTION 'CUENTAS_ABIERTAS: El sector tiene cuentas abiertas. Cóbrelas o cancélelas antes de eliminarlo.';
+    END IF;
+
+    UPDATE rest_puestos SET is_active = FALSE, deleted_at = NOW(), updated_at = NOW()
+     WHERE sector_id = p_id AND deleted_at IS NULL;
+    UPDATE rest_sectores SET is_active = FALSE, deleted_at = NOW(), updated_at = NOW() WHERE id = p_id;
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_rest_sector_update(bigint, bigint, character varying, character varying, integer, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_rest_sector_update(p_id bigint, p_empresa_id bigint, p_nombre character varying, p_tipo character varying, p_orden integer, p_is_active boolean) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_tipo VARCHAR;
+BEGIN
+    SELECT s.tipo INTO v_tipo FROM rest_sectores s
+     WHERE s.id = p_id AND s.empresa_id = p_empresa_id AND s.deleted_at IS NULL;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+
+    IF v_tipo <> p_tipo AND EXISTS (SELECT 1 FROM rest_puestos p WHERE p.sector_id = p_id AND p.deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'SECTOR_CON_PUESTOS: No se puede cambiar el tipo de un sector que ya tiene % creadas. Elimine primero sus puestos.',
+            CASE v_tipo WHEN 'mesa' THEN 'mesas' ELSE 'sillas' END;
+    END IF;
+
+    UPDATE rest_sectores SET nombre = btrim(p_nombre), tipo = p_tipo, orden = COALESCE(p_orden, 0),
+           is_active = p_is_active, updated_at = NOW()
+     WHERE id = p_id;
+    RETURN TRUE;
+END; $$;
 
 
 --
@@ -16504,6 +17223,457 @@ ALTER SEQUENCE public.reportes_dinamicos_id_seq OWNED BY public.reportes_dinamic
 
 
 --
+-- Name: rest_categoria_items; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rest_categoria_items (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    categoria_id bigint NOT NULL,
+    item_tipo character varying(10) NOT NULL,
+    item_id bigint NOT NULL,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rest_categoria_items_item_tipo_check CHECK (((item_tipo)::text = ANY ((ARRAY['Producto'::character varying, 'Servicio'::character varying])::text[])))
+);
+
+
+--
+-- Name: rest_categoria_items_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rest_categoria_items_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rest_categoria_items_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rest_categoria_items_id_seq OWNED BY public.rest_categoria_items.id;
+
+
+--
+-- Name: rest_categorias; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rest_categorias (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    nombre character varying(80) NOT NULL,
+    color character varying(7) NOT NULL,
+    imagen_url character varying(500),
+    imagen_public_id character varying(512),
+    orden integer DEFAULT 0 NOT NULL,
+    is_active boolean DEFAULT true NOT NULL,
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rest_categorias_color_check CHECK (((color)::text ~ '^#[0-9A-Fa-f]{6}$'::text))
+);
+
+
+--
+-- Name: rest_categorias_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rest_categorias_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'rest_categorias'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rest_categorias_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rest_categorias_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rest_categorias_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rest_categorias_auditoria_id_seq OWNED BY public.rest_categorias_auditoria.id;
+
+
+--
+-- Name: rest_categorias_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rest_categorias_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rest_categorias_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rest_categorias_id_seq OWNED BY public.rest_categorias.id;
+
+
+--
+-- Name: rest_cuenta_eventos; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rest_cuenta_eventos (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    cuenta_id bigint NOT NULL,
+    tipo character varying(15) NOT NULL,
+    detalle jsonb,
+    usuario_id bigint,
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rest_cuenta_eventos_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rest_cuenta_eventos_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rest_cuenta_eventos_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rest_cuenta_eventos_id_seq OWNED BY public.rest_cuenta_eventos.id;
+
+
+--
+-- Name: rest_cuenta_lineas; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rest_cuenta_lineas (
+    id bigint NOT NULL,
+    cuenta_id bigint NOT NULL,
+    item_tipo character varying(10) NOT NULL,
+    item_id bigint NOT NULL,
+    detalle character varying(200) NOT NULL,
+    precio_unitario numeric(18,5) NOT NULL,
+    cantidad numeric(18,5) NOT NULL,
+    notas character varying(255),
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rest_cuenta_lineas_cantidad_check CHECK ((cantidad > (0)::numeric)),
+    CONSTRAINT rest_cuenta_lineas_item_tipo_check CHECK (((item_tipo)::text = ANY ((ARRAY['Producto'::character varying, 'Servicio'::character varying])::text[]))),
+    CONSTRAINT rest_cuenta_lineas_precio_unitario_check CHECK ((precio_unitario >= (0)::numeric))
+);
+
+
+--
+-- Name: rest_cuenta_lineas_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rest_cuenta_lineas_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'rest_cuenta_lineas'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rest_cuenta_lineas_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rest_cuenta_lineas_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rest_cuenta_lineas_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rest_cuenta_lineas_auditoria_id_seq OWNED BY public.rest_cuenta_lineas_auditoria.id;
+
+
+--
+-- Name: rest_cuenta_lineas_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rest_cuenta_lineas_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rest_cuenta_lineas_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rest_cuenta_lineas_id_seq OWNED BY public.rest_cuenta_lineas.id;
+
+
+--
+-- Name: rest_cuentas; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rest_cuentas (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    puesto_id bigint NOT NULL,
+    numero_cuenta integer DEFAULT 1 NOT NULL,
+    nombre character varying(80),
+    comensales integer,
+    notas character varying(255),
+    estado character varying(10) DEFAULT 'abierta'::character varying NOT NULL,
+    documento_id bigint,
+    abierta_por bigint,
+    abierta_por_nombre character varying(150),
+    opened_at timestamp without time zone DEFAULT now() NOT NULL,
+    closed_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rest_cuentas_comensales_check CHECK (((comensales IS NULL) OR (comensales > 0))),
+    CONSTRAINT rest_cuentas_estado_check CHECK (((estado)::text = ANY ((ARRAY['abierta'::character varying, 'cobrada'::character varying, 'cancelada'::character varying])::text[])))
+);
+
+
+--
+-- Name: rest_cuentas_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rest_cuentas_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'rest_cuentas'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rest_cuentas_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rest_cuentas_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rest_cuentas_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rest_cuentas_auditoria_id_seq OWNED BY public.rest_cuentas_auditoria.id;
+
+
+--
+-- Name: rest_cuentas_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rest_cuentas_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rest_cuentas_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rest_cuentas_id_seq OWNED BY public.rest_cuentas.id;
+
+
+--
+-- Name: rest_puestos; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rest_puestos (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    sector_id bigint NOT NULL,
+    numero integer NOT NULL,
+    capacidad integer,
+    is_active boolean DEFAULT true NOT NULL,
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rest_puestos_capacidad_check CHECK (((capacidad IS NULL) OR (capacidad > 0))),
+    CONSTRAINT rest_puestos_numero_check CHECK ((numero > 0))
+);
+
+
+--
+-- Name: rest_puestos_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rest_puestos_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'rest_puestos'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rest_puestos_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rest_puestos_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rest_puestos_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rest_puestos_auditoria_id_seq OWNED BY public.rest_puestos_auditoria.id;
+
+
+--
+-- Name: rest_puestos_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rest_puestos_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rest_puestos_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rest_puestos_id_seq OWNED BY public.rest_puestos.id;
+
+
+--
+-- Name: rest_sectores; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rest_sectores (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    nombre character varying(80) NOT NULL,
+    tipo character varying(10) NOT NULL,
+    orden integer DEFAULT 0 NOT NULL,
+    is_active boolean DEFAULT true NOT NULL,
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rest_sectores_tipo_check CHECK (((tipo)::text = ANY ((ARRAY['mesa'::character varying, 'silla'::character varying])::text[])))
+);
+
+
+--
+-- Name: rest_sectores_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rest_sectores_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'rest_sectores'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: rest_sectores_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rest_sectores_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rest_sectores_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rest_sectores_auditoria_id_seq OWNED BY public.rest_sectores_auditoria.id;
+
+
+--
+-- Name: rest_sectores_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.rest_sectores_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: rest_sectores_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.rest_sectores_id_seq OWNED BY public.rest_sectores.id;
+
+
+--
 -- Name: rrhh_agentes; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -19956,6 +21126,90 @@ ALTER TABLE ONLY public.reportes_dinamicos ALTER COLUMN id SET DEFAULT nextval('
 
 
 --
+-- Name: rest_categoria_items id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rest_categoria_items ALTER COLUMN id SET DEFAULT nextval('public.rest_categoria_items_id_seq'::regclass);
+
+
+--
+-- Name: rest_categorias id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rest_categorias ALTER COLUMN id SET DEFAULT nextval('public.rest_categorias_id_seq'::regclass);
+
+
+--
+-- Name: rest_categorias_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rest_categorias_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rest_categorias_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: rest_cuenta_eventos id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rest_cuenta_eventos ALTER COLUMN id SET DEFAULT nextval('public.rest_cuenta_eventos_id_seq'::regclass);
+
+
+--
+-- Name: rest_cuenta_lineas id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rest_cuenta_lineas ALTER COLUMN id SET DEFAULT nextval('public.rest_cuenta_lineas_id_seq'::regclass);
+
+
+--
+-- Name: rest_cuenta_lineas_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rest_cuenta_lineas_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rest_cuenta_lineas_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: rest_cuentas id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rest_cuentas ALTER COLUMN id SET DEFAULT nextval('public.rest_cuentas_id_seq'::regclass);
+
+
+--
+-- Name: rest_cuentas_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rest_cuentas_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rest_cuentas_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: rest_puestos id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rest_puestos ALTER COLUMN id SET DEFAULT nextval('public.rest_puestos_id_seq'::regclass);
+
+
+--
+-- Name: rest_puestos_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rest_puestos_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rest_puestos_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: rest_sectores id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rest_sectores ALTER COLUMN id SET DEFAULT nextval('public.rest_sectores_id_seq'::regclass);
+
+
+--
+-- Name: rest_sectores_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rest_sectores_auditoria ALTER COLUMN id SET DEFAULT nextval('public.rest_sectores_auditoria_id_seq'::regclass);
+
+
+--
 -- Name: rrhh_agentes id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -21254,6 +22508,102 @@ ALTER TABLE ONLY public.recibos_adelanto
 
 ALTER TABLE ONLY public.reportes_dinamicos
     ADD CONSTRAINT reportes_dinamicos_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rest_categoria_items rest_categoria_items_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rest_categoria_items
+    ADD CONSTRAINT rest_categoria_items_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rest_categorias_auditoria rest_categorias_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rest_categorias_auditoria
+    ADD CONSTRAINT rest_categorias_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rest_categorias rest_categorias_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rest_categorias
+    ADD CONSTRAINT rest_categorias_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rest_cuenta_eventos rest_cuenta_eventos_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rest_cuenta_eventos
+    ADD CONSTRAINT rest_cuenta_eventos_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rest_cuenta_lineas_auditoria rest_cuenta_lineas_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rest_cuenta_lineas_auditoria
+    ADD CONSTRAINT rest_cuenta_lineas_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rest_cuenta_lineas rest_cuenta_lineas_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rest_cuenta_lineas
+    ADD CONSTRAINT rest_cuenta_lineas_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rest_cuentas_auditoria rest_cuentas_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rest_cuentas_auditoria
+    ADD CONSTRAINT rest_cuentas_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rest_cuentas rest_cuentas_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rest_cuentas
+    ADD CONSTRAINT rest_cuentas_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rest_puestos_auditoria rest_puestos_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rest_puestos_auditoria
+    ADD CONSTRAINT rest_puestos_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rest_puestos rest_puestos_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rest_puestos
+    ADD CONSTRAINT rest_puestos_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rest_sectores_auditoria rest_sectores_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rest_sectores_auditoria
+    ADD CONSTRAINT rest_sectores_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rest_sectores rest_sectores_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rest_sectores
+    ADD CONSTRAINT rest_sectores_pkey PRIMARY KEY (id);
 
 
 --
@@ -22685,6 +24035,76 @@ CREATE INDEX idx_reportes_dinamicos_usuario ON public.reportes_dinamicos USING b
 
 
 --
+-- Name: idx_rest_categoria_items_categoria; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rest_categoria_items_categoria ON public.rest_categoria_items USING btree (categoria_id);
+
+
+--
+-- Name: idx_rest_categorias_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rest_categorias_auditoria_registro ON public.rest_categorias_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_rest_cuenta_eventos_cuenta; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rest_cuenta_eventos_cuenta ON public.rest_cuenta_eventos USING btree (cuenta_id, created_at);
+
+
+--
+-- Name: idx_rest_cuenta_lineas_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rest_cuenta_lineas_auditoria_registro ON public.rest_cuenta_lineas_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_rest_cuenta_lineas_cuenta; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rest_cuenta_lineas_cuenta ON public.rest_cuenta_lineas USING btree (cuenta_id);
+
+
+--
+-- Name: idx_rest_cuentas_abiertas; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rest_cuentas_abiertas ON public.rest_cuentas USING btree (empresa_id, puesto_id) WHERE ((estado)::text = 'abierta'::text);
+
+
+--
+-- Name: idx_rest_cuentas_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rest_cuentas_auditoria_registro ON public.rest_cuentas_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_rest_puestos_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rest_puestos_auditoria_registro ON public.rest_puestos_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_rest_puestos_empresa; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rest_puestos_empresa ON public.rest_puestos USING btree (empresa_id) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_rest_sectores_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_rest_sectores_auditoria_registro ON public.rest_sectores_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
 -- Name: idx_rrhh_agentes_auditoria_registro; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -23168,6 +24588,41 @@ CREATE UNIQUE INDEX uq_reportes_dinamicos_nombre ON public.reportes_dinamicos US
 
 
 --
+-- Name: uq_rest_categoria_items_item; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_rest_categoria_items_item ON public.rest_categoria_items USING btree (empresa_id, item_tipo, item_id);
+
+
+--
+-- Name: uq_rest_categorias_color; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_rest_categorias_color ON public.rest_categorias USING btree (empresa_id, lower((color)::text)) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: uq_rest_categorias_nombre; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_rest_categorias_nombre ON public.rest_categorias USING btree (empresa_id, lower((nombre)::text)) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: uq_rest_puestos_numero; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_rest_puestos_numero ON public.rest_puestos USING btree (sector_id, numero) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: uq_rest_sectores_nombre; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_rest_sectores_nombre ON public.rest_sectores USING btree (empresa_id, lower((nombre)::text)) WHERE (deleted_at IS NULL);
+
+
+--
 -- Name: uq_rrhh_agentes_nombre; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -23515,6 +24970,41 @@ CREATE TRIGGER trg_recibos_adelanto_aplicaciones_auditoria AFTER INSERT OR DELET
 --
 
 CREATE TRIGGER trg_recibos_adelanto_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.recibos_adelanto FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: rest_categorias trg_rest_categorias_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_rest_categorias_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rest_categorias FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: rest_cuenta_lineas trg_rest_cuenta_lineas_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_rest_cuenta_lineas_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rest_cuenta_lineas FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: rest_cuentas trg_rest_cuentas_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_rest_cuentas_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rest_cuentas FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: rest_puestos trg_rest_puestos_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_rest_puestos_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rest_puestos FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: rest_sectores trg_rest_sectores_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_rest_sectores_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.rest_sectores FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
 
 
 --
@@ -23984,6 +25474,46 @@ ALTER TABLE ONLY public.recibos_adelanto
 
 
 --
+-- Name: rest_categoria_items rest_categoria_items_categoria_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rest_categoria_items
+    ADD CONSTRAINT rest_categoria_items_categoria_id_fkey FOREIGN KEY (categoria_id) REFERENCES public.rest_categorias(id);
+
+
+--
+-- Name: rest_cuenta_eventos rest_cuenta_eventos_cuenta_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rest_cuenta_eventos
+    ADD CONSTRAINT rest_cuenta_eventos_cuenta_id_fkey FOREIGN KEY (cuenta_id) REFERENCES public.rest_cuentas(id);
+
+
+--
+-- Name: rest_cuenta_lineas rest_cuenta_lineas_cuenta_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rest_cuenta_lineas
+    ADD CONSTRAINT rest_cuenta_lineas_cuenta_id_fkey FOREIGN KEY (cuenta_id) REFERENCES public.rest_cuentas(id);
+
+
+--
+-- Name: rest_cuentas rest_cuentas_puesto_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rest_cuentas
+    ADD CONSTRAINT rest_cuentas_puesto_id_fkey FOREIGN KEY (puesto_id) REFERENCES public.rest_puestos(id);
+
+
+--
+-- Name: rest_puestos rest_puestos_sector_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rest_puestos
+    ADD CONSTRAINT rest_puestos_sector_id_fkey FOREIGN KEY (sector_id) REFERENCES public.rest_sectores(id);
+
+
+--
 -- Name: rrhh_aguinaldo_empleados rrhh_aguinaldo_empleados_aguinaldo_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -24315,5 +25845,5 @@ ALTER TABLE ONLY public.sucursal_bodegas
 -- PostgreSQL database dump complete
 --
 
-\unrestrict SX0gqeGCeKqLgiVcawJnCe67UosaDbsLTbUaFfY0qScSoEEI8sjK3O02Jy6V1MI
+\unrestrict n5hwqgBub50oU1fg0N3ci0T4GKItzkjc4TuiyelILiMqMmfozYTQ3afjJVx62j7
 
