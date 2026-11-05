@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict n5hwqgBub50oU1fg0N3ci0T4GKItzkjc4TuiyelILiMqMmfozYTQ3afjJVx62j7
+\restrict cutzrCc5d3LJcHSCjZo7OMDND4xbmTo25oexRTptvtjq6GXGDOdjJjONE1NrNxL
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
@@ -5722,6 +5722,99 @@ CREATE FUNCTION public.sp_funcionario_update(p_id bigint, p_name character varyi
                 GET DIAGNOSTICS v_rows = ROW_COUNT;
                 RETURN v_rows > 0;
             END; $$;
+
+
+--
+-- Name: sp_hacienda_recibidas_lote(bigint, date, date, bigint, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_hacienda_recibidas_lote(p_empresa_id bigint, p_desde date, p_hasta date, p_despues_id bigint, p_lote integer) RETURNS TABLE(id bigint, fecha_emision timestamp without time zone, tipo_documento character varying, emisor_numero_id character varying, emisor_nombre character varying, moneda character varying, total_comprobante numeric, total_impuesto numeric, mensaje_tipo smallint, monto_impuesto_acreditar numeric, xml_recibido text)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT f.id, f.fecha_emision, f.tipo_documento, f.emisor_numero_id, f.emisor_nombre, f.moneda,
+           f.total_comprobante, f.total_impuesto, f.mensaje_tipo, f.monto_impuesto_acreditar, f.xml_recibido
+    FROM facturas_recibidas f
+    WHERE f.empresa_id = p_empresa_id
+      AND f.tipo_documento IN ('01', '02', '03', '04')
+      AND f.fecha_emision >= p_desde AND f.fecha_emision < p_hasta + 1
+      AND f.id > COALESCE(p_despues_id, 0)
+    ORDER BY f.id
+    LIMIT GREATEST(1, LEAST(COALESCE(p_lote, 100), 500));
+END; $$;
+
+
+--
+-- Name: sp_hacienda_ventas_mensual(bigint, date, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_hacienda_ventas_mensual(p_empresa_id bigint, p_desde date, p_hasta date) RETURNS TABLE(mes date, tipo_documento character varying, documentos bigint, gravado numeric, exento numeric, exonerado numeric, no_sujeto numeric, descuentos numeric, venta_neta numeric, impuesto numeric, otros_cargos numeric)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT date_trunc('month', d.fecha_emision)::date AS mes,
+           d.tipo_documento,
+           COUNT(*)::bigint,
+           ROUND(SUM(d.total_gravado     * COALESCE(d.tipo_cambio, 1)), 5),
+           ROUND(SUM(d.total_exento      * COALESCE(d.tipo_cambio, 1)), 5),
+           ROUND(SUM(d.total_exonerado   * COALESCE(d.tipo_cambio, 1)), 5),
+           ROUND(SUM(d.total_no_sujeto   * COALESCE(d.tipo_cambio, 1)), 5),
+           ROUND(SUM(d.total_descuentos  * COALESCE(d.tipo_cambio, 1)), 5),
+           ROUND(SUM(d.total_venta_neta  * COALESCE(d.tipo_cambio, 1)), 5),
+           ROUND(SUM(d.total_impuesto    * COALESCE(d.tipo_cambio, 1)), 5),
+           ROUND(SUM(d.total_otros_cargos * COALESCE(d.tipo_cambio, 1)), 5)
+    FROM documentos_electronicos d
+    WHERE d.empresa_id = p_empresa_id
+      AND d.estado = 'aceptado'
+      AND d.deleted_at IS NULL
+      AND d.tipo_documento IN ('01', '02', '03', '04', '08', '09')
+      AND d.fecha_emision >= p_desde AND d.fecha_emision < p_hasta + 1
+    GROUP BY 1, 2
+    ORDER BY 1, 2;
+END; $$;
+
+
+--
+-- Name: sp_hacienda_ventas_tarifa(bigint, date, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_hacienda_ventas_tarifa(p_empresa_id bigint, p_desde date, p_hasta date) RETURNS TABLE(mes date, categoria character varying, tarifa numeric, base numeric, iva numeric, iva_exonerado numeric, lineas bigint)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT date_trunc('month', d.fecha_emision)::date AS mes,
+           (CASE d.tipo_documento WHEN '09' THEN 'exportacion' WHEN '02' THEN 'nd' WHEN '03' THEN 'nc' ELSE 'venta' END)::varchar AS categoria,
+           iva.tarifa,
+           ROUND(SUM(l.subtotal * COALESCE(d.tipo_cambio, 1)), 5) AS base,
+           ROUND(SUM(CASE WHEN rg.linea_id IS NULL THEN (COALESCE(iva.monto, 0) - COALESCE(iva.ex_monto_exoneracion, 0)) * COALESCE(d.tipo_cambio, 1) ELSE 0 END), 5) AS iva,
+           ROUND(SUM(CASE WHEN rg.linea_id IS NULL THEN COALESCE(iva.ex_monto_exoneracion, 0) * COALESCE(d.tipo_cambio, 1) ELSE 0 END), 5) AS iva_exonerado,
+           COUNT(*)::bigint AS lineas
+    FROM documentos_electronicos d
+    JOIN documento_lineas l ON l.documento_id = d.id
+    LEFT JOIN LATERAL (
+        SELECT i.tarifa, i.monto, i.ex_monto_exoneracion
+        FROM documento_linea_impuestos i
+        WHERE i.linea_id = l.id AND i.codigo IN ('01', '07', '08')
+        ORDER BY i.id LIMIT 1
+    ) iva ON TRUE
+    LEFT JOIN LATERAL (
+        SELECT x.linea_id FROM documento_linea_descuentos x
+        WHERE x.linea_id = l.id AND x.codigo_descuento IN ('01', '03') LIMIT 1
+    ) rg ON TRUE
+    WHERE d.empresa_id = p_empresa_id
+      AND d.estado = 'aceptado'
+      AND d.deleted_at IS NULL
+      AND d.tipo_documento IN ('01', '02', '03', '04', '09')
+      AND d.fecha_emision >= p_desde AND d.fecha_emision < p_hasta + 1
+    GROUP BY 1, 2, 3
+    ORDER BY 1, 2, 3 NULLS LAST;
+END; $$;
 
 
 --
@@ -25845,5 +25938,5 @@ ALTER TABLE ONLY public.sucursal_bodegas
 -- PostgreSQL database dump complete
 --
 
-\unrestrict n5hwqgBub50oU1fg0N3ci0T4GKItzkjc4TuiyelILiMqMmfozYTQ3afjJVx62j7
+\unrestrict cutzrCc5d3LJcHSCjZo7OMDND4xbmTo25oexRTptvtjq6GXGDOdjJjONE1NrNxL
 
