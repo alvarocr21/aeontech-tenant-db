@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict vB3w3PQFIJJ6yTdqgl7kWHQAFPVCae2xsUWdmb1aP2CyUstxaJHhyz1vcHURQOQ
+\restrict TPDtLgnZKF3dgPAxrUX2Y1oeAsKn4reXWZWlwVI9UvrR6hJeDnbPCdylj861IbV
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
@@ -6008,6 +6008,53 @@ BEGIN
     GROUP BY 1, 2, 3
     ORDER BY 1, 2, 3 NULLS LAST;
 END; $$;
+
+
+--
+-- Name: sp_inv_alerta_config_get(bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_inv_alerta_config_get(p_empresa_id bigint) RETURNS TABLE(hora_envio smallint, ultimo_envio date)
+    LANGUAGE sql SECURITY DEFINER
+    AS $$
+    SELECT COALESCE((SELECT c.hora_envio FROM inventario_alerta_config c WHERE c.empresa_id = p_empresa_id), 7)::smallint,
+           (SELECT c.ultimo_envio FROM inventario_alerta_config c WHERE c.empresa_id = p_empresa_id);
+$$;
+
+
+--
+-- Name: sp_inv_alerta_config_marcar_envio(bigint, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_inv_alerta_config_marcar_envio(p_empresa_id bigint, p_fecha date) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    AS $$
+BEGIN
+    INSERT INTO inventario_alerta_config (empresa_id, ultimo_envio)
+    VALUES (p_empresa_id, p_fecha)
+    ON CONFLICT (empresa_id) DO UPDATE SET ultimo_envio = EXCLUDED.ultimo_envio;
+    RETURN TRUE;
+END;
+$$;
+
+
+--
+-- Name: sp_inv_alerta_config_set_hora(bigint, smallint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_inv_alerta_config_set_hora(p_empresa_id bigint, p_hora smallint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    AS $$
+BEGIN
+    IF p_hora IS NULL OR p_hora < 0 OR p_hora > 23 THEN
+        RAISE EXCEPTION 'HORA_INVALIDA';
+    END IF;
+    INSERT INTO inventario_alerta_config (empresa_id, hora_envio)
+    VALUES (p_empresa_id, p_hora)
+    ON CONFLICT (empresa_id) DO UPDATE SET hora_envio = EXCLUDED.hora_envio, updated_at = NOW();
+    RETURN TRUE;
+END;
+$$;
 
 
 --
@@ -17221,6 +17268,19 @@ ALTER SEQUENCE public.funcionarios_id_seq OWNED BY public.funcionarios.id;
 
 
 --
+-- Name: inventario_alerta_config; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.inventario_alerta_config (
+    empresa_id bigint NOT NULL,
+    hora_envio smallint DEFAULT 7 NOT NULL,
+    ultimo_envio date,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT inventario_alerta_config_hora_envio_check CHECK (((hora_envio >= 0) AND (hora_envio <= 23)))
+);
+
+
+--
 -- Name: inventario_alerta_correos; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -23514,6 +23574,14 @@ ALTER TABLE ONLY public.funcionarios
 
 
 --
+-- Name: inventario_alerta_config inventario_alerta_config_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventario_alerta_config
+    ADD CONSTRAINT inventario_alerta_config_pkey PRIMARY KEY (empresa_id);
+
+
+--
 -- Name: inventario_alerta_correos inventario_alerta_correos_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -27237,5 +27305,5 @@ ALTER TABLE ONLY public.sucursal_bodegas
 -- PostgreSQL database dump complete
 --
 
-\unrestrict vB3w3PQFIJJ6yTdqgl7kWHQAFPVCae2xsUWdmb1aP2CyUstxaJHhyz1vcHURQOQ
+\unrestrict TPDtLgnZKF3dgPAxrUX2Y1oeAsKn4reXWZWlwVI9UvrR6hJeDnbPCdylj861IbV
 
