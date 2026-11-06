@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict cSVILurstMzWxtnS86p5R9CQJPbjkhMZXwCPfKHHOtmy9xSfAomCuZBT9vaAa0B
+\restrict vB3w3PQFIJJ6yTdqgl7kWHQAFPVCae2xsUWdmb1aP2CyUstxaJHhyz1vcHURQOQ
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
@@ -173,6 +173,21 @@ BEGIN
   WHERE ecv.empresa_id = p_empresa_id
   ORDER BY ecv.codigo;
 END;
+$$;
+
+
+--
+-- Name: fn_precio_base(numeric, character varying, numeric); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_precio_base(p_costo numeric, p_tipo character varying, p_valor numeric) RETURNS numeric
+    LANGUAGE sql IMMUTABLE
+    AS $$
+    SELECT CASE
+        WHEN p_tipo = 'monto'      THEN ROUND(COALESCE(p_costo, 0) + COALESCE(p_valor, 0), 5)
+        WHEN p_tipo = 'porcentaje' THEN ROUND(COALESCE(p_costo, 0) * (1 + COALESCE(p_valor, 0) / 100), 5)
+        ELSE NULL
+    END;
 $$;
 
 
@@ -5016,6 +5031,161 @@ CREATE FUNCTION public.sp_factura_aplicar_adelantos(p_documento_id bigint, p_mon
 
 
 --
+-- Name: sp_factura_aplicar_costos(bigint, bigint, boolean, jsonb, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_factura_aplicar_costos(p_factura_id bigint, p_empresa_id bigint, p_afectar boolean, p_lineas jsonb, p_user_id bigint) RETURNS TABLE(producto_id bigint, cantidad numeric, costo_entrada numeric, costo_anterior numeric, costo_nuevo numeric, precio_anterior numeric, precio_nuevo numeric, aplicado boolean)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    r        RECORD;
+    v_costo  NUMERIC;
+    v_precio NUMERIC;
+    v_gtipo  VARCHAR;
+    v_gval   NUMERIC;
+    v_stock  NUMERIC;
+    v_nuevo  NUMERIC;
+    v_pnuevo NUMERIC;
+BEGIN
+    FOR r IN
+        SELECT x.producto_id AS pid,
+               SUM(x.cantidad) AS cant,
+               CASE WHEN SUM(x.cantidad) > 0
+                    THEN SUM(x.cantidad * x.costo_entrada) / SUM(x.cantidad)
+                    ELSE 0 END AS centrada
+        FROM jsonb_to_recordset(COALESCE(p_lineas, '[]'::jsonb))
+             AS x(producto_id BIGINT, cantidad NUMERIC, costo_entrada NUMERIC)
+        WHERE x.cantidad > 0
+        GROUP BY x.producto_id
+    LOOP
+        SELECT p.costo, p.price, p.ganancia_tipo, p.ganancia_valor
+          INTO v_costo, v_precio, v_gtipo, v_gval
+        FROM productos p
+        WHERE p.id = r.pid AND p.empresa_id = p_empresa_id
+        FOR UPDATE;
+
+        IF NOT FOUND THEN CONTINUE; END IF;
+
+        -- Existencias previas en todas las bodegas (negativas cuentan como 0).
+        SELECT COALESCE(SUM(GREATEST(bp.stock, 0)), 0) INTO v_stock
+        FROM bodega_productos bp WHERE bp.producto_id = r.pid;
+
+        IF v_costo <= 0 OR v_stock <= 0 THEN
+            v_nuevo := ROUND(r.centrada, 5);
+        ELSE
+            v_nuevo := ROUND((v_stock * v_costo + r.cant * r.centrada) / (v_stock + r.cant), 5);
+        END IF;
+
+        v_pnuevo := v_precio;
+        IF COALESCE(p_afectar, TRUE) THEN
+            IF v_gtipo IS NOT NULL THEN
+                v_pnuevo := fn_precio_base(v_nuevo, v_gtipo, v_gval);
+            END IF;
+            UPDATE productos SET costo = v_nuevo, price = v_pnuevo, updated_at = NOW() WHERE id = r.pid;
+        END IF;
+
+        INSERT INTO producto_costos_historial (
+            empresa_id, producto_id, factura_recibida_id, cantidad, costo_entrada,
+            costo_anterior, costo_nuevo, precio_anterior, precio_nuevo, aplicado, created_by
+        ) VALUES (
+            p_empresa_id, r.pid, p_factura_id, r.cant, ROUND(r.centrada, 5),
+            v_costo, v_nuevo, v_precio, v_pnuevo, COALESCE(p_afectar, TRUE), p_user_id
+        );
+
+        producto_id := r.pid; cantidad := r.cant; costo_entrada := ROUND(r.centrada, 5);
+        costo_anterior := v_costo; costo_nuevo := v_nuevo;
+        precio_anterior := v_precio; precio_nuevo := v_pnuevo;
+        aplicado := COALESCE(p_afectar, TRUE);
+        RETURN NEXT;
+    END LOOP;
+END;
+$$;
+
+
+--
+-- Name: sp_factura_costos_guardar(bigint, bigint, boolean, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_factura_costos_guardar(p_factura_id bigint, p_empresa_id bigint, p_afectar boolean, p_costos jsonb) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_procesado TIMESTAMP;
+    v_existe    BOOLEAN;
+    r           RECORD;
+    v_tipo_id   BIGINT;
+BEGIN
+    SELECT TRUE, inventario_procesado_at INTO v_existe, v_procesado
+    FROM facturas_recibidas WHERE id = p_factura_id AND empresa_id = p_empresa_id;
+
+    IF v_existe IS NULL THEN
+        RETURN FALSE;
+    END IF;
+    IF v_procesado IS NOT NULL THEN
+        RAISE EXCEPTION 'YA_PROCESADO: el inventario de esta factura ya fue procesado; los costos no se pueden modificar.';
+    END IF;
+
+    UPDATE facturas_recibidas SET afectar_costo = COALESCE(p_afectar, TRUE), updated_at = NOW()
+    WHERE id = p_factura_id;
+
+    DELETE FROM factura_recibida_costos WHERE factura_recibida_id = p_factura_id;
+
+    FOR r IN
+        SELECT btrim(x.nombre) AS nombre, x.monto
+        FROM jsonb_to_recordset(COALESCE(p_costos, '[]'::jsonb)) AS x(nombre TEXT, monto NUMERIC)
+        WHERE btrim(COALESCE(x.nombre, '')) <> ''
+    LOOP
+        SELECT t.id INTO v_tipo_id FROM tipos_costo_compra t
+        WHERE t.empresa_id = p_empresa_id AND lower(t.nombre) = lower(r.nombre) AND t.deleted_at IS NULL;
+
+        IF v_tipo_id IS NULL THEN
+            INSERT INTO tipos_costo_compra (empresa_id, nombre) VALUES (p_empresa_id, left(r.nombre, 100))
+            RETURNING tipos_costo_compra.id INTO v_tipo_id;
+        END IF;
+
+        INSERT INTO factura_recibida_costos (factura_recibida_id, tipo_costo_id, nombre, monto)
+        VALUES (p_factura_id, v_tipo_id, left(r.nombre, 100), GREATEST(COALESCE(r.monto, 0), 0));
+    END LOOP;
+
+    RETURN TRUE;
+END;
+$$;
+
+
+--
+-- Name: sp_factura_costos_historial(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_factura_costos_historial(p_factura_id bigint, p_empresa_id bigint) RETURNS TABLE(producto_id bigint, code character varying, name character varying, cantidad numeric, costo_entrada numeric, costo_anterior numeric, costo_nuevo numeric, precio_anterior numeric, precio_nuevo numeric, aplicado boolean, moneda character varying)
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT h.producto_id, p.code, p.name, h.cantidad, h.costo_entrada, h.costo_anterior,
+           h.costo_nuevo, h.precio_anterior, h.precio_nuevo, h.aplicado, p.moneda
+    FROM producto_costos_historial h
+    JOIN productos p ON p.id = h.producto_id
+    WHERE h.factura_recibida_id = p_factura_id AND h.empresa_id = p_empresa_id
+    ORDER BY p.name;
+$$;
+
+
+--
+-- Name: sp_factura_costos_list(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_factura_costos_list(p_factura_id bigint, p_empresa_id bigint) RETURNS TABLE(id bigint, tipo_costo_id bigint, nombre character varying, monto numeric)
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT c.id, c.tipo_costo_id, c.nombre, c.monto
+    FROM factura_recibida_costos c
+    JOIN facturas_recibidas f ON f.id = c.factura_recibida_id
+    WHERE c.factura_recibida_id = p_factura_id AND f.empresa_id = p_empresa_id
+    ORDER BY c.id;
+$$;
+
+
+--
 -- Name: sp_factura_recibida_create(bigint, character varying, character varying, character varying, timestamp without time zone, character varying, character varying, character varying, character varying, character varying, character varying, character varying, numeric, numeric, text, character varying, text, character varying, smallint, bigint, jsonb, numeric); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5122,7 +5292,9 @@ CREATE TABLE public.facturas_recibidas (
     factura_referencia_id bigint,
     referencias_pago jsonb DEFAULT '[]'::jsonb NOT NULL,
     monto_referencia_aplicado numeric(18,5),
-    vinculos_pago jsonb DEFAULT '[]'::jsonb NOT NULL
+    vinculos_pago jsonb DEFAULT '[]'::jsonb NOT NULL,
+    tipo_cambio numeric(14,5),
+    afectar_costo boolean DEFAULT true NOT NULL
 );
 
 
@@ -5358,6 +5530,27 @@ CREATE FUNCTION public.sp_factura_recibida_set_condicion_pago(p_id bigint, p_emp
                 RETURN FOUND;
             END;
             $$;
+
+
+--
+-- Name: sp_factura_recibida_set_moneda(bigint, bigint, character varying, numeric); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_factura_recibida_set_moneda(p_id bigint, p_empresa_id bigint, p_moneda character varying, p_tipo_cambio numeric) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_rows INTEGER;
+BEGIN
+    UPDATE facturas_recibidas
+       SET moneda = p_moneda,
+           tipo_cambio = p_tipo_cambio,
+           updated_at = NOW()
+     WHERE id = p_id AND empresa_id = p_empresa_id;
+    GET DIAGNOSTICS v_rows = ROW_COUNT;
+    RETURN v_rows > 0;
+END;
+$$;
 
 
 --
@@ -5815,6 +6008,85 @@ BEGIN
     GROUP BY 1, 2, 3
     ORDER BY 1, 2, 3 NULLS LAST;
 END; $$;
+
+
+--
+-- Name: sp_inv_alerta_correo_create(bigint, character varying, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_inv_alerta_correo_create(p_empresa_id bigint, p_email character varying, p_user_id bigint) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_id BIGINT;
+BEGIN
+    IF EXISTS (SELECT 1 FROM inventario_alerta_correos
+               WHERE empresa_id = p_empresa_id AND lower(email) = lower(p_email) AND deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'DUPLICADO: ese correo ya está registrado.';
+    END IF;
+    INSERT INTO inventario_alerta_correos (empresa_id, email, created_by)
+    VALUES (p_empresa_id, p_email, p_user_id) RETURNING inventario_alerta_correos.id INTO v_id;
+    RETURN v_id;
+END;
+$$;
+
+
+--
+-- Name: sp_inv_alerta_correo_delete(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_inv_alerta_correo_delete(p_id bigint, p_empresa_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_rows INTEGER;
+BEGIN
+    UPDATE inventario_alerta_correos SET deleted_at = NOW()
+    WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
+    GET DIAGNOSTICS v_rows = ROW_COUNT;
+    RETURN v_rows > 0;
+END;
+$$;
+
+
+--
+-- Name: sp_inv_alerta_correo_list(bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_inv_alerta_correo_list(p_empresa_id bigint) RETURNS TABLE(id bigint, email character varying, created_at timestamp without time zone)
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT c.id, c.email, c.created_at FROM inventario_alerta_correos c
+    WHERE c.empresa_id = p_empresa_id AND c.deleted_at IS NULL
+    ORDER BY lower(c.email);
+$$;
+
+
+--
+-- Name: sp_inventario_alertas_diarias(bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_inventario_alertas_diarias(p_empresa_id bigint) RETURNS TABLE(producto_id bigint, code character varying, name character varying, bodega_id bigint, bodega character varying, stock numeric, stock_min numeric, categoria character varying)
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT p.id, p.code, p.name, b.id, b.name, bp.stock, bp.stock_min,
+           (CASE WHEN bp.stock < 0 THEN 'negativo'
+                 WHEN bp.stock = 0 THEN 'cero'
+                 ELSE 'bajo_minimo' END)::VARCHAR
+    FROM bodega_productos bp
+    JOIN productos p ON p.id = bp.producto_id
+    JOIN bodegas   b ON b.id = bp.bodega_id
+    WHERE p.empresa_id = p_empresa_id
+      AND b.empresa_id = p_empresa_id
+      AND p.deleted_at IS NULL AND p.is_active
+      AND b.deleted_at IS NULL AND b.is_active
+      AND bp.is_active
+      AND COALESCE(p.type, '') <> 'service'
+      AND bp.stock IS NOT NULL
+      AND (bp.stock <= 0
+           OR (COALESCE(bp.stock_min, 0) > 0 AND bp.stock <= bp.stock_min))
+    ORDER BY (CASE WHEN bp.stock < 0 THEN 0 WHEN bp.stock = 0 THEN 1 ELSE 2 END), b.name, p.name;
+$$;
 
 
 --
@@ -7052,34 +7324,41 @@ CREATE FUNCTION public.sp_producto_create(p_empresa_id bigint, p_code character 
 
 
 --
--- Name: sp_producto_create(bigint, character varying, character varying, text, character varying, character varying, numeric, character varying, character varying, numeric, character varying, text, character varying, character varying, character varying, character varying, boolean, numeric); Type: FUNCTION; Schema: public; Owner: -
+-- Name: sp_producto_create(bigint, character varying, character varying, text, character varying, character varying, numeric, character varying, character varying, numeric, character varying, text, character varying, character varying, character varying, character varying, boolean, numeric, numeric, character varying, numeric); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_producto_create(p_empresa_id bigint, p_code character varying, p_name character varying, p_description text, p_unit_measure character varying, p_cabys_code character varying, p_price numeric, p_tax_type character varying, p_tax_code character varying, p_tax_rate numeric, p_tax_tarifa_codigo character varying, p_image_url text, p_image_public_id character varying, p_moneda character varying, p_codigo_barras character varying, p_partida_arancelaria character varying DEFAULT NULL::character varying, p_comision_activa boolean DEFAULT false, p_comision_pct numeric DEFAULT NULL::numeric) RETURNS TABLE(id bigint, code character varying, name character varying)
+CREATE FUNCTION public.sp_producto_create(p_empresa_id bigint, p_code character varying, p_name character varying, p_description text, p_unit_measure character varying, p_cabys_code character varying, p_price numeric, p_tax_type character varying, p_tax_code character varying, p_tax_rate numeric, p_tax_tarifa_codigo character varying, p_image_url text, p_image_public_id character varying, p_moneda character varying, p_codigo_barras character varying, p_partida_arancelaria character varying DEFAULT NULL::character varying, p_comision_activa boolean DEFAULT false, p_comision_pct numeric DEFAULT NULL::numeric, p_costo numeric DEFAULT 0, p_ganancia_tipo character varying DEFAULT NULL::character varying, p_ganancia_valor numeric DEFAULT NULL::numeric) RETURNS TABLE(id bigint, code character varying, name character varying)
     LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO 'public', 'pg_temp'
     AS $$
-            DECLARE
-                v_id BIGINT;
-            BEGIN
-                INSERT INTO productos (
-                    empresa_id, code, name, description, type, unit_measure,
-                    cabys_code, partida_arancelaria, price, tax_type, tax_code, tax_rate, tax_tarifa_codigo,
-                    image_url, image_public_id, moneda, codigo_barras,
-                    comision_activa, comision_pct
-                ) VALUES (
-                    p_empresa_id, p_code, p_name, p_description, 'product', p_unit_measure,
-                    p_cabys_code, p_partida_arancelaria, p_price, p_tax_type, p_tax_code, p_tax_rate, p_tax_tarifa_codigo,
-                    p_image_url, p_image_public_id, p_moneda, p_codigo_barras,
-                    COALESCE(p_comision_activa, FALSE), p_comision_pct
-                ) RETURNING productos.id INTO v_id;
+DECLARE
+    v_id    BIGINT;
+    v_price NUMERIC;
+BEGIN
+    v_price := COALESCE(
+        CASE WHEN p_ganancia_tipo IS NOT NULL
+             THEN fn_precio_base(COALESCE(p_costo, 0), p_ganancia_tipo, p_ganancia_valor) END,
+        p_price);
 
-                INSERT INTO bodega_productos (bodega_id, producto_id, stock, stock_min)
-                SELECT b.id, v_id, 0, 0 FROM bodegas b WHERE b.empresa_id = p_empresa_id;
+    INSERT INTO productos (
+        empresa_id, code, name, description, type, unit_measure,
+        cabys_code, partida_arancelaria, price, tax_type, tax_code, tax_rate, tax_tarifa_codigo,
+        image_url, image_public_id, moneda, codigo_barras,
+        comision_activa, comision_pct, costo, ganancia_tipo, ganancia_valor
+    ) VALUES (
+        p_empresa_id, p_code, p_name, p_description, 'product', p_unit_measure,
+        p_cabys_code, p_partida_arancelaria, v_price, p_tax_type, p_tax_code, p_tax_rate, p_tax_tarifa_codigo,
+        p_image_url, p_image_public_id, p_moneda, p_codigo_barras,
+        COALESCE(p_comision_activa, FALSE), p_comision_pct,
+        COALESCE(p_costo, 0), p_ganancia_tipo,
+        CASE WHEN p_ganancia_tipo IS NULL THEN NULL ELSE COALESCE(p_ganancia_valor, 0) END
+    ) RETURNING productos.id INTO v_id;
 
-                RETURN QUERY SELECT v_id, p_code, p_name;
-            END;
-            $$;
+    INSERT INTO bodega_productos (bodega_id, producto_id, stock, stock_min)
+    SELECT b.id, v_id, 0, 0 FROM bodegas b WHERE b.empresa_id = p_empresa_id;
+
+    RETURN QUERY SELECT v_id, p_code, p_name;
+END;
+$$;
 
 
 --
@@ -7106,59 +7385,61 @@ $$;
 -- Name: sp_producto_get(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_producto_get(p_id bigint, p_empresa_id bigint) RETURNS TABLE(id bigint, empresa_id bigint, code character varying, name character varying, description text, type character varying, unit_measure character varying, cabys_code character varying, partida_arancelaria character varying, codigo_barras character varying, price numeric, price_with_tax numeric, tax_type character varying, tax_code character varying, tax_rate numeric, tax_tarifa_codigo character varying, image_url text, image_public_id character varying, moneda character varying, is_active boolean, comision_activa boolean, comision_pct numeric, bodega_id bigint, stock numeric, stock_min numeric)
+CREATE FUNCTION public.sp_producto_get(p_id bigint, p_empresa_id bigint) RETURNS TABLE(id bigint, empresa_id bigint, code character varying, name character varying, description text, type character varying, unit_measure character varying, cabys_code character varying, partida_arancelaria character varying, codigo_barras character varying, price numeric, price_with_tax numeric, tax_type character varying, tax_code character varying, tax_rate numeric, tax_tarifa_codigo character varying, image_url text, image_public_id character varying, moneda character varying, is_active boolean, comision_activa boolean, comision_pct numeric, costo numeric, ganancia_tipo character varying, ganancia_valor numeric, bodega_id bigint, stock numeric, stock_min numeric)
     LANGUAGE sql STABLE
     AS $$
-                SELECT
-                    p.id, p.empresa_id,
-                    p.code, p.name, p.description, p.type, p.unit_measure,
-                    p.cabys_code, p.partida_arancelaria, p.codigo_barras,
-                    p.price, ROUND(p.price * (1 + p.tax_rate / 100), 5) AS price_with_tax,
-                    p.tax_type, p.tax_code, p.tax_rate, p.tax_tarifa_codigo,
-                    p.image_url, p.image_public_id, p.moneda, p.is_active,
-                    p.comision_activa, p.comision_pct,
-                    bp.bodega_id, bp.stock, bp.stock_min
-                FROM productos p
-                LEFT JOIN bodega_productos bp ON bp.producto_id = p.id
-                    AND bp.bodega_id = (
-                        SELECT b.id FROM bodegas b
-                        WHERE b.empresa_id = p_empresa_id AND b.is_active
-                        ORDER BY b.is_default DESC, b.id
-                        LIMIT 1
-                    )
-                WHERE p.id = p_id
-                  AND p.empresa_id = p_empresa_id
-                  AND p.deleted_at IS NULL;
-            $$;
+    SELECT
+        p.id, p.empresa_id,
+        p.code, p.name, p.description, p.type, p.unit_measure,
+        p.cabys_code, p.partida_arancelaria, p.codigo_barras,
+        p.price, ROUND(p.price * (1 + p.tax_rate / 100), 5) AS price_with_tax,
+        p.tax_type, p.tax_code, p.tax_rate, p.tax_tarifa_codigo,
+        p.image_url, p.image_public_id, p.moneda, p.is_active,
+        p.comision_activa, p.comision_pct,
+        p.costo, p.ganancia_tipo, p.ganancia_valor,
+        bp.bodega_id, bp.stock, bp.stock_min
+    FROM productos p
+    LEFT JOIN bodega_productos bp ON bp.producto_id = p.id
+        AND bp.bodega_id = (
+            SELECT b.id FROM bodegas b
+            WHERE b.empresa_id = p_empresa_id AND b.is_active
+            ORDER BY b.is_default DESC, b.id
+            LIMIT 1
+        )
+    WHERE p.id = p_id
+      AND p.empresa_id = p_empresa_id
+      AND p.deleted_at IS NULL;
+$$;
 
 
 --
 -- Name: sp_producto_list(bigint, bigint, character varying, character varying, integer, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_producto_list(p_empresa_id bigint, p_bodega_id bigint DEFAULT NULL::bigint, p_search character varying DEFAULT NULL::character varying, p_estado character varying DEFAULT 'todos'::character varying, p_page integer DEFAULT 1, p_per_page integer DEFAULT 20) RETURNS TABLE(id bigint, empresa_id bigint, code character varying, name character varying, description text, type character varying, unit_measure character varying, cabys_code character varying, partida_arancelaria character varying, codigo_barras character varying, price numeric, price_with_tax numeric, tax_type character varying, tax_code character varying, tax_rate numeric, tax_tarifa_codigo character varying, image_url text, image_public_id character varying, moneda character varying, duracion_minutos integer, is_active boolean, comision_activa boolean, comision_pct numeric, bodega_id bigint, stock numeric, stock_min numeric, bodega_active boolean, total_rows bigint)
+CREATE FUNCTION public.sp_producto_list(p_empresa_id bigint, p_bodega_id bigint DEFAULT NULL::bigint, p_search character varying DEFAULT NULL::character varying, p_estado character varying DEFAULT 'todos'::character varying, p_page integer DEFAULT 1, p_per_page integer DEFAULT 20) RETURNS TABLE(id bigint, empresa_id bigint, code character varying, name character varying, description text, type character varying, unit_measure character varying, cabys_code character varying, partida_arancelaria character varying, codigo_barras character varying, price numeric, price_with_tax numeric, tax_type character varying, tax_code character varying, tax_rate numeric, tax_tarifa_codigo character varying, image_url text, image_public_id character varying, moneda character varying, duracion_minutos integer, is_active boolean, comision_activa boolean, comision_pct numeric, costo numeric, ganancia_tipo character varying, ganancia_valor numeric, bodega_id bigint, stock numeric, stock_min numeric, bodega_active boolean, total_rows bigint)
     LANGUAGE sql STABLE
     AS $$
-                SELECT
-                    p.id, p.empresa_id,
-                    p.code, p.name, p.description, p.type, p.unit_measure,
-                    p.cabys_code, p.partida_arancelaria, p.codigo_barras,
-                    p.price, ROUND(p.price * (1 + p.tax_rate / 100), 5) AS price_with_tax,
-                    p.tax_type, p.tax_code, p.tax_rate, p.tax_tarifa_codigo,
-                    p.image_url, p.image_public_id, p.moneda, p.duracion_minutos, p.is_active,
-                    p.comision_activa, p.comision_pct,
-                    bp.bodega_id, bp.stock, bp.stock_min, bp.is_active AS bodega_active,
-                    COUNT(*) OVER()::BIGINT AS total_rows
-                FROM productos p
-                LEFT JOIN bodega_productos bp ON bp.producto_id = p.id
-                    AND (p_bodega_id IS NULL OR bp.bodega_id = p_bodega_id)
-                WHERE p.empresa_id = p_empresa_id
-                  AND p.deleted_at IS NULL
-                  AND (p_search IS NULL OR p.name ILIKE '%' || p_search || '%' OR p.code ILIKE '%' || p_search || '%' OR p.cabys_code ILIKE '%' || p_search || '%')
-                  AND (p_estado = 'todos' OR (p_estado = 'activos' AND p.is_active) OR (p_estado = 'inactivos' AND NOT p.is_active))
-                ORDER BY p.name
-                LIMIT GREATEST(p_per_page, 1) OFFSET GREATEST(p_page - 1, 0) * GREATEST(p_per_page, 1);
-            $$;
+    SELECT
+        p.id, p.empresa_id,
+        p.code, p.name, p.description, p.type, p.unit_measure,
+        p.cabys_code, p.partida_arancelaria, p.codigo_barras,
+        p.price, ROUND(p.price * (1 + p.tax_rate / 100), 5) AS price_with_tax,
+        p.tax_type, p.tax_code, p.tax_rate, p.tax_tarifa_codigo,
+        p.image_url, p.image_public_id, p.moneda, p.duracion_minutos, p.is_active,
+        p.comision_activa, p.comision_pct,
+        p.costo, p.ganancia_tipo, p.ganancia_valor,
+        bp.bodega_id, bp.stock, bp.stock_min, bp.is_active AS bodega_active,
+        COUNT(*) OVER()::BIGINT AS total_rows
+    FROM productos p
+    LEFT JOIN bodega_productos bp ON bp.producto_id = p.id
+        AND (p_bodega_id IS NULL OR bp.bodega_id = p_bodega_id)
+    WHERE p.empresa_id = p_empresa_id
+      AND p.deleted_at IS NULL
+      AND (p_search IS NULL OR p.name ILIKE '%' || p_search || '%' OR p.code ILIKE '%' || p_search || '%' OR p.cabys_code ILIKE '%' || p_search || '%')
+      AND (p_estado = 'todos' OR (p_estado = 'activos' AND p.is_active) OR (p_estado = 'inactivos' AND NOT p.is_active))
+    ORDER BY p.name
+    LIMIT GREATEST(p_per_page, 1) OFFSET GREATEST(p_page - 1, 0) * GREATEST(p_per_page, 1);
+$$;
 
 
 --
@@ -7287,40 +7568,49 @@ CREATE FUNCTION public.sp_producto_update(p_id bigint, p_code character varying,
 
 
 --
--- Name: sp_producto_update(bigint, character varying, character varying, text, character varying, character varying, numeric, character varying, character varying, numeric, character varying, text, character varying, character varying, character varying, character varying, boolean, numeric); Type: FUNCTION; Schema: public; Owner: -
+-- Name: sp_producto_update(bigint, character varying, character varying, text, character varying, character varying, numeric, character varying, character varying, numeric, character varying, text, character varying, character varying, character varying, character varying, boolean, numeric, numeric, character varying, numeric); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_producto_update(p_id bigint, p_code character varying, p_name character varying, p_description text, p_unit_measure character varying, p_cabys_code character varying, p_price numeric, p_tax_type character varying, p_tax_code character varying, p_tax_rate numeric, p_tax_tarifa_codigo character varying, p_image_url text, p_image_public_id character varying, p_moneda character varying, p_codigo_barras character varying, p_partida_arancelaria character varying DEFAULT NULL::character varying, p_comision_activa boolean DEFAULT false, p_comision_pct numeric DEFAULT NULL::numeric) RETURNS boolean
+CREATE FUNCTION public.sp_producto_update(p_id bigint, p_code character varying, p_name character varying, p_description text, p_unit_measure character varying, p_cabys_code character varying, p_price numeric, p_tax_type character varying, p_tax_code character varying, p_tax_rate numeric, p_tax_tarifa_codigo character varying, p_image_url text, p_image_public_id character varying, p_moneda character varying, p_codigo_barras character varying, p_partida_arancelaria character varying DEFAULT NULL::character varying, p_comision_activa boolean DEFAULT false, p_comision_pct numeric DEFAULT NULL::numeric, p_costo numeric DEFAULT 0, p_ganancia_tipo character varying DEFAULT NULL::character varying, p_ganancia_valor numeric DEFAULT NULL::numeric) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO 'public', 'pg_temp'
     AS $$
-            DECLARE v_rows INTEGER;
-            BEGIN
-                UPDATE productos SET
-                    code         = p_code,
-                    name         = p_name,
-                    description  = p_description,
-                    unit_measure = p_unit_measure,
-                    cabys_code   = p_cabys_code,
-                    partida_arancelaria = p_partida_arancelaria,
-                    price        = p_price,
-                    tax_type     = p_tax_type,
-                    tax_code     = p_tax_code,
-                    tax_rate     = p_tax_rate,
-                    tax_tarifa_codigo = p_tax_tarifa_codigo,
-                    image_url        = p_image_url,
-                    image_public_id  = p_image_public_id,
-                    moneda           = p_moneda,
-                    codigo_barras    = p_codigo_barras,
-                    comision_activa  = COALESCE(p_comision_activa, FALSE),
-                    comision_pct     = p_comision_pct,
-                    updated_at   = NOW()
-                WHERE id = p_id AND deleted_at IS NULL;
+DECLARE
+    v_rows  INTEGER;
+    v_price NUMERIC;
+BEGIN
+    v_price := COALESCE(
+        CASE WHEN p_ganancia_tipo IS NOT NULL
+             THEN fn_precio_base(COALESCE(p_costo, 0), p_ganancia_tipo, p_ganancia_valor) END,
+        p_price);
 
-                GET DIAGNOSTICS v_rows = ROW_COUNT;
-                RETURN v_rows > 0;
-            END;
-            $$;
+    UPDATE productos SET
+        code         = p_code,
+        name         = p_name,
+        description  = p_description,
+        unit_measure = p_unit_measure,
+        cabys_code   = p_cabys_code,
+        partida_arancelaria = p_partida_arancelaria,
+        price        = v_price,
+        tax_type     = p_tax_type,
+        tax_code     = p_tax_code,
+        tax_rate     = p_tax_rate,
+        tax_tarifa_codigo = p_tax_tarifa_codigo,
+        image_url        = p_image_url,
+        image_public_id  = p_image_public_id,
+        moneda           = p_moneda,
+        codigo_barras    = p_codigo_barras,
+        comision_activa  = COALESCE(p_comision_activa, FALSE),
+        comision_pct     = p_comision_pct,
+        costo            = COALESCE(p_costo, 0),
+        ganancia_tipo    = p_ganancia_tipo,
+        ganancia_valor   = CASE WHEN p_ganancia_tipo IS NULL THEN NULL ELSE COALESCE(p_ganancia_valor, 0) END,
+        updated_at   = NOW()
+    WHERE id = p_id AND deleted_at IS NULL;
+
+    GET DIAGNOSTICS v_rows = ROW_COUNT;
+    RETURN v_rows > 0;
+END;
+$$;
 
 
 --
@@ -8146,7 +8436,7 @@ $$;
 -- Name: sp_reporte_inventario(bigint, bigint, boolean, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_reporte_inventario(p_empresa_id bigint, p_bodega_id bigint DEFAULT NULL::bigint, p_bajo_minimo boolean DEFAULT false, p_search text DEFAULT NULL::text) RETURNS TABLE(bodega_id bigint, bodega_nombre character varying, producto_id bigint, codigo character varying, nombre character varying, unidad_medida character varying, precio numeric, stock numeric, stock_min numeric, bajo_minimo boolean)
+CREATE FUNCTION public.sp_reporte_inventario(p_empresa_id bigint, p_bodega_id bigint DEFAULT NULL::bigint, p_bajo_minimo boolean DEFAULT false, p_search text DEFAULT NULL::text) RETURNS TABLE(bodega_id bigint, bodega_nombre character varying, producto_id bigint, codigo character varying, nombre character varying, unidad_medida character varying, precio numeric, stock numeric, stock_min numeric, bajo_minimo boolean, moneda character varying, costo numeric, costo_total numeric)
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -8157,12 +8447,15 @@ BEGIN
         p.id                 AS producto_id,
         p.code               AS codigo,
         p.name               AS nombre,
-        COALESCE(p.unit_measure, '') AS unidad_medida,
+        COALESCE(p.unit_measure, '')::varchar AS unidad_medida,
         COALESCE(p.price, 0) AS precio,
         COALESCE(bp.stock, 0) AS stock,
         COALESCE(bp.stock_min, 0) AS stock_min,
         (COALESCE(bp.stock, 0) < 0
-         OR (COALESCE(bp.stock_min, 0) > 0 AND COALESCE(bp.stock, 0) < bp.stock_min)) AS bajo_minimo
+         OR (COALESCE(bp.stock_min, 0) > 0 AND COALESCE(bp.stock, 0) < bp.stock_min)) AS bajo_minimo,
+        COALESCE(NULLIF(p.moneda, ''), 'CRC')::varchar AS moneda,
+        COALESCE(p.costo, 0)::numeric AS costo,
+        (COALESCE(bp.stock, 0) * COALESCE(p.costo, 0))::numeric AS costo_total
     FROM bodegas b
     JOIN bodega_productos bp ON bp.bodega_id = b.id
     JOIN productos p         ON p.id = bp.producto_id
@@ -8189,7 +8482,7 @@ $$;
 -- Name: sp_reporte_inventario_summary(bigint); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_reporte_inventario_summary(p_empresa_id bigint) RETURNS TABLE(bodega_id bigint, bodega_nombre character varying, total_items bigint, bajo_minimo bigint, sin_stock bigint)
+CREATE FUNCTION public.sp_reporte_inventario_summary(p_empresa_id bigint) RETURNS TABLE(bodega_id bigint, bodega_nombre character varying, total_items bigint, bajo_minimo bigint, sin_stock bigint, valor_crc numeric, valor_usd numeric)
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -8200,7 +8493,11 @@ BEGIN
         COUNT(bp.id)  AS total_items,
         COUNT(*) FILTER (WHERE COALESCE(bp.stock, 0) < 0
                             OR (COALESCE(bp.stock_min, 0) > 0 AND COALESCE(bp.stock, 0) < bp.stock_min)) AS bajo_minimo,
-        COUNT(*) FILTER (WHERE COALESCE(bp.stock, 0) = 0) AS sin_stock
+        COUNT(*) FILTER (WHERE COALESCE(bp.stock, 0) = 0) AS sin_stock,
+        COALESCE(SUM(COALESCE(bp.stock, 0) * COALESCE(p.costo, 0))
+                 FILTER (WHERE COALESCE(NULLIF(p.moneda, ''), 'CRC') <> 'USD'), 0)::numeric AS valor_crc,
+        COALESCE(SUM(COALESCE(bp.stock, 0) * COALESCE(p.costo, 0))
+                 FILTER (WHERE p.moneda = 'USD'), 0)::numeric AS valor_usd
     FROM bodegas b
     JOIN bodega_productos bp ON bp.bodega_id = b.id
     JOIN productos p         ON p.id = bp.producto_id
@@ -14015,6 +14312,37 @@ $$;
 
 
 --
+-- Name: sp_tipo_costo_compra_delete(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_tipo_costo_compra_delete(p_id bigint, p_empresa_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_rows INTEGER;
+BEGIN
+    UPDATE tipos_costo_compra SET deleted_at = NOW(), updated_at = NOW()
+    WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
+    GET DIAGNOSTICS v_rows = ROW_COUNT;
+    RETURN v_rows > 0;
+END;
+$$;
+
+
+--
+-- Name: sp_tipo_costo_compra_list(bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_tipo_costo_compra_list(p_empresa_id bigint) RETURNS TABLE(id bigint, nombre character varying)
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT t.id, t.nombre FROM tipos_costo_compra t
+    WHERE t.empresa_id = p_empresa_id AND t.deleted_at IS NULL AND t.is_active
+    ORDER BY lower(t.nombre);
+$$;
+
+
+--
 -- Name: sp_tipo_doc_ref_delete(bigint); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -16653,6 +16981,40 @@ ALTER SEQUENCE public.empresa_tipos_impuesto_id_seq OWNED BY public.empresa_tipo
 
 
 --
+-- Name: factura_recibida_costos; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.factura_recibida_costos (
+    id bigint NOT NULL,
+    factura_recibida_id bigint NOT NULL,
+    tipo_costo_id bigint,
+    nombre character varying(100) NOT NULL,
+    monto numeric(18,5) NOT NULL,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT factura_recibida_costos_monto_check CHECK ((monto >= (0)::numeric))
+);
+
+
+--
+-- Name: factura_recibida_costos_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.factura_recibida_costos_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: factura_recibida_costos_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.factura_recibida_costos_id_seq OWNED BY public.factura_recibida_costos.id;
+
+
+--
 -- Name: facturas_recibidas_auditoria; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -16856,6 +17218,39 @@ CREATE SEQUENCE public.funcionarios_id_seq
 --
 
 ALTER SEQUENCE public.funcionarios_id_seq OWNED BY public.funcionarios.id;
+
+
+--
+-- Name: inventario_alerta_correos; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.inventario_alerta_correos (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    email character varying(190) NOT NULL,
+    created_by bigint,
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: inventario_alerta_correos_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.inventario_alerta_correos_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: inventario_alerta_correos_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.inventario_alerta_correos_id_seq OWNED BY public.inventario_alerta_correos.id;
 
 
 --
@@ -17314,6 +17709,46 @@ ALTER SEQUENCE public.ordenes_pedido_id_seq OWNED BY public.ordenes_pedido.id;
 
 
 --
+-- Name: producto_costos_historial; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.producto_costos_historial (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    producto_id bigint NOT NULL,
+    factura_recibida_id bigint,
+    cantidad numeric(18,5) NOT NULL,
+    costo_entrada numeric(18,5) NOT NULL,
+    costo_anterior numeric(18,5) NOT NULL,
+    costo_nuevo numeric(18,5) NOT NULL,
+    precio_anterior numeric(18,5),
+    precio_nuevo numeric(18,5),
+    aplicado boolean NOT NULL,
+    created_by bigint,
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: producto_costos_historial_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.producto_costos_historial_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: producto_costos_historial_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.producto_costos_historial_id_seq OWNED BY public.producto_costos_historial.id;
+
+
+--
 -- Name: producto_proveedor_equivalencias; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -17415,6 +17850,12 @@ CREATE TABLE public.productos (
     duracion_minutos integer,
     comision_activa boolean DEFAULT false NOT NULL,
     comision_pct numeric(5,2),
+    costo numeric(18,5) DEFAULT 0 NOT NULL,
+    ganancia_tipo character varying(10),
+    ganancia_valor numeric(18,5),
+    CONSTRAINT productos_costo_check CHECK ((costo >= (0)::numeric)),
+    CONSTRAINT productos_ganancia_tipo_check CHECK (((ganancia_tipo)::text = ANY ((ARRAY['monto'::character varying, 'porcentaje'::character varying])::text[]))),
+    CONSTRAINT productos_ganancia_valor_check CHECK ((ganancia_valor >= (0)::numeric)),
     CONSTRAINT productos_type_check CHECK (((type)::text = ANY (ARRAY[('product'::character varying)::text, ('service'::character varying)::text])))
 );
 
@@ -21132,6 +21573,40 @@ ALTER SEQUENCE public.tipos_codigo_referencia_id_seq OWNED BY public.tipos_codig
 
 
 --
+-- Name: tipos_costo_compra; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.tipos_costo_compra (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    nombre character varying(100) NOT NULL,
+    is_active boolean DEFAULT true NOT NULL,
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: tipos_costo_compra_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.tipos_costo_compra_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: tipos_costo_compra_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.tipos_costo_compra_id_seq OWNED BY public.tipos_costo_compra.id;
+
+
+--
 -- Name: tipos_documento_referencia; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -21600,6 +22075,13 @@ ALTER TABLE ONLY public.empresa_tipos_impuesto_auditoria ALTER COLUMN id SET DEF
 
 
 --
+-- Name: factura_recibida_costos id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.factura_recibida_costos ALTER COLUMN id SET DEFAULT nextval('public.factura_recibida_costos_id_seq'::regclass);
+
+
+--
 -- Name: facturas_recibidas id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -21639,6 +22121,13 @@ ALTER TABLE ONLY public.funcionarios ALTER COLUMN id SET DEFAULT nextval('public
 --
 
 ALTER TABLE ONLY public.funcionarios_auditoria ALTER COLUMN id SET DEFAULT nextval('public.funcionarios_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: inventario_alerta_correos id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventario_alerta_correos ALTER COLUMN id SET DEFAULT nextval('public.inventario_alerta_correos_id_seq'::regclass);
 
 
 --
@@ -21716,6 +22205,13 @@ ALTER TABLE ONLY public.ordenes_pedido ALTER COLUMN id SET DEFAULT nextval('publ
 --
 
 ALTER TABLE ONLY public.ordenes_pedido_auditoria ALTER COLUMN id SET DEFAULT nextval('public.ordenes_pedido_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: producto_costos_historial id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.producto_costos_historial ALTER COLUMN id SET DEFAULT nextval('public.producto_costos_historial_id_seq'::regclass);
 
 
 --
@@ -22356,6 +22852,13 @@ ALTER TABLE ONLY public.tipos_codigo_referencia ALTER COLUMN id SET DEFAULT next
 
 
 --
+-- Name: tipos_costo_compra id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tipos_costo_compra ALTER COLUMN id SET DEFAULT nextval('public.tipos_costo_compra_id_seq'::regclass);
+
+
+--
 -- Name: tipos_documento_referencia id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -22947,6 +23450,14 @@ ALTER TABLE ONLY public.empresa_tipos_impuesto
 
 
 --
+-- Name: factura_recibida_costos factura_recibida_costos_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.factura_recibida_costos
+    ADD CONSTRAINT factura_recibida_costos_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: facturas_recibidas_auditoria facturas_recibidas_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -23000,6 +23511,14 @@ ALTER TABLE ONLY public.funcionarios_auditoria
 
 ALTER TABLE ONLY public.funcionarios
     ADD CONSTRAINT funcionarios_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: inventario_alerta_correos inventario_alerta_correos_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventario_alerta_correos
+    ADD CONSTRAINT inventario_alerta_correos_pkey PRIMARY KEY (id);
 
 
 --
@@ -23096,6 +23615,14 @@ ALTER TABLE ONLY public.ordenes_pedido_auditoria
 
 ALTER TABLE ONLY public.ordenes_pedido
     ADD CONSTRAINT ordenes_pedido_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: producto_costos_historial producto_costos_historial_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.producto_costos_historial
+    ADD CONSTRAINT producto_costos_historial_pkey PRIMARY KEY (id);
 
 
 --
@@ -23947,6 +24474,14 @@ ALTER TABLE ONLY public.tipos_codigo_referencia
 
 
 --
+-- Name: tipos_costo_compra tipos_costo_compra_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tipos_costo_compra
+    ADD CONSTRAINT tipos_costo_compra_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: tipos_documento_referencia tipos_documento_referencia_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -24506,6 +25041,13 @@ CREATE INDEX idx_fact_recibidas_referencia ON public.facturas_recibidas USING bt
 
 
 --
+-- Name: idx_factura_recibida_costos_factura; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_factura_recibida_costos_factura ON public.factura_recibida_costos USING btree (factura_recibida_id);
+
+
+--
 -- Name: idx_facturas_recibidas_auditoria_registro; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -24685,6 +25227,20 @@ CREATE INDEX idx_ordenes_pedido_fecha ON public.ordenes_pedido USING btree (empr
 --
 
 CREATE INDEX idx_ordenes_pedido_proveedor_fecha ON public.ordenes_pedido USING btree (proveedor_id, fecha DESC, id DESC) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_producto_costos_historial_factura; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_producto_costos_historial_factura ON public.producto_costos_historial USING btree (factura_recibida_id);
+
+
+--
+-- Name: idx_producto_costos_historial_producto; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_producto_costos_historial_producto ON public.producto_costos_historial USING btree (producto_id, created_at DESC);
 
 
 --
@@ -25325,6 +25881,13 @@ CREATE UNIQUE INDEX uq_fr_clave ON public.facturas_recibidas USING btree (empres
 
 
 --
+-- Name: uq_inventario_alerta_correos_email; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_inventario_alerta_correos_email ON public.inventario_alerta_correos USING btree (empresa_id, lower((email)::text)) WHERE (deleted_at IS NULL);
+
+
+--
 -- Name: uq_reportes_dinamicos_nombre; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -25483,6 +26046,13 @@ CREATE UNIQUE INDEX uq_rrhh_puestos_nombre ON public.rrhh_puestos USING btree (e
 --
 
 CREATE UNIQUE INDEX uq_rrhh_vac_mov_saldo_inicial ON public.rrhh_vacaciones_movimientos USING btree (empleado_id) WHERE (((tipo)::text = 'saldo_inicial'::text) AND (deleted_at IS NULL));
+
+
+--
+-- Name: uq_tipos_costo_compra_nombre; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_tipos_costo_compra_nombre ON public.tipos_costo_compra USING btree (empresa_id, lower((nombre)::text)) WHERE (deleted_at IS NULL);
 
 
 --
@@ -26112,6 +26682,22 @@ ALTER TABLE ONLY public.documento_referencias
 
 
 --
+-- Name: factura_recibida_costos factura_recibida_costos_factura_recibida_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.factura_recibida_costos
+    ADD CONSTRAINT factura_recibida_costos_factura_recibida_id_fkey FOREIGN KEY (factura_recibida_id) REFERENCES public.facturas_recibidas(id) ON DELETE CASCADE;
+
+
+--
+-- Name: factura_recibida_costos factura_recibida_costos_tipo_costo_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.factura_recibida_costos
+    ADD CONSTRAINT factura_recibida_costos_tipo_costo_id_fkey FOREIGN KEY (tipo_costo_id) REFERENCES public.tipos_costo_compra(id) ON DELETE SET NULL;
+
+
+--
 -- Name: facturas_recibidas facturas_recibidas_factura_referencia_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -26189,6 +26775,22 @@ ALTER TABLE ONLY public.movimientos_inventario
 
 ALTER TABLE ONLY public.movimientos_inventario
     ADD CONSTRAINT movimientos_inventario_proveedor_id_fkey FOREIGN KEY (proveedor_id) REFERENCES public.proveedores(id);
+
+
+--
+-- Name: producto_costos_historial producto_costos_historial_factura_recibida_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.producto_costos_historial
+    ADD CONSTRAINT producto_costos_historial_factura_recibida_id_fkey FOREIGN KEY (factura_recibida_id) REFERENCES public.facturas_recibidas(id) ON DELETE SET NULL;
+
+
+--
+-- Name: producto_costos_historial producto_costos_historial_producto_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.producto_costos_historial
+    ADD CONSTRAINT producto_costos_historial_producto_id_fkey FOREIGN KEY (producto_id) REFERENCES public.productos(id);
 
 
 --
@@ -26635,5 +27237,5 @@ ALTER TABLE ONLY public.sucursal_bodegas
 -- PostgreSQL database dump complete
 --
 
-\unrestrict cSVILurstMzWxtnS86p5R9CQJPbjkhMZXwCPfKHHOtmy9xSfAomCuZBT9vaAa0B
+\unrestrict vB3w3PQFIJJ6yTdqgl7kWHQAFPVCae2xsUWdmb1aP2CyUstxaJHhyz1vcHURQOQ
 
