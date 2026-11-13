@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 8Y1fQFZ66UDIRZSnKgk96xVS3ULRLurOnjtYfaOAVxgaLSbuyaJlMiP0cVeUmJ5
+\restrict eKZskOBtaZjvSVKlAaBmZO9Ue4A7ASOG94EiDbntrkenfdyUB9PoFsorI7WgVTP
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-1.pgdg22.04+1)
@@ -154,6 +154,179 @@ BEGIN
     RETURN CASE TG_OP WHEN 'DELETE' THEN OLD ELSE NEW END;
 END;
 $_$;
+
+
+--
+-- Name: fn_cli_documento_inmutable(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_cli_documento_inmutable() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'REGISTRO_INMUTABLE: Un documento médico no se puede eliminar; anúlelo y emita otro.';
+    END IF;
+    IF OLD.estado = 'anulado' THEN
+        RAISE EXCEPTION 'REGISTRO_INMUTABLE: El documento ya está anulado.';
+    END IF;
+    IF NEW.empresa_id IS DISTINCT FROM OLD.empresa_id OR NEW.paciente_id IS DISTINCT FROM OLD.paciente_id
+       OR NEW.consulta_id IS DISTINCT FROM OLD.consulta_id OR NEW.funcionario_id IS DISTINCT FROM OLD.funcionario_id
+       OR NEW.tipo IS DISTINCT FROM OLD.tipo OR NEW.numero IS DISTINCT FROM OLD.numero
+       OR NEW.titulo IS DISTINCT FROM OLD.titulo OR NEW.texto IS DISTINCT FROM OLD.texto
+       OR NEW.contenido IS DISTINCT FROM OLD.contenido OR NEW.fecha IS DISTINCT FROM OLD.fecha
+       OR NEW.user_id IS DISTINCT FROM OLD.user_id THEN
+        RAISE EXCEPTION 'REGISTRO_INMUTABLE: Un documento médico emitido no se edita; anúlelo y emita otro.';
+    END IF;
+    RETURN NEW;
+END; $$;
+
+
+--
+-- Name: fn_cli_inmutable(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_cli_inmutable() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RAISE EXCEPTION 'REGISTRO_INMUTABLE: Este registro clínico no se puede modificar ni eliminar.';
+END; $$;
+
+
+--
+-- Name: fn_cli_odontograma_inmutable(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_cli_odontograma_inmutable() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'REGISTRO_INMUTABLE: Un hallazgo del odontograma no se puede eliminar; retírelo con un motivo.';
+    END IF;
+    IF OLD.estado = 'retirado' THEN
+        RAISE EXCEPTION 'REGISTRO_INMUTABLE: El hallazgo ya está retirado.';
+    END IF;
+    IF NEW.empresa_id IS DISTINCT FROM OLD.empresa_id OR NEW.paciente_id IS DISTINCT FROM OLD.paciente_id
+       OR NEW.consulta_id IS DISTINCT FROM OLD.consulta_id OR NEW.funcionario_id IS DISTINCT FROM OLD.funcionario_id
+       OR NEW.pieza IS DISTINCT FROM OLD.pieza OR NEW.superficies IS DISTINCT FROM OLD.superficies
+       OR NEW.tipo IS DISTINCT FROM OLD.tipo OR NEW.notas IS DISTINCT FROM OLD.notas OR NEW.fecha IS DISTINCT FROM OLD.fecha
+       OR NEW.user_id IS DISTINCT FROM OLD.user_id THEN
+        RAISE EXCEPTION 'REGISTRO_INMUTABLE: Un hallazgo registrado no se edita; retírelo y registre otro.';
+    END IF;
+    RETURN NEW;
+END; $$;
+
+
+--
+-- Name: fn_cli_pieza_valida(smallint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_cli_pieza_valida(p smallint) RETURNS boolean
+    LANGUAGE sql IMMUTABLE
+    AS $$
+    SELECT p IS NOT NULL AND (
+           (p / 10 IN (1, 2, 3, 4) AND p % 10 BETWEEN 1 AND 8)
+        OR (p / 10 IN (5, 6, 7, 8) AND p % 10 BETWEEN 1 AND 5));
+$$;
+
+
+--
+-- Name: fn_cli_plan_poner_items(bigint, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_cli_plan_poner_items(p_plan_id bigint, p_items jsonb) RETURNS void
+    LANGUAGE plpgsql
+    SET search_path TO 'public', 'pg_temp'
+    AS $_$
+DECLARE
+    v_it  JSONB;
+    v_n   INT := 0;
+    v_sup VARCHAR;
+    v_pz  SMALLINT;
+BEGIN
+    IF p_items IS NULL OR jsonb_typeof(p_items) <> 'array' OR jsonb_array_length(p_items) = 0 THEN
+        RAISE EXCEPTION 'DENTAL_INVALIDO: El plan necesita al menos un procedimiento.';
+    END IF;
+    DELETE FROM cli_plan_items WHERE plan_id = p_plan_id;
+    FOR v_it IN SELECT * FROM jsonb_array_elements(p_items) LOOP
+        v_n := v_n + 1;
+        v_sup := COALESCE(v_it->>'superficies', '');
+        v_pz  := NULLIF(v_it->>'pieza', '')::SMALLINT;
+        IF btrim(COALESCE(v_it->>'procedimiento', '')) = '' THEN
+            RAISE EXCEPTION 'DENTAL_INVALIDO: Cada procedimiento necesita una descripción.';
+        END IF;
+        IF v_pz IS NOT NULL AND NOT fn_cli_pieza_valida(v_pz) THEN
+            RAISE EXCEPTION 'DENTAL_INVALIDO: La pieza dental % no es válida.', v_pz;
+        END IF;
+        IF v_sup !~ '^[MDVLO]{0,5}$' THEN
+            RAISE EXCEPTION 'DENTAL_INVALIDO: Las superficies no son válidas.';
+        END IF;
+        IF v_pz IS NULL AND v_sup <> '' THEN
+            RAISE EXCEPTION 'DENTAL_INVALIDO: Las superficies requieren indicar la pieza.';
+        END IF;
+        IF COALESCE((v_it->>'precio')::NUMERIC, -1) < 0 THEN
+            RAISE EXCEPTION 'DENTAL_INVALIDO: El precio de cada procedimiento debe ser cero o mayor.';
+        END IF;
+        INSERT INTO cli_plan_items (plan_id, orden, pieza, superficies, procedimiento, precio)
+        VALUES (p_plan_id, v_n, v_pz, v_sup, left(btrim(v_it->>'procedimiento'), 200), round((v_it->>'precio')::NUMERIC, 2));
+    END LOOP;
+END; $_$;
+
+
+--
+-- Name: fn_cli_vet_inmutable(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_cli_vet_inmutable() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'REGISTRO_INMUTABLE: Un registro veterinario no se puede eliminar; anúlelo con un motivo.';
+    END IF;
+    IF OLD.estado = 'anulado' THEN
+        RAISE EXCEPTION 'REGISTRO_INMUTABLE: El registro ya está anulado.';
+    END IF;
+    IF (to_jsonb(NEW) - 'estado' - 'anulado_at' - 'anulado_por' - 'anulado_motivo')
+       IS DISTINCT FROM (to_jsonb(OLD) - 'estado' - 'anulado_at' - 'anulado_por' - 'anulado_motivo') THEN
+        RAISE EXCEPTION 'REGISTRO_INMUTABLE: Un registro veterinario no se edita; anúlelo y registre otro.';
+    END IF;
+    RETURN NEW;
+END; $$;
+
+
+--
+-- Name: fn_cli_vet_validar(bigint, bigint, bigint, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_cli_vet_validar(p_empresa_id bigint, p_paciente_id bigint, p_consulta_id bigint, p_funcionario_id bigint, p_limite_func bigint) RETURNS void
+    LANGUAGE plpgsql
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    PERFORM 1 FROM cli_pacientes p
+     WHERE p.id = p_paciente_id AND p.empresa_id = p_empresa_id AND p.deleted_at IS NULL
+       AND (p_limite_func IS NULL OR p.funcionario_id = p_limite_func
+            OR EXISTS (SELECT 1 FROM cli_consultas k WHERE k.paciente_id = p.id AND k.funcionario_id = p_limite_func AND k.deleted_at IS NULL));
+    IF NOT FOUND THEN RAISE EXCEPTION 'PACIENTE_NO_ENCONTRADO: El paciente no existe.'; END IF;
+    IF NOT EXISTS (SELECT 1 FROM cli_pacientes p WHERE p.id = p_paciente_id AND p.tipo = 'animal') THEN
+        RAISE EXCEPTION 'VET_INVALIDO: El módulo de veterinaria solo aplica a pacientes animales.';
+    END IF;
+    IF p_consulta_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM cli_consultas k WHERE k.id = p_consulta_id AND k.empresa_id = p_empresa_id AND k.paciente_id = p_paciente_id AND k.deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'CONSULTA_NO_ENCONTRADA: La consulta indicada no pertenece a este paciente.';
+    END IF;
+    IF p_funcionario_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM funcionarios f WHERE f.id = p_funcionario_id AND f.empresa_id = p_empresa_id AND f.deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'FUNCIONARIO_NO_ENCONTRADO: El profesional no existe.';
+    END IF;
+END; $$;
 
 
 --
@@ -2543,6 +2716,1273 @@ CREATE FUNCTION public.sp_cierre_caja_list(p_empresa_id bigint, p_caja_id bigint
                 LIMIT p_per_page OFFSET (p_page - 1) * p_per_page;
             END;
             $$;
+
+
+--
+-- Name: sp_cli_acceso_list(bigint, bigint, integer, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_acceso_list(p_empresa_id bigint, p_paciente_id bigint DEFAULT NULL::bigint, p_limit integer DEFAULT 100, p_offset integer DEFAULT 0) RETURNS TABLE(id bigint, paciente_id bigint, paciente_nombre character varying, consulta_id bigint, user_id bigint, accion character varying, ip character varying, created_at timestamp without time zone, total bigint)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT a.id, a.paciente_id, btrim(p.nombre || ' ' || COALESCE(p.apellidos, ''))::VARCHAR, a.consulta_id, a.user_id,
+           a.accion, a.ip, a.created_at, COUNT(*) OVER ()
+    FROM cli_accesos a
+    JOIN cli_pacientes p ON p.id = a.paciente_id
+    WHERE a.empresa_id = p_empresa_id AND (p_paciente_id IS NULL OR a.paciente_id = p_paciente_id)
+    ORDER BY a.created_at DESC, a.id DESC
+    LIMIT LEAST(GREATEST(COALESCE(p_limit, 100), 1), 500) OFFSET GREATEST(COALESCE(p_offset, 0), 0);
+END; $$;
+
+
+--
+-- Name: sp_cli_acceso_registrar(bigint, bigint, bigint, bigint, character varying, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_acceso_registrar(p_empresa_id bigint, p_paciente_id bigint, p_consulta_id bigint, p_user_id bigint, p_accion character varying, p_ip character varying) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    INSERT INTO cli_accesos (empresa_id, paciente_id, consulta_id, user_id, accion, ip)
+    VALUES (p_empresa_id, p_paciente_id, p_consulta_id, p_user_id, p_accion, left(p_ip, 45));
+END; $$;
+
+
+--
+-- Name: sp_cli_adjunto_get(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_adjunto_get(p_empresa_id bigint, p_id bigint) RETURNS TABLE(id bigint, paciente_id bigint, consulta_id bigint, titulo character varying, nombre character varying, clave character varying, mime character varying)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT a.id, a.paciente_id, a.consulta_id, a.titulo, a.nombre, a.clave, a.mime
+    FROM cli_adjuntos a
+    WHERE a.id = p_id AND a.empresa_id = p_empresa_id AND a.deleted_at IS NULL;
+END; $$;
+
+
+--
+-- Name: sp_cli_adjunto_list(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_adjunto_list(p_empresa_id bigint, p_paciente_id bigint) RETURNS TABLE(id bigint, paciente_id bigint, consulta_id bigint, tipo character varying, titulo character varying, nombre character varying, mime character varying, tamano_bytes bigint, user_id bigint, created_at timestamp without time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT a.id, a.paciente_id, a.consulta_id, a.tipo, a.titulo, a.nombre, a.mime, a.tamano_bytes, a.user_id, a.created_at
+    FROM cli_adjuntos a
+    WHERE a.empresa_id = p_empresa_id AND a.paciente_id = p_paciente_id AND a.deleted_at IS NULL
+    ORDER BY a.created_at DESC, a.id DESC;
+END; $$;
+
+
+--
+-- Name: sp_cli_adjunto_registrar(bigint, bigint, bigint, character varying, character varying, character varying, character varying, character varying, bigint, character varying, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_adjunto_registrar(p_empresa_id bigint, p_paciente_id bigint, p_consulta_id bigint, p_tipo character varying, p_titulo character varying, p_nombre character varying, p_clave character varying, p_mime character varying, p_tamano bigint, p_sha256 character varying, p_user_id bigint) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_id BIGINT;
+BEGIN
+    PERFORM 1 FROM cli_pacientes p WHERE p.id = p_paciente_id AND p.empresa_id = p_empresa_id AND p.deleted_at IS NULL;
+    IF NOT FOUND THEN RAISE EXCEPTION 'PACIENTE_NO_ENCONTRADO: El paciente no existe.'; END IF;
+    IF p_consulta_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM cli_consultas k WHERE k.id = p_consulta_id AND k.empresa_id = p_empresa_id AND k.paciente_id = p_paciente_id AND k.deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'CONSULTA_NO_ENCONTRADA: La consulta indicada no pertenece a este paciente.';
+    END IF;
+
+    INSERT INTO cli_adjuntos (empresa_id, paciente_id, consulta_id, tipo, titulo, nombre, clave, mime, tamano_bytes, sha256, user_id)
+    VALUES (p_empresa_id, p_paciente_id, p_consulta_id, p_tipo, btrim(p_titulo), p_nombre, p_clave, p_mime, p_tamano, p_sha256, p_user_id)
+    RETURNING cli_adjuntos.id INTO v_id;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_cli_adjunto_soft_delete(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_adjunto_soft_delete(p_empresa_id bigint, p_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    UPDATE cli_adjuntos SET deleted_at = NOW(), updated_at = NOW() WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
+    RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: sp_cli_antecedente_create(bigint, bigint, character varying, character varying, text, date, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_antecedente_create(p_empresa_id bigint, p_paciente_id bigint, p_tipo character varying, p_descripcion character varying, p_detalle text, p_desde date, p_vigente boolean) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_id BIGINT;
+BEGIN
+    PERFORM 1 FROM cli_pacientes p WHERE p.id = p_paciente_id AND p.empresa_id = p_empresa_id AND p.deleted_at IS NULL;
+    IF NOT FOUND THEN RAISE EXCEPTION 'PACIENTE_NO_ENCONTRADO: El paciente no existe.'; END IF;
+
+    INSERT INTO cli_antecedentes (empresa_id, paciente_id, tipo, descripcion, detalle, desde, vigente)
+    VALUES (p_empresa_id, p_paciente_id, p_tipo, btrim(p_descripcion), NULLIF(btrim(COALESCE(p_detalle, '')), ''), p_desde, COALESCE(p_vigente, TRUE))
+    RETURNING cli_antecedentes.id INTO v_id;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_cli_antecedente_list(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_antecedente_list(p_empresa_id bigint, p_paciente_id bigint) RETURNS TABLE(id bigint, paciente_id bigint, tipo character varying, descripcion character varying, detalle text, desde date, vigente boolean, created_at timestamp without time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT a.id, a.paciente_id, a.tipo, a.descripcion, a.detalle, a.desde, a.vigente, a.created_at
+    FROM cli_antecedentes a
+    WHERE a.empresa_id = p_empresa_id AND a.paciente_id = p_paciente_id AND a.deleted_at IS NULL
+    ORDER BY (a.tipo = 'alergia') DESC, a.vigente DESC, a.tipo, lower(a.descripcion), a.id;
+END; $$;
+
+
+--
+-- Name: sp_cli_antecedente_soft_delete(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_antecedente_soft_delete(p_id bigint, p_empresa_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    UPDATE cli_antecedentes SET deleted_at = NOW(), updated_at = NOW()
+     WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
+    RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: sp_cli_antecedente_update(bigint, bigint, character varying, character varying, text, date, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_antecedente_update(p_id bigint, p_empresa_id bigint, p_tipo character varying, p_descripcion character varying, p_detalle text, p_desde date, p_vigente boolean) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    UPDATE cli_antecedentes SET tipo = p_tipo, descripcion = btrim(p_descripcion),
+           detalle = NULLIF(btrim(COALESCE(p_detalle, '')), ''), desde = p_desde, vigente = COALESCE(p_vigente, TRUE), updated_at = NOW()
+     WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NULL;
+    RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: sp_cli_consulta_adendum_crear(bigint, bigint, text, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_consulta_adendum_crear(p_empresa_id bigint, p_consulta_id bigint, p_texto text, p_user_id bigint, p_limite_func bigint DEFAULT NULL::bigint) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_estado VARCHAR; v_id BIGINT;
+BEGIN
+    SELECT k.estado INTO v_estado FROM cli_consultas k
+     WHERE k.id = p_consulta_id AND k.empresa_id = p_empresa_id AND k.deleted_at IS NULL
+       AND (p_limite_func IS NULL OR k.funcionario_id = p_limite_func);
+    IF NOT FOUND THEN RETURN NULL; END IF;
+    IF v_estado <> 'firmada' THEN
+        RAISE EXCEPTION 'CONSULTA_EN_BORRADOR: La consulta aún está en borrador; edítela directamente. El adendum es solo para consultas firmadas.';
+    END IF;
+
+    INSERT INTO cli_consulta_adendums (empresa_id, consulta_id, texto, user_id)
+    VALUES (p_empresa_id, p_consulta_id, btrim(p_texto), p_user_id)
+    RETURNING cli_consulta_adendums.id INTO v_id;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_cli_consulta_cobrada(bigint, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_consulta_cobrada(p_empresa_id bigint, p_id bigint, p_documento_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    PERFORM 1 FROM documentos_electronicos d WHERE d.id = p_documento_id AND d.empresa_id = p_empresa_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'DOCUMENTO_NO_ENCONTRADO: El documento indicado no existe.';
+    END IF;
+    IF EXISTS (SELECT 1 FROM cli_consultas k WHERE k.documento_id = p_documento_id) THEN
+        RAISE EXCEPTION 'DOCUMENTO_YA_LIGADO: El documento ya está ligado a otra consulta.';
+    END IF;
+
+    PERFORM 1 FROM cli_consultas k WHERE k.id = p_id AND k.empresa_id = p_empresa_id AND k.deleted_at IS NULL;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    PERFORM 1 FROM cli_consultas k WHERE k.id = p_id AND k.estado = 'firmada' AND k.documento_id IS NULL;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'CONSULTA_NO_COBRABLE: Solo se cobra una consulta firmada que no haya sido cobrada.';
+    END IF;
+
+    UPDATE cli_consultas SET documento_id = p_documento_id, cobrada_at = NOW(), updated_at = NOW() WHERE id = p_id;
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_cli_consulta_create(bigint, bigint, bigint, bigint, bigint, timestamp without time zone, character varying, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_consulta_create(p_empresa_id bigint, p_sucursal_id bigint, p_paciente_id bigint, p_funcionario_id bigint, p_agenda_evento_id bigint, p_fecha timestamp without time zone, p_motivo character varying, p_user_id bigint) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_id BIGINT;
+BEGIN
+    PERFORM 1 FROM cli_pacientes p WHERE p.id = p_paciente_id AND p.empresa_id = p_empresa_id AND p.deleted_at IS NULL AND p.is_active;
+    IF NOT FOUND THEN RAISE EXCEPTION 'PACIENTE_NO_ENCONTRADO: El paciente no existe o está inactivo.'; END IF;
+
+    IF p_funcionario_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM funcionarios f WHERE f.id = p_funcionario_id AND f.empresa_id = p_empresa_id AND f.deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'FUNCIONARIO_NO_ENCONTRADO: El profesional indicado no existe.';
+    END IF;
+
+    IF p_agenda_evento_id IS NOT NULL THEN
+        PERFORM 1 FROM agenda_eventos e WHERE e.id = p_agenda_evento_id AND e.empresa_id = p_empresa_id AND e.deleted_at IS NULL;
+        IF NOT FOUND THEN RAISE EXCEPTION 'CITA_NO_ENCONTRADA: La cita indicada no existe.'; END IF;
+        IF EXISTS (SELECT 1 FROM cli_consultas k WHERE k.agenda_evento_id = p_agenda_evento_id AND k.deleted_at IS NULL) THEN
+            RAISE EXCEPTION 'CITA_YA_ATENDIDA: La cita ya tiene una consulta.';
+        END IF;
+    END IF;
+
+    INSERT INTO cli_consultas (empresa_id, sucursal_id, paciente_id, funcionario_id, agenda_evento_id, fecha, motivo, user_id)
+    VALUES (p_empresa_id, p_sucursal_id, p_paciente_id, p_funcionario_id, p_agenda_evento_id, COALESCE(p_fecha, NOW()),
+            NULLIF(btrim(COALESCE(p_motivo, '')), ''), p_user_id)
+    RETURNING cli_consultas.id INTO v_id;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_cli_consulta_descartar(bigint, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_consulta_descartar(p_empresa_id bigint, p_id bigint, p_limite_func bigint DEFAULT NULL::bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_estado VARCHAR;
+BEGIN
+    SELECT k.estado INTO v_estado FROM cli_consultas k
+     WHERE k.id = p_id AND k.empresa_id = p_empresa_id AND k.deleted_at IS NULL
+       AND (p_limite_func IS NULL OR k.funcionario_id = p_limite_func);
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    IF v_estado <> 'borrador' THEN
+        RAISE EXCEPTION 'CONSULTA_FIRMADA: Una consulta firmada forma parte del expediente y no se puede eliminar.';
+    END IF;
+    UPDATE cli_consultas SET deleted_at = NOW(), updated_at = NOW() WHERE id = p_id;
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_cli_consulta_detalle(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_consulta_detalle(p_empresa_id bigint, p_consulta_id bigint) RETURNS TABLE(parte character varying, id bigint, codigo character varying, descripcion character varying, principal boolean, tipo character varying, item_id bigint, cantidad numeric, precio_unitario numeric, texto text, user_id bigint, created_at timestamp without time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 'diagnostico'::VARCHAR, d.id, d.codigo::VARCHAR, d.descripcion, d.principal, NULL::VARCHAR, NULL::BIGINT,
+           NULL::NUMERIC, NULL::NUMERIC, NULL::TEXT, NULL::BIGINT, d.created_at
+    FROM cli_consulta_diagnosticos d WHERE d.empresa_id = p_empresa_id AND d.consulta_id = p_consulta_id
+    UNION ALL
+    SELECT 'servicio', s.id, NULL, s.descripcion, NULL, s.tipo, s.item_id, s.cantidad, s.precio_unitario, NULL, NULL, s.created_at
+    FROM cli_consulta_servicios s WHERE s.empresa_id = p_empresa_id AND s.consulta_id = p_consulta_id
+    UNION ALL
+    SELECT 'adendum', a.id, NULL, NULL, NULL, NULL, NULL, NULL, NULL, a.texto, a.user_id, a.created_at
+    FROM cli_consulta_adendums a WHERE a.empresa_id = p_empresa_id AND a.consulta_id = p_consulta_id
+    ORDER BY 1, 12, 2;
+END; $$;
+
+
+--
+-- Name: sp_cli_consulta_diagnosticos_set(bigint, bigint, jsonb, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_consulta_diagnosticos_set(p_empresa_id bigint, p_consulta_id bigint, p_items jsonb, p_limite_func bigint DEFAULT NULL::bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_estado VARCHAR;
+BEGIN
+    SELECT k.estado INTO v_estado FROM cli_consultas k
+     WHERE k.id = p_consulta_id AND k.empresa_id = p_empresa_id AND k.deleted_at IS NULL
+       AND (p_limite_func IS NULL OR k.funcionario_id = p_limite_func);
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    IF v_estado <> 'borrador' THEN
+        RAISE EXCEPTION 'CONSULTA_FIRMADA: La consulta ya está firmada y no se puede editar. Agregue un adendum para corregirla.';
+    END IF;
+
+    DELETE FROM cli_consulta_diagnosticos WHERE consulta_id = p_consulta_id;
+    INSERT INTO cli_consulta_diagnosticos (empresa_id, consulta_id, codigo, descripcion, principal)
+    SELECT p_empresa_id, p_consulta_id, NULLIF(upper(btrim(COALESCE(x->>'codigo', ''))), ''), btrim(x->>'descripcion'),
+           COALESCE((x->>'principal')::BOOLEAN, FALSE)
+    FROM jsonb_array_elements(COALESCE(p_items, '[]'::jsonb)) x;
+    UPDATE cli_consultas SET updated_at = NOW() WHERE id = p_consulta_id;
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_cli_consulta_firmar(bigint, bigint, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_consulta_firmar(p_empresa_id bigint, p_id bigint, p_user_id bigint, p_limite_func bigint DEFAULT NULL::bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_k cli_consultas%ROWTYPE;
+BEGIN
+    SELECT * INTO v_k FROM cli_consultas k
+     WHERE k.id = p_id AND k.empresa_id = p_empresa_id AND k.deleted_at IS NULL
+       AND (p_limite_func IS NULL OR k.funcionario_id = p_limite_func)
+     FOR UPDATE;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    IF v_k.estado = 'firmada' THEN
+        RAISE EXCEPTION 'CONSULTA_FIRMADA: La consulta ya está firmada.';
+    END IF;
+    IF v_k.motivo IS NULL AND v_k.subjetivo IS NULL AND v_k.objetivo IS NULL AND v_k.analisis IS NULL AND v_k.plan IS NULL THEN
+        RAISE EXCEPTION 'CONSULTA_VACIA: No se puede firmar una consulta sin motivo ni notas.';
+    END IF;
+
+    UPDATE cli_consultas SET estado = 'firmada', firmada_por = p_user_id, firmada_at = NOW(), updated_at = NOW() WHERE id = p_id;
+
+    -- La cita ligada queda completada.
+    IF v_k.agenda_evento_id IS NOT NULL THEN
+        UPDATE agenda_eventos SET estado = 'completado', updated_at = NOW()
+         WHERE id = v_k.agenda_evento_id AND empresa_id = p_empresa_id AND estado IN ('agendado', 'confirmado');
+    END IF;
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_cli_consulta_get(bigint, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_consulta_get(p_empresa_id bigint, p_id bigint, p_limite_func bigint DEFAULT NULL::bigint) RETURNS TABLE(id bigint, paciente_id bigint, sucursal_id bigint, funcionario_id bigint, funcionario_nombre character varying, agenda_evento_id bigint, fecha timestamp without time zone, motivo character varying, subjetivo text, objetivo text, analisis text, plan text, signos_vitales jsonb, estado character varying, firmada_por bigint, firmada_at timestamp without time zone, documento_id bigint, cobrada_at timestamp without time zone, created_at timestamp without time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT k.id, k.paciente_id, k.sucursal_id, k.funcionario_id, f.name::VARCHAR, k.agenda_evento_id, k.fecha, k.motivo,
+           k.subjetivo, k.objetivo, k.analisis, k.plan, k.signos_vitales, k.estado, k.firmada_por, k.firmada_at,
+           k.documento_id, k.cobrada_at, k.created_at
+    FROM cli_consultas k
+    LEFT JOIN funcionarios f ON f.id = k.funcionario_id
+    WHERE k.id = p_id AND k.empresa_id = p_empresa_id AND k.deleted_at IS NULL
+      AND (p_limite_func IS NULL OR k.funcionario_id = p_limite_func);
+END; $$;
+
+
+--
+-- Name: sp_cli_consulta_list(bigint, bigint, bigint, character varying, date, date, integer, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_consulta_list(p_empresa_id bigint, p_paciente_id bigint DEFAULT NULL::bigint, p_limite_func bigint DEFAULT NULL::bigint, p_estado character varying DEFAULT NULL::character varying, p_desde date DEFAULT NULL::date, p_hasta date DEFAULT NULL::date, p_limit integer DEFAULT 50, p_offset integer DEFAULT 0) RETURNS TABLE(id bigint, paciente_id bigint, paciente_nombre character varying, paciente_tipo character varying, funcionario_id bigint, funcionario_nombre character varying, fecha timestamp without time zone, motivo character varying, estado character varying, firmada_at timestamp without time zone, documento_id bigint, cobrada_at timestamp without time zone, agenda_evento_id bigint, total bigint)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT k.id, k.paciente_id, btrim(p.nombre || ' ' || COALESCE(p.apellidos, ''))::VARCHAR, p.tipo, k.funcionario_id,
+           f.name::VARCHAR, k.fecha, k.motivo, k.estado, k.firmada_at, k.documento_id, k.cobrada_at, k.agenda_evento_id,
+           COUNT(*) OVER ()
+    FROM cli_consultas k
+    JOIN cli_pacientes p ON p.id = k.paciente_id
+    LEFT JOIN funcionarios f ON f.id = k.funcionario_id
+    WHERE k.empresa_id = p_empresa_id AND k.deleted_at IS NULL
+      AND (p_paciente_id IS NULL OR k.paciente_id = p_paciente_id)
+      AND (p_limite_func IS NULL OR k.funcionario_id = p_limite_func)
+      AND (p_estado IS NULL OR k.estado = p_estado)
+      AND (p_desde IS NULL OR k.fecha >= p_desde)
+      AND (p_hasta IS NULL OR k.fecha < (p_hasta + 1))
+    ORDER BY k.fecha DESC, k.id DESC
+    LIMIT LEAST(GREATEST(COALESCE(p_limit, 50), 1), 200) OFFSET GREATEST(COALESCE(p_offset, 0), 0);
+END; $$;
+
+
+--
+-- Name: sp_cli_consulta_servicios_set(bigint, bigint, jsonb, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_consulta_servicios_set(p_empresa_id bigint, p_consulta_id bigint, p_items jsonb, p_limite_func bigint DEFAULT NULL::bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_cobrada TIMESTAMP;
+BEGIN
+    SELECT k.cobrada_at INTO v_cobrada FROM cli_consultas k
+     WHERE k.id = p_consulta_id AND k.empresa_id = p_empresa_id AND k.deleted_at IS NULL
+       AND (p_limite_func IS NULL OR k.funcionario_id = p_limite_func);
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    IF v_cobrada IS NOT NULL THEN
+        RAISE EXCEPTION 'CONSULTA_COBRADA: La consulta ya fue cobrada; no se puede cambiar lo que se cobra.';
+    END IF;
+
+    DELETE FROM cli_consulta_servicios WHERE consulta_id = p_consulta_id;
+    INSERT INTO cli_consulta_servicios (empresa_id, consulta_id, tipo, item_id, descripcion, cantidad, precio_unitario)
+    SELECT p_empresa_id, p_consulta_id, x->>'tipo', (x->>'item_id')::BIGINT,
+           COALESCE(NULLIF(btrim(x->>'descripcion'), ''),
+                    (SELECT s.name FROM servicios s WHERE (x->>'tipo') = 'Servicio' AND s.id = (x->>'item_id')::BIGINT AND s.empresa_id = p_empresa_id),
+                    (SELECT pr.name FROM productos pr WHERE (x->>'tipo') = 'Producto' AND pr.id = (x->>'item_id')::BIGINT AND pr.empresa_id = p_empresa_id),
+                    'Servicio'),
+           (x->>'cantidad')::NUMERIC, (x->>'precio_unitario')::NUMERIC
+    FROM jsonb_array_elements(COALESCE(p_items, '[]'::jsonb)) x
+    WHERE CASE x->>'tipo'
+              WHEN 'Servicio' THEN EXISTS (SELECT 1 FROM servicios s WHERE s.id = (x->>'item_id')::BIGINT AND s.empresa_id = p_empresa_id AND s.deleted_at IS NULL)
+              WHEN 'Producto' THEN EXISTS (SELECT 1 FROM productos pr WHERE pr.id = (x->>'item_id')::BIGINT AND pr.empresa_id = p_empresa_id AND pr.deleted_at IS NULL)
+              ELSE FALSE END;
+    UPDATE cli_consultas SET updated_at = NOW() WHERE id = p_consulta_id;
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_cli_consulta_update(bigint, bigint, timestamp without time zone, character varying, text, text, text, text, jsonb, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_consulta_update(p_id bigint, p_empresa_id bigint, p_fecha timestamp without time zone, p_motivo character varying, p_subjetivo text, p_objetivo text, p_analisis text, p_plan text, p_signos jsonb, p_funcionario_id bigint, p_limite_func bigint DEFAULT NULL::bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_estado VARCHAR;
+BEGIN
+    SELECT k.estado INTO v_estado FROM cli_consultas k
+     WHERE k.id = p_id AND k.empresa_id = p_empresa_id AND k.deleted_at IS NULL
+       AND (p_limite_func IS NULL OR k.funcionario_id = p_limite_func);
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    IF v_estado <> 'borrador' THEN
+        RAISE EXCEPTION 'CONSULTA_FIRMADA: La consulta ya está firmada y no se puede editar. Agregue un adendum para corregirla.';
+    END IF;
+    IF p_funcionario_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM funcionarios f WHERE f.id = p_funcionario_id AND f.empresa_id = p_empresa_id AND f.deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'FUNCIONARIO_NO_ENCONTRADO: El profesional indicado no existe.';
+    END IF;
+
+    UPDATE cli_consultas SET
+        fecha = COALESCE(p_fecha, fecha), motivo = NULLIF(btrim(COALESCE(p_motivo, '')), ''),
+        subjetivo = NULLIF(btrim(COALESCE(p_subjetivo, '')), ''), objetivo = NULLIF(btrim(COALESCE(p_objetivo, '')), ''),
+        analisis = NULLIF(btrim(COALESCE(p_analisis, '')), ''), plan = NULLIF(btrim(COALESCE(p_plan, '')), ''),
+        signos_vitales = COALESCE(p_signos, '{}'::jsonb), funcionario_id = p_funcionario_id, updated_at = NOW()
+     WHERE id = p_id;
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_cli_documento_anular(bigint, bigint, character varying, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_documento_anular(p_empresa_id bigint, p_id bigint, p_motivo character varying, p_user_id bigint, p_limite_func bigint DEFAULT NULL::bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_estado VARCHAR;
+BEGIN
+    IF btrim(COALESCE(p_motivo, '')) = '' THEN
+        RAISE EXCEPTION 'DOC_CLINICO_INVALIDO: Indique el motivo de la anulación.';
+    END IF;
+    SELECT d.estado INTO v_estado
+      FROM cli_documentos d
+      JOIN cli_pacientes p ON p.id = d.paciente_id
+     WHERE d.id = p_id AND d.empresa_id = p_empresa_id
+       AND (p_limite_func IS NULL OR p.funcionario_id = p_limite_func
+            OR EXISTS (SELECT 1 FROM cli_consultas k WHERE k.paciente_id = p.id AND k.funcionario_id = p_limite_func AND k.deleted_at IS NULL))
+     FOR UPDATE OF d;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    IF v_estado = 'anulado' THEN RAISE EXCEPTION 'DOC_CLINICO_ANULADO: El documento ya está anulado.'; END IF;
+
+    UPDATE cli_documentos SET estado = 'anulado', anulado_at = NOW(), anulado_por = p_user_id, anulado_motivo = btrim(p_motivo)
+     WHERE id = p_id AND empresa_id = p_empresa_id;
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_cli_documento_crear(bigint, bigint, bigint, bigint, character varying, character varying, text, jsonb, timestamp without time zone, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_documento_crear(p_empresa_id bigint, p_paciente_id bigint, p_consulta_id bigint, p_funcionario_id bigint, p_tipo character varying, p_titulo character varying, p_texto text, p_contenido jsonb, p_fecha timestamp without time zone, p_user_id bigint, p_limite_func bigint DEFAULT NULL::bigint) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_id     BIGINT;
+    v_numero INT;
+BEGIN
+    PERFORM 1 FROM cli_pacientes p
+     WHERE p.id = p_paciente_id AND p.empresa_id = p_empresa_id AND p.deleted_at IS NULL
+       AND (p_limite_func IS NULL OR p.funcionario_id = p_limite_func
+            OR EXISTS (SELECT 1 FROM cli_consultas k WHERE k.paciente_id = p.id AND k.funcionario_id = p_limite_func AND k.deleted_at IS NULL));
+    IF NOT FOUND THEN RAISE EXCEPTION 'PACIENTE_NO_ENCONTRADO: El paciente no existe.'; END IF;
+
+    IF p_consulta_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM cli_consultas k WHERE k.id = p_consulta_id AND k.empresa_id = p_empresa_id AND k.paciente_id = p_paciente_id AND k.deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'CONSULTA_NO_ENCONTRADA: La consulta indicada no pertenece a este paciente.';
+    END IF;
+    IF p_funcionario_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM funcionarios f WHERE f.id = p_funcionario_id AND f.empresa_id = p_empresa_id AND f.deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'FUNCIONARIO_NO_ENCONTRADO: El profesional no existe.';
+    END IF;
+    IF p_contenido IS NULL OR jsonb_typeof(p_contenido) <> 'object' THEN
+        RAISE EXCEPTION 'DOC_CLINICO_INVALIDO: El contenido del documento no es válido.';
+    END IF;
+    IF btrim(COALESCE(p_titulo, '')) = '' THEN
+        RAISE EXCEPTION 'DOC_CLINICO_INVALIDO: El documento necesita un título.';
+    END IF;
+
+    -- Consecutivo por empresa y tipo; el candado evita que dos emisiones simultáneas tomen el mismo número.
+    PERFORM pg_advisory_xact_lock(hashtext('cli_documentos:' || p_empresa_id::text || ':' || p_tipo));
+    SELECT COALESCE(MAX(d.numero), 0) + 1 INTO v_numero FROM cli_documentos d WHERE d.empresa_id = p_empresa_id AND d.tipo = p_tipo;
+
+    INSERT INTO cli_documentos (empresa_id, paciente_id, consulta_id, funcionario_id, tipo, numero, titulo, texto, contenido, fecha, user_id)
+    VALUES (p_empresa_id, p_paciente_id, p_consulta_id, p_funcionario_id, p_tipo, v_numero, btrim(p_titulo),
+            NULLIF(btrim(COALESCE(p_texto, '')), ''), p_contenido, COALESCE(p_fecha, NOW()), p_user_id)
+    RETURNING cli_documentos.id INTO v_id;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_cli_documento_get(bigint, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_documento_get(p_empresa_id bigint, p_id bigint, p_limite_func bigint DEFAULT NULL::bigint) RETURNS TABLE(id bigint, paciente_id bigint, paciente_nombre character varying, paciente_tipo character varying, paciente_identificacion character varying, paciente_nacimiento date, paciente_sexo character varying, consulta_id bigint, funcionario_id bigint, funcionario_nombre character varying, funcionario_identificacion character varying, tipo character varying, numero integer, titulo character varying, texto text, contenido jsonb, fecha timestamp without time zone, estado character varying, anulado_at timestamp without time zone, anulado_motivo character varying, user_id bigint, created_at timestamp without time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT d.id, d.paciente_id, btrim(p.nombre || ' ' || COALESCE(p.apellidos, ''))::VARCHAR, p.tipo, p.identificacion::VARCHAR,
+           p.fecha_nacimiento, p.sexo::VARCHAR, d.consulta_id, d.funcionario_id, f.name::VARCHAR, f.tax_id::VARCHAR,
+           d.tipo, d.numero, d.titulo, d.texto, d.contenido, d.fecha, d.estado, d.anulado_at, d.anulado_motivo,
+           d.user_id, d.created_at
+    FROM cli_documentos d
+    JOIN cli_pacientes p ON p.id = d.paciente_id
+    LEFT JOIN funcionarios f ON f.id = d.funcionario_id
+    WHERE d.id = p_id AND d.empresa_id = p_empresa_id
+      AND (p_limite_func IS NULL OR p.funcionario_id = p_limite_func
+           OR EXISTS (SELECT 1 FROM cli_consultas k WHERE k.paciente_id = p.id AND k.funcionario_id = p_limite_func AND k.deleted_at IS NULL));
+END; $$;
+
+
+--
+-- Name: sp_cli_documento_list(bigint, bigint, bigint, character varying, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_documento_list(p_empresa_id bigint, p_paciente_id bigint, p_consulta_id bigint DEFAULT NULL::bigint, p_tipo character varying DEFAULT NULL::character varying, p_limite_func bigint DEFAULT NULL::bigint) RETURNS TABLE(id bigint, paciente_id bigint, consulta_id bigint, funcionario_id bigint, funcionario_nombre character varying, tipo character varying, numero integer, titulo character varying, fecha timestamp without time zone, estado character varying, anulado_at timestamp without time zone, user_id bigint, created_at timestamp without time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT d.id, d.paciente_id, d.consulta_id, d.funcionario_id, f.name::VARCHAR, d.tipo, d.numero, d.titulo, d.fecha,
+           d.estado, d.anulado_at, d.user_id, d.created_at
+    FROM cli_documentos d
+    JOIN cli_pacientes p ON p.id = d.paciente_id
+    LEFT JOIN funcionarios f ON f.id = d.funcionario_id
+    WHERE d.empresa_id = p_empresa_id AND d.paciente_id = p_paciente_id
+      AND (p_consulta_id IS NULL OR d.consulta_id = p_consulta_id)
+      AND (p_tipo IS NULL OR d.tipo = p_tipo)
+      AND (p_limite_func IS NULL OR p.funcionario_id = p_limite_func
+           OR EXISTS (SELECT 1 FROM cli_consultas k WHERE k.paciente_id = p.id AND k.funcionario_id = p_limite_func AND k.deleted_at IS NULL))
+    ORDER BY d.fecha DESC, d.id DESC;
+END; $$;
+
+
+--
+-- Name: sp_cli_odontograma_crear(bigint, bigint, bigint, bigint, smallint, character varying, character varying, character varying, date, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_odontograma_crear(p_empresa_id bigint, p_paciente_id bigint, p_consulta_id bigint, p_funcionario_id bigint, p_pieza smallint, p_superficies character varying, p_tipo character varying, p_notas character varying, p_fecha date, p_user_id bigint, p_limite_func bigint DEFAULT NULL::bigint) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $_$
+DECLARE
+    v_id  BIGINT;
+    v_sup VARCHAR := COALESCE(p_superficies, '');
+BEGIN
+    PERFORM 1 FROM cli_pacientes p
+     WHERE p.id = p_paciente_id AND p.empresa_id = p_empresa_id AND p.deleted_at IS NULL
+       AND (p_limite_func IS NULL OR p.funcionario_id = p_limite_func
+            OR EXISTS (SELECT 1 FROM cli_consultas k WHERE k.paciente_id = p.id AND k.funcionario_id = p_limite_func AND k.deleted_at IS NULL));
+    IF NOT FOUND THEN RAISE EXCEPTION 'PACIENTE_NO_ENCONTRADO: El paciente no existe.'; END IF;
+    IF NOT EXISTS (SELECT 1 FROM cli_pacientes p WHERE p.id = p_paciente_id AND p.tipo = 'humano') THEN
+        RAISE EXCEPTION 'DENTAL_INVALIDO: El odontograma solo aplica a pacientes humanos.';
+    END IF;
+    IF p_consulta_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM cli_consultas k WHERE k.id = p_consulta_id AND k.empresa_id = p_empresa_id AND k.paciente_id = p_paciente_id AND k.deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'CONSULTA_NO_ENCONTRADA: La consulta indicada no pertenece a este paciente.';
+    END IF;
+    IF p_funcionario_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM funcionarios f WHERE f.id = p_funcionario_id AND f.empresa_id = p_empresa_id AND f.deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'FUNCIONARIO_NO_ENCONTRADO: El profesional no existe.';
+    END IF;
+    IF NOT fn_cli_pieza_valida(p_pieza) THEN
+        RAISE EXCEPTION 'DENTAL_INVALIDO: La pieza dental no es válida.';
+    END IF;
+    IF v_sup !~ '^[MDVLO]{0,5}$' THEN
+        RAISE EXCEPTION 'DENTAL_INVALIDO: Las superficies no son válidas.';
+    END IF;
+    IF p_tipo IN ('caries', 'obturacion', 'sellante', 'fractura', 'desgaste') AND v_sup = '' THEN
+        RAISE EXCEPTION 'DENTAL_INVALIDO: Indique al menos una superficie para este hallazgo.';
+    END IF;
+    IF p_tipo IN ('corona', 'endodoncia', 'implante', 'protesis', 'ausente', 'extraccion_indicada', 'movilidad') AND v_sup <> '' THEN
+        RAISE EXCEPTION 'DENTAL_INVALIDO: Este hallazgo aplica a la pieza completa, sin superficies.';
+    END IF;
+
+    INSERT INTO cli_odontograma (empresa_id, paciente_id, consulta_id, funcionario_id, pieza, superficies, tipo, notas, fecha, user_id)
+    VALUES (p_empresa_id, p_paciente_id, p_consulta_id, p_funcionario_id, p_pieza, v_sup, p_tipo,
+            NULLIF(btrim(COALESCE(p_notas, '')), ''), COALESCE(p_fecha, CURRENT_DATE), p_user_id)
+    RETURNING cli_odontograma.id INTO v_id;
+    RETURN v_id;
+END; $_$;
+
+
+--
+-- Name: sp_cli_odontograma_list(bigint, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_odontograma_list(p_empresa_id bigint, p_paciente_id bigint, p_limite_func bigint DEFAULT NULL::bigint) RETURNS TABLE(id bigint, paciente_id bigint, consulta_id bigint, funcionario_id bigint, funcionario_nombre character varying, pieza smallint, superficies character varying, tipo character varying, notas character varying, fecha date, estado character varying, retirado_at timestamp without time zone, retirado_motivo character varying, user_id bigint, created_at timestamp without time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT o.id, o.paciente_id, o.consulta_id, o.funcionario_id, f.name::VARCHAR, o.pieza, o.superficies::VARCHAR, o.tipo,
+           o.notas, o.fecha, o.estado, o.retirado_at, o.retirado_motivo, o.user_id, o.created_at
+    FROM cli_odontograma o
+    JOIN cli_pacientes p ON p.id = o.paciente_id
+    LEFT JOIN funcionarios f ON f.id = o.funcionario_id
+    WHERE o.empresa_id = p_empresa_id AND o.paciente_id = p_paciente_id
+      AND (p_limite_func IS NULL OR p.funcionario_id = p_limite_func
+           OR EXISTS (SELECT 1 FROM cli_consultas k WHERE k.paciente_id = p.id AND k.funcionario_id = p_limite_func AND k.deleted_at IS NULL))
+    ORDER BY o.pieza, o.fecha DESC, o.id DESC;
+END; $$;
+
+
+--
+-- Name: sp_cli_odontograma_retirar(bigint, bigint, character varying, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_odontograma_retirar(p_empresa_id bigint, p_id bigint, p_motivo character varying, p_user_id bigint, p_limite_func bigint DEFAULT NULL::bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_estado VARCHAR;
+BEGIN
+    IF btrim(COALESCE(p_motivo, '')) = '' THEN
+        RAISE EXCEPTION 'DENTAL_INVALIDO: Indique el motivo del retiro.';
+    END IF;
+    SELECT o.estado INTO v_estado
+      FROM cli_odontograma o
+      JOIN cli_pacientes p ON p.id = o.paciente_id
+     WHERE o.id = p_id AND o.empresa_id = p_empresa_id
+       AND (p_limite_func IS NULL OR p.funcionario_id = p_limite_func
+            OR EXISTS (SELECT 1 FROM cli_consultas k WHERE k.paciente_id = p.id AND k.funcionario_id = p_limite_func AND k.deleted_at IS NULL))
+     FOR UPDATE OF o;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    IF v_estado = 'retirado' THEN RAISE EXCEPTION 'DENTAL_INVALIDO: El hallazgo ya está retirado.'; END IF;
+
+    UPDATE cli_odontograma SET estado = 'retirado', retirado_at = NOW(), retirado_por = p_user_id, retirado_motivo = btrim(p_motivo)
+     WHERE id = p_id AND empresa_id = p_empresa_id;
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_cli_paciente_create(bigint, character varying, character varying, character varying, character varying, date, character varying, character varying, character varying, text, character varying, character varying, bigint, bigint, character varying, character varying, character varying, character varying, boolean, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_paciente_create(p_empresa_id bigint, p_tipo character varying, p_nombre character varying, p_apellidos character varying, p_identificacion character varying, p_fecha_nacimiento date, p_sexo character varying, p_telefono character varying, p_email character varying, p_direccion text, p_tipo_sangre character varying, p_alerta character varying, p_cliente_id bigint, p_funcionario_id bigint, p_especie character varying, p_raza character varying, p_color character varying, p_microchip character varying, p_esterilizado boolean, p_notas text) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_id BIGINT;
+BEGIN
+    IF p_cliente_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM clients c WHERE c.id = p_cliente_id AND c.deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'CLIENTE_NO_ENCONTRADO: El responsable de pago indicado no existe.';
+    END IF;
+    IF p_funcionario_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM funcionarios f WHERE f.id = p_funcionario_id AND f.empresa_id = p_empresa_id AND f.deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'FUNCIONARIO_NO_ENCONTRADO: El profesional indicado no existe.';
+    END IF;
+
+    INSERT INTO cli_pacientes (empresa_id, tipo, nombre, apellidos, identificacion, fecha_nacimiento, sexo, telefono, email,
+                               direccion, tipo_sangre, alerta, cliente_id, funcionario_id, especie, raza, color, microchip,
+                               esterilizado, notas)
+    VALUES (p_empresa_id, p_tipo, btrim(p_nombre), NULLIF(btrim(COALESCE(p_apellidos, '')), ''), NULLIF(btrim(COALESCE(p_identificacion, '')), ''),
+            p_fecha_nacimiento, p_sexo, NULLIF(btrim(COALESCE(p_telefono, '')), ''), NULLIF(btrim(COALESCE(p_email, '')), ''),
+            NULLIF(btrim(COALESCE(p_direccion, '')), ''), NULLIF(btrim(COALESCE(p_tipo_sangre, '')), ''),
+            NULLIF(btrim(COALESCE(p_alerta, '')), ''), p_cliente_id, p_funcionario_id,
+            NULLIF(btrim(COALESCE(p_especie, '')), ''), NULLIF(btrim(COALESCE(p_raza, '')), ''),
+            NULLIF(btrim(COALESCE(p_color, '')), ''), NULLIF(btrim(COALESCE(p_microchip, '')), ''),
+            p_esterilizado, NULLIF(btrim(COALESCE(p_notas, '')), ''))
+    RETURNING cli_pacientes.id INTO v_id;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_cli_paciente_get(bigint, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_paciente_get(p_empresa_id bigint, p_id bigint, p_limite_func bigint DEFAULT NULL::bigint) RETURNS TABLE(id bigint, tipo character varying, nombre character varying, apellidos character varying, identificacion character varying, fecha_nacimiento date, sexo character varying, telefono character varying, email character varying, direccion text, tipo_sangre character varying, alerta character varying, cliente_id bigint, cliente_nombre character varying, funcionario_id bigint, especie character varying, raza character varying, color character varying, microchip character varying, esterilizado boolean, notas text, is_active boolean, deleted_at timestamp without time zone, created_at timestamp without time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT p.id, p.tipo, p.nombre, p.apellidos, p.identificacion, p.fecha_nacimiento, p.sexo, p.telefono, p.email,
+           p.direccion, p.tipo_sangre, p.alerta, p.cliente_id, c.name::VARCHAR, p.funcionario_id, p.especie, p.raza,
+           p.color, p.microchip, p.esterilizado, p.notas, p.is_active, p.deleted_at, p.created_at
+    FROM cli_pacientes p
+    LEFT JOIN clients c ON c.id = p.cliente_id
+    WHERE p.id = p_id AND p.empresa_id = p_empresa_id
+      AND (p_limite_func IS NULL OR p.funcionario_id = p_limite_func
+           OR EXISTS (SELECT 1 FROM cli_consultas k WHERE k.paciente_id = p.id AND k.funcionario_id = p_limite_func AND k.deleted_at IS NULL));
+END; $$;
+
+
+--
+-- Name: sp_cli_paciente_list(bigint, character varying, character varying, bigint, boolean, integer, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_paciente_list(p_empresa_id bigint, p_buscar character varying DEFAULT NULL::character varying, p_tipo character varying DEFAULT NULL::character varying, p_limite_func bigint DEFAULT NULL::bigint, p_eliminados boolean DEFAULT false, p_limit integer DEFAULT 50, p_offset integer DEFAULT 0) RETURNS TABLE(id bigint, tipo character varying, nombre character varying, apellidos character varying, identificacion character varying, fecha_nacimiento date, sexo character varying, telefono character varying, email character varying, alerta character varying, cliente_id bigint, cliente_nombre character varying, funcionario_id bigint, especie character varying, raza character varying, microchip character varying, is_active boolean, deleted_at timestamp without time zone, ultima_consulta timestamp without time zone, total bigint)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_q TEXT := NULLIF(btrim(COALESCE(p_buscar, '')), '');
+BEGIN
+    RETURN QUERY
+    SELECT p.id, p.tipo, p.nombre, p.apellidos, p.identificacion, p.fecha_nacimiento, p.sexo, p.telefono, p.email,
+           p.alerta, p.cliente_id, c.name::VARCHAR, p.funcionario_id, p.especie, p.raza, p.microchip, p.is_active,
+           p.deleted_at,
+           (SELECT MAX(k.fecha) FROM cli_consultas k WHERE k.paciente_id = p.id AND k.deleted_at IS NULL),
+           COUNT(*) OVER ()
+    FROM cli_pacientes p
+    LEFT JOIN clients c ON c.id = p.cliente_id
+    WHERE p.empresa_id = p_empresa_id
+      AND ((p_eliminados AND p.deleted_at IS NOT NULL) OR (NOT p_eliminados AND p.deleted_at IS NULL))
+      AND (p_tipo IS NULL OR p.tipo = p_tipo)
+      AND (p_limite_func IS NULL OR p.funcionario_id = p_limite_func
+           OR EXISTS (SELECT 1 FROM cli_consultas k WHERE k.paciente_id = p.id AND k.funcionario_id = p_limite_func AND k.deleted_at IS NULL))
+      AND (v_q IS NULL
+           OR lower(p.nombre || ' ' || COALESCE(p.apellidos, '')) LIKE '%' || lower(v_q) || '%'
+           OR lower(COALESCE(p.identificacion, '')) LIKE '%' || lower(v_q) || '%'
+           OR lower(COALESCE(p.microchip, '')) LIKE '%' || lower(v_q) || '%'
+           OR COALESCE(p.telefono, '') LIKE '%' || v_q || '%'
+           OR lower(COALESCE(c.name, '')) LIKE '%' || lower(v_q) || '%')
+    ORDER BY lower(p.nombre), lower(COALESCE(p.apellidos, '')), p.id
+    LIMIT LEAST(GREATEST(COALESCE(p_limit, 50), 1), 200) OFFSET GREATEST(COALESCE(p_offset, 0), 0);
+END; $$;
+
+
+--
+-- Name: sp_cli_paciente_restore(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_paciente_restore(p_id bigint, p_empresa_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    UPDATE cli_pacientes SET is_active = TRUE, deleted_at = NULL, updated_at = NOW()
+     WHERE id = p_id AND empresa_id = p_empresa_id AND deleted_at IS NOT NULL;
+    RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: sp_cli_paciente_soft_delete(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_paciente_soft_delete(p_id bigint, p_empresa_id bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    PERFORM 1 FROM cli_pacientes p WHERE p.id = p_id AND p.empresa_id = p_empresa_id AND p.deleted_at IS NULL;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+
+    IF EXISTS (SELECT 1 FROM cli_consultas k WHERE k.paciente_id = p_id AND k.estado = 'borrador' AND k.deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'CONSULTAS_EN_BORRADOR: El paciente tiene consultas en borrador. Fírmelas o descártelas antes de eliminarlo.';
+    END IF;
+    UPDATE cli_pacientes SET is_active = FALSE, deleted_at = NOW(), updated_at = NOW() WHERE id = p_id;
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_cli_paciente_update(bigint, bigint, character varying, character varying, character varying, date, character varying, character varying, character varying, text, character varying, character varying, bigint, bigint, character varying, character varying, character varying, character varying, boolean, text, boolean, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_paciente_update(p_id bigint, p_empresa_id bigint, p_nombre character varying, p_apellidos character varying, p_identificacion character varying, p_fecha_nacimiento date, p_sexo character varying, p_telefono character varying, p_email character varying, p_direccion text, p_tipo_sangre character varying, p_alerta character varying, p_cliente_id bigint, p_funcionario_id bigint, p_especie character varying, p_raza character varying, p_color character varying, p_microchip character varying, p_esterilizado boolean, p_notas text, p_is_active boolean, p_limite_func bigint DEFAULT NULL::bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_tipo VARCHAR;
+BEGIN
+    SELECT p.tipo INTO v_tipo FROM cli_pacientes p
+     WHERE p.id = p_id AND p.empresa_id = p_empresa_id AND p.deleted_at IS NULL
+       AND (p_limite_func IS NULL OR p.funcionario_id = p_limite_func
+            OR EXISTS (SELECT 1 FROM cli_consultas k WHERE k.paciente_id = p.id AND k.funcionario_id = p_limite_func AND k.deleted_at IS NULL));
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+
+    IF p_cliente_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM clients c WHERE c.id = p_cliente_id AND c.deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'CLIENTE_NO_ENCONTRADO: El responsable de pago indicado no existe.';
+    END IF;
+    IF p_funcionario_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM funcionarios f WHERE f.id = p_funcionario_id AND f.empresa_id = p_empresa_id AND f.deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'FUNCIONARIO_NO_ENCONTRADO: El profesional indicado no existe.';
+    END IF;
+
+    UPDATE cli_pacientes SET
+        nombre = btrim(p_nombre), apellidos = NULLIF(btrim(COALESCE(p_apellidos, '')), ''),
+        identificacion = NULLIF(btrim(COALESCE(p_identificacion, '')), ''), fecha_nacimiento = p_fecha_nacimiento,
+        sexo = p_sexo, telefono = NULLIF(btrim(COALESCE(p_telefono, '')), ''), email = NULLIF(btrim(COALESCE(p_email, '')), ''),
+        direccion = NULLIF(btrim(COALESCE(p_direccion, '')), ''), tipo_sangre = NULLIF(btrim(COALESCE(p_tipo_sangre, '')), ''),
+        alerta = NULLIF(btrim(COALESCE(p_alerta, '')), ''), cliente_id = p_cliente_id, funcionario_id = p_funcionario_id,
+        especie = CASE WHEN v_tipo = 'animal' THEN NULLIF(btrim(COALESCE(p_especie, '')), '') END,
+        raza = CASE WHEN v_tipo = 'animal' THEN NULLIF(btrim(COALESCE(p_raza, '')), '') END,
+        color = CASE WHEN v_tipo = 'animal' THEN NULLIF(btrim(COALESCE(p_color, '')), '') END,
+        microchip = CASE WHEN v_tipo = 'animal' THEN NULLIF(btrim(COALESCE(p_microchip, '')), '') END,
+        esterilizado = CASE WHEN v_tipo = 'animal' THEN p_esterilizado END,
+        notas = NULLIF(btrim(COALESCE(p_notas, '')), ''), is_active = COALESCE(p_is_active, TRUE), updated_at = NOW()
+     WHERE id = p_id;
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_cli_plan_actualizar(bigint, bigint, character varying, text, character varying, jsonb, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_plan_actualizar(p_empresa_id bigint, p_id bigint, p_titulo character varying, p_notas text, p_moneda character varying, p_items jsonb, p_limite_func bigint DEFAULT NULL::bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_estado VARCHAR;
+BEGIN
+    SELECT t.estado INTO v_estado
+      FROM cli_planes_tratamiento t
+      JOIN cli_pacientes p ON p.id = t.paciente_id
+     WHERE t.id = p_id AND t.empresa_id = p_empresa_id
+       AND (p_limite_func IS NULL OR p.funcionario_id = p_limite_func
+            OR EXISTS (SELECT 1 FROM cli_consultas k WHERE k.paciente_id = p.id AND k.funcionario_id = p_limite_func AND k.deleted_at IS NULL))
+     FOR UPDATE OF t;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    IF v_estado <> 'propuesto' THEN
+        RAISE EXCEPTION 'DENTAL_INVALIDO: Solo se puede editar un plan que aún está propuesto.';
+    END IF;
+    IF btrim(COALESCE(p_titulo, '')) = '' THEN
+        RAISE EXCEPTION 'DENTAL_INVALIDO: El plan necesita un título.';
+    END IF;
+
+    UPDATE cli_planes_tratamiento
+       SET titulo = btrim(p_titulo), notas = NULLIF(btrim(COALESCE(p_notas, '')), ''), moneda = COALESCE(p_moneda, moneda), updated_at = NOW()
+     WHERE id = p_id;
+    PERFORM fn_cli_plan_poner_items(p_id, p_items);
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_cli_plan_crear(bigint, bigint, bigint, character varying, text, character varying, jsonb, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_plan_crear(p_empresa_id bigint, p_paciente_id bigint, p_funcionario_id bigint, p_titulo character varying, p_notas text, p_moneda character varying, p_items jsonb, p_user_id bigint, p_limite_func bigint DEFAULT NULL::bigint) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_id     BIGINT;
+    v_numero INT;
+BEGIN
+    PERFORM 1 FROM cli_pacientes p
+     WHERE p.id = p_paciente_id AND p.empresa_id = p_empresa_id AND p.deleted_at IS NULL
+       AND (p_limite_func IS NULL OR p.funcionario_id = p_limite_func
+            OR EXISTS (SELECT 1 FROM cli_consultas k WHERE k.paciente_id = p.id AND k.funcionario_id = p_limite_func AND k.deleted_at IS NULL));
+    IF NOT FOUND THEN RAISE EXCEPTION 'PACIENTE_NO_ENCONTRADO: El paciente no existe.'; END IF;
+    IF NOT EXISTS (SELECT 1 FROM cli_pacientes p WHERE p.id = p_paciente_id AND p.tipo = 'humano') THEN
+        RAISE EXCEPTION 'DENTAL_INVALIDO: El plan de tratamiento dental solo aplica a pacientes humanos.';
+    END IF;
+    IF p_funcionario_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM funcionarios f WHERE f.id = p_funcionario_id AND f.empresa_id = p_empresa_id AND f.deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'FUNCIONARIO_NO_ENCONTRADO: El profesional no existe.';
+    END IF;
+    IF btrim(COALESCE(p_titulo, '')) = '' THEN
+        RAISE EXCEPTION 'DENTAL_INVALIDO: El plan necesita un título.';
+    END IF;
+
+    PERFORM pg_advisory_xact_lock(hashtext('cli_planes:' || p_empresa_id::text));
+    SELECT COALESCE(MAX(t.numero), 0) + 1 INTO v_numero FROM cli_planes_tratamiento t WHERE t.empresa_id = p_empresa_id;
+
+    INSERT INTO cli_planes_tratamiento (empresa_id, paciente_id, funcionario_id, numero, titulo, notas, moneda, user_id)
+    VALUES (p_empresa_id, p_paciente_id, p_funcionario_id, v_numero, btrim(p_titulo), NULLIF(btrim(COALESCE(p_notas, '')), ''),
+            COALESCE(p_moneda, 'CRC'), p_user_id)
+    RETURNING cli_planes_tratamiento.id INTO v_id;
+
+    PERFORM fn_cli_plan_poner_items(v_id, p_items);
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_cli_plan_estado(bigint, bigint, character varying, character varying, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_plan_estado(p_empresa_id bigint, p_id bigint, p_estado character varying, p_motivo character varying, p_user_id bigint, p_limite_func bigint DEFAULT NULL::bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_estado VARCHAR;
+BEGIN
+    SELECT t.estado INTO v_estado
+      FROM cli_planes_tratamiento t
+      JOIN cli_pacientes p ON p.id = t.paciente_id
+     WHERE t.id = p_id AND t.empresa_id = p_empresa_id
+       AND (p_limite_func IS NULL OR p.funcionario_id = p_limite_func
+            OR EXISTS (SELECT 1 FROM cli_consultas k WHERE k.paciente_id = p.id AND k.funcionario_id = p_limite_func AND k.deleted_at IS NULL))
+     FOR UPDATE OF t;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+
+    IF p_estado = 'aceptado' THEN
+        IF v_estado <> 'propuesto' THEN RAISE EXCEPTION 'DENTAL_INVALIDO: Solo se acepta un plan propuesto.'; END IF;
+        UPDATE cli_planes_tratamiento SET estado = 'aceptado', aceptado_at = NOW(), aceptado_por = p_user_id, updated_at = NOW() WHERE id = p_id;
+    ELSIF p_estado = 'cancelado' THEN
+        IF v_estado NOT IN ('propuesto', 'aceptado') THEN RAISE EXCEPTION 'DENTAL_INVALIDO: Este plan ya no se puede cancelar.'; END IF;
+        IF btrim(COALESCE(p_motivo, '')) = '' THEN RAISE EXCEPTION 'DENTAL_INVALIDO: Indique el motivo de la cancelación.'; END IF;
+        UPDATE cli_planes_tratamiento SET estado = 'cancelado', cancelado_at = NOW(), cancelado_motivo = btrim(p_motivo), updated_at = NOW() WHERE id = p_id;
+    ELSE
+        RAISE EXCEPTION 'DENTAL_INVALIDO: Estado no válido.';
+    END IF;
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_cli_plan_get(bigint, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_plan_get(p_empresa_id bigint, p_id bigint, p_limite_func bigint DEFAULT NULL::bigint) RETURNS TABLE(id bigint, paciente_id bigint, paciente_nombre character varying, paciente_identificacion character varying, funcionario_id bigint, funcionario_nombre character varying, funcionario_identificacion character varying, numero integer, titulo character varying, notas text, moneda character varying, estado character varying, aceptado_at timestamp without time zone, cancelado_at timestamp without time zone, cancelado_motivo character varying, created_at timestamp without time zone, total numeric, total_realizado numeric, items jsonb)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT t.id, t.paciente_id, btrim(p.nombre || ' ' || COALESCE(p.apellidos, ''))::VARCHAR, p.identificacion::VARCHAR,
+           t.funcionario_id, f.name::VARCHAR, f.tax_id::VARCHAR, t.numero, t.titulo, t.notas, t.moneda::VARCHAR, t.estado,
+           t.aceptado_at, t.cancelado_at, t.cancelado_motivo, t.created_at,
+           COALESCE((SELECT SUM(i.precio) FROM cli_plan_items i WHERE i.plan_id = t.id), 0),
+           COALESCE((SELECT SUM(i.precio) FROM cli_plan_items i WHERE i.plan_id = t.id AND i.estado = 'realizado'), 0),
+           COALESCE((SELECT jsonb_agg(jsonb_build_object('id', i.id, 'orden', i.orden, 'pieza', i.pieza, 'superficies', i.superficies,
+                                                         'procedimiento', i.procedimiento, 'precio', i.precio, 'estado', i.estado,
+                                                         'realizado_at', i.realizado_at, 'consulta_id', i.consulta_id) ORDER BY i.orden)
+                       FROM cli_plan_items i WHERE i.plan_id = t.id), '[]'::jsonb)
+    FROM cli_planes_tratamiento t
+    JOIN cli_pacientes p ON p.id = t.paciente_id
+    LEFT JOIN funcionarios f ON f.id = t.funcionario_id
+    WHERE t.id = p_id AND t.empresa_id = p_empresa_id
+      AND (p_limite_func IS NULL OR p.funcionario_id = p_limite_func
+           OR EXISTS (SELECT 1 FROM cli_consultas k WHERE k.paciente_id = p.id AND k.funcionario_id = p_limite_func AND k.deleted_at IS NULL));
+END; $$;
+
+
+--
+-- Name: sp_cli_plan_item_estado(bigint, bigint, boolean, bigint, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_plan_item_estado(p_empresa_id bigint, p_item_id bigint, p_realizado boolean, p_consulta_id bigint, p_user_id bigint, p_limite_func bigint DEFAULT NULL::bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_plan   BIGINT;
+    v_estado VARCHAR;
+    v_pac    BIGINT;
+BEGIN
+    SELECT t.id, t.estado, t.paciente_id INTO v_plan, v_estado, v_pac
+      FROM cli_plan_items i
+      JOIN cli_planes_tratamiento t ON t.id = i.plan_id
+      JOIN cli_pacientes p ON p.id = t.paciente_id
+     WHERE i.id = p_item_id AND t.empresa_id = p_empresa_id
+       AND (p_limite_func IS NULL OR p.funcionario_id = p_limite_func
+            OR EXISTS (SELECT 1 FROM cli_consultas k WHERE k.paciente_id = p.id AND k.funcionario_id = p_limite_func AND k.deleted_at IS NULL))
+     FOR UPDATE OF t;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    IF v_estado NOT IN ('aceptado', 'completado') THEN
+        RAISE EXCEPTION 'DENTAL_INVALIDO: Los procedimientos se marcan como realizados cuando el plan está aceptado.';
+    END IF;
+    IF p_consulta_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM cli_consultas k WHERE k.id = p_consulta_id AND k.empresa_id = p_empresa_id AND k.paciente_id = v_pac AND k.deleted_at IS NULL) THEN
+        RAISE EXCEPTION 'CONSULTA_NO_ENCONTRADA: La consulta indicada no pertenece a este paciente.';
+    END IF;
+
+    IF p_realizado THEN
+        UPDATE cli_plan_items SET estado = 'realizado', realizado_at = NOW(), realizado_por = p_user_id, consulta_id = p_consulta_id WHERE id = p_item_id;
+    ELSE
+        UPDATE cli_plan_items SET estado = 'pendiente', realizado_at = NULL, realizado_por = NULL, consulta_id = NULL WHERE id = p_item_id;
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM cli_plan_items WHERE plan_id = v_plan AND estado = 'pendiente') THEN
+        UPDATE cli_planes_tratamiento SET estado = 'completado', updated_at = NOW() WHERE id = v_plan;
+    ELSIF v_estado = 'completado' THEN
+        UPDATE cli_planes_tratamiento SET estado = 'aceptado', updated_at = NOW() WHERE id = v_plan;
+    END IF;
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_cli_plan_list(bigint, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_plan_list(p_empresa_id bigint, p_paciente_id bigint, p_limite_func bigint DEFAULT NULL::bigint) RETURNS TABLE(id bigint, paciente_id bigint, funcionario_id bigint, funcionario_nombre character varying, numero integer, titulo character varying, moneda character varying, estado character varying, total numeric, total_realizado numeric, items integer, items_realizados integer, aceptado_at timestamp without time zone, created_at timestamp without time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT t.id, t.paciente_id, t.funcionario_id, f.name::VARCHAR, t.numero, t.titulo, t.moneda::VARCHAR, t.estado,
+           COALESCE(SUM(i.precio), 0), COALESCE(SUM(i.precio) FILTER (WHERE i.estado = 'realizado'), 0),
+           COUNT(i.id)::INT, (COUNT(i.id) FILTER (WHERE i.estado = 'realizado'))::INT, t.aceptado_at, t.created_at
+    FROM cli_planes_tratamiento t
+    JOIN cli_pacientes p ON p.id = t.paciente_id
+    LEFT JOIN funcionarios f ON f.id = t.funcionario_id
+    LEFT JOIN cli_plan_items i ON i.plan_id = t.id
+    WHERE t.empresa_id = p_empresa_id AND t.paciente_id = p_paciente_id
+      AND (p_limite_func IS NULL OR p.funcionario_id = p_limite_func
+           OR EXISTS (SELECT 1 FROM cli_consultas k WHERE k.paciente_id = p.id AND k.funcionario_id = p_limite_func AND k.deleted_at IS NULL))
+    GROUP BY t.id, f.name
+    ORDER BY t.created_at DESC, t.id DESC;
+END; $$;
+
+
+--
+-- Name: sp_cli_vet_peso_anular(bigint, bigint, character varying, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_vet_peso_anular(p_empresa_id bigint, p_id bigint, p_motivo character varying, p_user_id bigint, p_limite_func bigint DEFAULT NULL::bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_estado VARCHAR;
+BEGIN
+    IF btrim(COALESCE(p_motivo, '')) = '' THEN
+        RAISE EXCEPTION 'VET_INVALIDO: Indique el motivo de la anulación.';
+    END IF;
+    SELECT w.estado INTO v_estado
+      FROM cli_vet_pesos w
+      JOIN cli_pacientes p ON p.id = w.paciente_id
+     WHERE w.id = p_id AND w.empresa_id = p_empresa_id
+       AND (p_limite_func IS NULL OR p.funcionario_id = p_limite_func
+            OR EXISTS (SELECT 1 FROM cli_consultas k WHERE k.paciente_id = p.id AND k.funcionario_id = p_limite_func AND k.deleted_at IS NULL))
+     FOR UPDATE OF w;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    IF v_estado = 'anulado' THEN RAISE EXCEPTION 'VET_INVALIDO: El registro ya está anulado.'; END IF;
+
+    UPDATE cli_vet_pesos SET estado = 'anulado', anulado_at = NOW(), anulado_por = p_user_id, anulado_motivo = btrim(p_motivo)
+     WHERE id = p_id AND empresa_id = p_empresa_id;
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_cli_vet_peso_crear(bigint, bigint, bigint, bigint, date, numeric, smallint, character varying, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_vet_peso_crear(p_empresa_id bigint, p_paciente_id bigint, p_consulta_id bigint, p_funcionario_id bigint, p_fecha date, p_peso_kg numeric, p_condicion smallint, p_notas character varying, p_user_id bigint, p_limite_func bigint DEFAULT NULL::bigint) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_id    BIGINT;
+    v_fecha DATE := COALESCE(p_fecha, CURRENT_DATE);
+BEGIN
+    PERFORM fn_cli_vet_validar(p_empresa_id, p_paciente_id, p_consulta_id, p_funcionario_id, p_limite_func);
+    IF p_peso_kg IS NULL OR p_peso_kg <= 0 OR p_peso_kg > 3000 THEN
+        RAISE EXCEPTION 'VET_INVALIDO: El peso debe ser mayor que cero.';
+    END IF;
+    IF p_condicion IS NOT NULL AND p_condicion NOT BETWEEN 1 AND 9 THEN
+        RAISE EXCEPTION 'VET_INVALIDO: La condición corporal va de 1 a 9.';
+    END IF;
+    IF v_fecha > CURRENT_DATE THEN
+        RAISE EXCEPTION 'VET_INVALIDO: La fecha del peso no puede ser futura.';
+    END IF;
+
+    INSERT INTO cli_vet_pesos (empresa_id, paciente_id, consulta_id, funcionario_id, fecha, peso_kg, condicion_corporal, notas, user_id)
+    VALUES (p_empresa_id, p_paciente_id, p_consulta_id, p_funcionario_id, v_fecha, round(p_peso_kg, 3), p_condicion,
+            NULLIF(btrim(COALESCE(p_notas, '')), ''), p_user_id)
+    RETURNING cli_vet_pesos.id INTO v_id;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_cli_vet_peso_list(bigint, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_vet_peso_list(p_empresa_id bigint, p_paciente_id bigint, p_limite_func bigint DEFAULT NULL::bigint) RETURNS TABLE(id bigint, paciente_id bigint, consulta_id bigint, funcionario_id bigint, funcionario_nombre character varying, fecha date, peso_kg numeric, condicion_corporal smallint, notas character varying, estado character varying, anulado_at timestamp without time zone, anulado_motivo character varying, created_at timestamp without time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT w.id, w.paciente_id, w.consulta_id, w.funcionario_id, f.name::VARCHAR, w.fecha, w.peso_kg, w.condicion_corporal,
+           w.notas, w.estado, w.anulado_at, w.anulado_motivo, w.created_at
+    FROM cli_vet_pesos w
+    JOIN cli_pacientes p ON p.id = w.paciente_id
+    LEFT JOIN funcionarios f ON f.id = w.funcionario_id
+    WHERE w.empresa_id = p_empresa_id AND w.paciente_id = p_paciente_id
+      AND (p_limite_func IS NULL OR p.funcionario_id = p_limite_func
+           OR EXISTS (SELECT 1 FROM cli_consultas k WHERE k.paciente_id = p.id AND k.funcionario_id = p_limite_func AND k.deleted_at IS NULL))
+    ORDER BY w.fecha DESC, w.id DESC;
+END; $$;
+
+
+--
+-- Name: sp_cli_vet_preventivo_anular(bigint, bigint, character varying, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_vet_preventivo_anular(p_empresa_id bigint, p_id bigint, p_motivo character varying, p_user_id bigint, p_limite_func bigint DEFAULT NULL::bigint) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE v_estado VARCHAR;
+BEGIN
+    IF btrim(COALESCE(p_motivo, '')) = '' THEN
+        RAISE EXCEPTION 'VET_INVALIDO: Indique el motivo de la anulación.';
+    END IF;
+    SELECT v.estado INTO v_estado
+      FROM cli_vet_preventivos v
+      JOIN cli_pacientes p ON p.id = v.paciente_id
+     WHERE v.id = p_id AND v.empresa_id = p_empresa_id
+       AND (p_limite_func IS NULL OR p.funcionario_id = p_limite_func
+            OR EXISTS (SELECT 1 FROM cli_consultas k WHERE k.paciente_id = p.id AND k.funcionario_id = p_limite_func AND k.deleted_at IS NULL))
+     FOR UPDATE OF v;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    IF v_estado = 'anulado' THEN RAISE EXCEPTION 'VET_INVALIDO: El registro ya está anulado.'; END IF;
+
+    UPDATE cli_vet_preventivos SET estado = 'anulado', anulado_at = NOW(), anulado_por = p_user_id, anulado_motivo = btrim(p_motivo)
+     WHERE id = p_id AND empresa_id = p_empresa_id;
+    RETURN TRUE;
+END; $$;
+
+
+--
+-- Name: sp_cli_vet_preventivo_crear(bigint, bigint, bigint, bigint, character varying, character varying, date, character varying, date, character varying, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_vet_preventivo_crear(p_empresa_id bigint, p_paciente_id bigint, p_consulta_id bigint, p_funcionario_id bigint, p_tipo character varying, p_producto character varying, p_fecha date, p_lote character varying, p_proxima_fecha date, p_notas character varying, p_user_id bigint, p_limite_func bigint DEFAULT NULL::bigint) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_id    BIGINT;
+    v_fecha DATE := COALESCE(p_fecha, CURRENT_DATE);
+BEGIN
+    PERFORM fn_cli_vet_validar(p_empresa_id, p_paciente_id, p_consulta_id, p_funcionario_id, p_limite_func);
+    IF btrim(COALESCE(p_producto, '')) = '' THEN
+        RAISE EXCEPTION 'VET_INVALIDO: Indique el producto aplicado.';
+    END IF;
+    IF v_fecha > CURRENT_DATE THEN
+        RAISE EXCEPTION 'VET_INVALIDO: La fecha de aplicación no puede ser futura.';
+    END IF;
+    IF p_proxima_fecha IS NOT NULL AND p_proxima_fecha <= v_fecha THEN
+        RAISE EXCEPTION 'VET_INVALIDO: La próxima dosis debe ser posterior a la fecha de aplicación.';
+    END IF;
+
+    INSERT INTO cli_vet_preventivos (empresa_id, paciente_id, consulta_id, funcionario_id, tipo, producto, fecha, lote,
+                                     proxima_fecha, notas, user_id)
+    VALUES (p_empresa_id, p_paciente_id, p_consulta_id, p_funcionario_id, p_tipo, left(btrim(p_producto), 120), v_fecha,
+            NULLIF(btrim(COALESCE(p_lote, '')), ''), p_proxima_fecha, NULLIF(btrim(COALESCE(p_notas, '')), ''), p_user_id)
+    RETURNING cli_vet_preventivos.id INTO v_id;
+    RETURN v_id;
+END; $$;
+
+
+--
+-- Name: sp_cli_vet_preventivo_list(bigint, bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_vet_preventivo_list(p_empresa_id bigint, p_paciente_id bigint, p_limite_func bigint DEFAULT NULL::bigint) RETURNS TABLE(id bigint, paciente_id bigint, consulta_id bigint, funcionario_id bigint, funcionario_nombre character varying, tipo character varying, producto character varying, fecha date, lote character varying, proxima_fecha date, notas character varying, estado character varying, anulado_at timestamp without time zone, anulado_motivo character varying, created_at timestamp without time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT v.id, v.paciente_id, v.consulta_id, v.funcionario_id, f.name::VARCHAR, v.tipo, v.producto, v.fecha, v.lote,
+           v.proxima_fecha, v.notas, v.estado, v.anulado_at, v.anulado_motivo, v.created_at
+    FROM cli_vet_preventivos v
+    JOIN cli_pacientes p ON p.id = v.paciente_id
+    LEFT JOIN funcionarios f ON f.id = v.funcionario_id
+    WHERE v.empresa_id = p_empresa_id AND v.paciente_id = p_paciente_id
+      AND (p_limite_func IS NULL OR p.funcionario_id = p_limite_func
+           OR EXISTS (SELECT 1 FROM cli_consultas k WHERE k.paciente_id = p.id AND k.funcionario_id = p_limite_func AND k.deleted_at IS NULL))
+    ORDER BY v.fecha DESC, v.id DESC;
+END; $$;
+
+
+--
+-- Name: sp_cli_vet_recordatorios(bigint, integer, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cli_vet_recordatorios(p_empresa_id bigint, p_dias integer DEFAULT 30, p_limite_func bigint DEFAULT NULL::bigint) RETURNS TABLE(paciente_id bigint, paciente_nombre character varying, especie character varying, raza character varying, cliente_id bigint, cliente_nombre character varying, telefono character varying, email character varying, tipo character varying, producto character varying, ultima_fecha date, proxima_fecha date, dias integer)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    IF p_dias IS NULL OR p_dias < 0 OR p_dias > 365 THEN
+        RAISE EXCEPTION 'VET_INVALIDO: El plazo debe estar entre 0 y 365 días.';
+    END IF;
+    RETURN QUERY
+    SELECT u.paciente_id, p.nombre::VARCHAR, p.especie::VARCHAR, p.raza::VARCHAR, p.cliente_id, c.name::VARCHAR,
+           COALESCE(NULLIF(c.phone, ''), p.telefono)::VARCHAR, COALESCE(NULLIF(c.email, ''), p.email)::VARCHAR,
+           u.tipo, u.producto, u.fecha, u.proxima_fecha, (u.proxima_fecha - CURRENT_DATE)::INT
+    FROM (
+        SELECT DISTINCT ON (v.paciente_id, v.tipo, lower(v.producto))
+               v.paciente_id, v.tipo, v.producto, v.fecha, v.proxima_fecha
+          FROM cli_vet_preventivos v
+         WHERE v.empresa_id = p_empresa_id AND v.estado = 'vigente'
+         ORDER BY v.paciente_id, v.tipo, lower(v.producto), v.fecha DESC, v.id DESC
+    ) u
+    JOIN cli_pacientes p ON p.id = u.paciente_id
+    LEFT JOIN clients c ON c.id = p.cliente_id
+    WHERE u.proxima_fecha IS NOT NULL AND u.proxima_fecha <= CURRENT_DATE + p_dias
+      AND p.tipo = 'animal' AND p.deleted_at IS NULL AND p.is_active
+      AND (p_limite_func IS NULL OR p.funcionario_id = p_limite_func
+           OR EXISTS (SELECT 1 FROM cli_consultas k WHERE k.paciente_id = p.id AND k.funcionario_id = p_limite_func AND k.deleted_at IS NULL))
+    ORDER BY u.proxima_fecha, p.nombre
+    LIMIT 500;
+END; $$;
 
 
 --
@@ -15767,6 +17207,1062 @@ ALTER SEQUENCE public.categorias_producto_id_seq OWNED BY public.categorias_prod
 
 
 --
+-- Name: cli_accesos; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cli_accesos (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    paciente_id bigint NOT NULL,
+    consulta_id bigint,
+    user_id bigint NOT NULL,
+    accion character varying(25) NOT NULL,
+    ip character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT cli_accesos_accion_check CHECK (((accion)::text = ANY ((ARRAY['ver_expediente'::character varying, 'ver_consulta'::character varying, 'descargar_adjunto'::character varying, 'listar_pacientes'::character varying, 'ver_documento'::character varying, 'ver_dental'::character varying, 'ver_veterinaria'::character varying])::text[])))
+);
+
+
+--
+-- Name: cli_accesos_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.cli_accesos_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: cli_accesos_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.cli_accesos_id_seq OWNED BY public.cli_accesos.id;
+
+
+--
+-- Name: cli_adjuntos; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cli_adjuntos (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    paciente_id bigint NOT NULL,
+    consulta_id bigint,
+    tipo character varying(15) NOT NULL,
+    titulo character varying(150) NOT NULL,
+    nombre character varying(160) NOT NULL,
+    clave character varying(300) NOT NULL,
+    mime character varying(80) NOT NULL,
+    tamano_bytes bigint NOT NULL,
+    sha256 character(64) NOT NULL,
+    user_id bigint NOT NULL,
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT cli_adjuntos_tamano_bytes_check CHECK ((tamano_bytes >= 0)),
+    CONSTRAINT cli_adjuntos_tipo_check CHECK (((tipo)::text = ANY ((ARRAY['laboratorio'::character varying, 'imagen'::character varying, 'consentimiento'::character varying, 'receta'::character varying, 'informe'::character varying, 'otro'::character varying])::text[])))
+);
+
+
+--
+-- Name: cli_adjuntos_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cli_adjuntos_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'cli_adjuntos'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: cli_adjuntos_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.cli_adjuntos_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: cli_adjuntos_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.cli_adjuntos_auditoria_id_seq OWNED BY public.cli_adjuntos_auditoria.id;
+
+
+--
+-- Name: cli_adjuntos_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.cli_adjuntos_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: cli_adjuntos_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.cli_adjuntos_id_seq OWNED BY public.cli_adjuntos.id;
+
+
+--
+-- Name: cli_antecedentes; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cli_antecedentes (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    paciente_id bigint NOT NULL,
+    tipo character varying(15) NOT NULL,
+    descripcion character varying(200) NOT NULL,
+    detalle text,
+    desde date,
+    vigente boolean DEFAULT true NOT NULL,
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT cli_antecedentes_tipo_check CHECK (((tipo)::text = ANY ((ARRAY['alergia'::character varying, 'medicamento'::character varying, 'enfermedad'::character varying, 'cirugia'::character varying, 'familiar'::character varying, 'habito'::character varying, 'otro'::character varying])::text[])))
+);
+
+
+--
+-- Name: cli_antecedentes_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cli_antecedentes_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'cli_antecedentes'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: cli_antecedentes_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.cli_antecedentes_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: cli_antecedentes_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.cli_antecedentes_auditoria_id_seq OWNED BY public.cli_antecedentes_auditoria.id;
+
+
+--
+-- Name: cli_antecedentes_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.cli_antecedentes_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: cli_antecedentes_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.cli_antecedentes_id_seq OWNED BY public.cli_antecedentes.id;
+
+
+--
+-- Name: cli_consulta_adendums; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cli_consulta_adendums (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    consulta_id bigint NOT NULL,
+    texto text NOT NULL,
+    user_id bigint NOT NULL,
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: cli_consulta_adendums_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.cli_consulta_adendums_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: cli_consulta_adendums_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.cli_consulta_adendums_id_seq OWNED BY public.cli_consulta_adendums.id;
+
+
+--
+-- Name: cli_consulta_diagnosticos; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cli_consulta_diagnosticos (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    consulta_id bigint NOT NULL,
+    codigo character varying(12),
+    descripcion character varying(250) NOT NULL,
+    principal boolean DEFAULT false NOT NULL,
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: cli_consulta_diagnosticos_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cli_consulta_diagnosticos_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'cli_consulta_diagnosticos'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: cli_consulta_diagnosticos_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.cli_consulta_diagnosticos_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: cli_consulta_diagnosticos_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.cli_consulta_diagnosticos_auditoria_id_seq OWNED BY public.cli_consulta_diagnosticos_auditoria.id;
+
+
+--
+-- Name: cli_consulta_diagnosticos_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.cli_consulta_diagnosticos_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: cli_consulta_diagnosticos_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.cli_consulta_diagnosticos_id_seq OWNED BY public.cli_consulta_diagnosticos.id;
+
+
+--
+-- Name: cli_consulta_servicios; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cli_consulta_servicios (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    consulta_id bigint NOT NULL,
+    tipo character varying(10) NOT NULL,
+    item_id bigint NOT NULL,
+    descripcion character varying(250) NOT NULL,
+    cantidad numeric(12,3) NOT NULL,
+    precio_unitario numeric(18,5) NOT NULL,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT cli_consulta_servicios_cantidad_check CHECK ((cantidad > (0)::numeric)),
+    CONSTRAINT cli_consulta_servicios_precio_unitario_check CHECK ((precio_unitario >= (0)::numeric)),
+    CONSTRAINT cli_consulta_servicios_tipo_check CHECK (((tipo)::text = ANY ((ARRAY['Producto'::character varying, 'Servicio'::character varying])::text[])))
+);
+
+
+--
+-- Name: cli_consulta_servicios_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cli_consulta_servicios_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'cli_consulta_servicios'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: cli_consulta_servicios_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.cli_consulta_servicios_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: cli_consulta_servicios_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.cli_consulta_servicios_auditoria_id_seq OWNED BY public.cli_consulta_servicios_auditoria.id;
+
+
+--
+-- Name: cli_consulta_servicios_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.cli_consulta_servicios_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: cli_consulta_servicios_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.cli_consulta_servicios_id_seq OWNED BY public.cli_consulta_servicios.id;
+
+
+--
+-- Name: cli_consultas; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cli_consultas (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    sucursal_id bigint,
+    paciente_id bigint NOT NULL,
+    funcionario_id bigint,
+    agenda_evento_id bigint,
+    fecha timestamp without time zone DEFAULT now() NOT NULL,
+    motivo character varying(300),
+    subjetivo text,
+    objetivo text,
+    analisis text,
+    plan text,
+    signos_vitales jsonb DEFAULT '{}'::jsonb NOT NULL,
+    estado character varying(10) DEFAULT 'borrador'::character varying NOT NULL,
+    firmada_por bigint,
+    firmada_at timestamp without time zone,
+    documento_id bigint,
+    cobrada_at timestamp without time zone,
+    user_id bigint NOT NULL,
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT chk_cli_consulta_firma CHECK ((((estado)::text = 'borrador'::text) OR ((firmada_por IS NOT NULL) AND (firmada_at IS NOT NULL)))),
+    CONSTRAINT cli_consultas_estado_check CHECK (((estado)::text = ANY ((ARRAY['borrador'::character varying, 'firmada'::character varying])::text[])))
+);
+
+
+--
+-- Name: cli_consultas_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cli_consultas_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'cli_consultas'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: cli_consultas_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.cli_consultas_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: cli_consultas_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.cli_consultas_auditoria_id_seq OWNED BY public.cli_consultas_auditoria.id;
+
+
+--
+-- Name: cli_consultas_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.cli_consultas_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: cli_consultas_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.cli_consultas_id_seq OWNED BY public.cli_consultas.id;
+
+
+--
+-- Name: cli_documentos; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cli_documentos (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    paciente_id bigint NOT NULL,
+    consulta_id bigint,
+    funcionario_id bigint,
+    tipo character varying(20) NOT NULL,
+    numero integer NOT NULL,
+    titulo character varying(150) NOT NULL,
+    texto text,
+    contenido jsonb DEFAULT '{}'::jsonb NOT NULL,
+    fecha timestamp without time zone DEFAULT now() NOT NULL,
+    estado character varying(10) DEFAULT 'emitido'::character varying NOT NULL,
+    anulado_at timestamp without time zone,
+    anulado_por bigint,
+    anulado_motivo character varying(300),
+    user_id bigint NOT NULL,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT chk_cli_documentos_anulacion CHECK ((((estado)::text = 'anulado'::text) = (anulado_at IS NOT NULL))),
+    CONSTRAINT cli_documentos_contenido_check CHECK ((jsonb_typeof(contenido) = 'object'::text)),
+    CONSTRAINT cli_documentos_estado_check CHECK (((estado)::text = ANY ((ARRAY['emitido'::character varying, 'anulado'::character varying])::text[]))),
+    CONSTRAINT cli_documentos_numero_check CHECK ((numero > 0)),
+    CONSTRAINT cli_documentos_tipo_check CHECK (((tipo)::text = ANY ((ARRAY['receta'::character varying, 'orden_laboratorio'::character varying, 'orden_imagen'::character varying, 'constancia'::character varying, 'incapacidad'::character varying, 'certificado'::character varying, 'consentimiento'::character varying])::text[])))
+);
+
+
+--
+-- Name: cli_documentos_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cli_documentos_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'cli_documentos'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: cli_documentos_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.cli_documentos_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: cli_documentos_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.cli_documentos_auditoria_id_seq OWNED BY public.cli_documentos_auditoria.id;
+
+
+--
+-- Name: cli_documentos_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.cli_documentos_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: cli_documentos_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.cli_documentos_id_seq OWNED BY public.cli_documentos.id;
+
+
+--
+-- Name: cli_odontograma; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cli_odontograma (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    paciente_id bigint NOT NULL,
+    consulta_id bigint,
+    funcionario_id bigint,
+    pieza smallint NOT NULL,
+    superficies character varying(5) DEFAULT ''::character varying NOT NULL,
+    tipo character varying(25) NOT NULL,
+    notas character varying(300),
+    fecha date DEFAULT CURRENT_DATE NOT NULL,
+    estado character varying(10) DEFAULT 'vigente'::character varying NOT NULL,
+    retirado_at timestamp without time zone,
+    retirado_por bigint,
+    retirado_motivo character varying(300),
+    user_id bigint NOT NULL,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT chk_cli_odonto_retiro CHECK ((((estado)::text = 'retirado'::text) = (retirado_at IS NOT NULL))),
+    CONSTRAINT cli_odontograma_estado_check CHECK (((estado)::text = ANY ((ARRAY['vigente'::character varying, 'retirado'::character varying])::text[]))),
+    CONSTRAINT cli_odontograma_pieza_check CHECK (public.fn_cli_pieza_valida(pieza)),
+    CONSTRAINT cli_odontograma_superficies_check CHECK (((superficies)::text ~ '^[MDVLO]{0,5}$'::text)),
+    CONSTRAINT cli_odontograma_tipo_check CHECK (((tipo)::text = ANY ((ARRAY['caries'::character varying, 'obturacion'::character varying, 'sellante'::character varying, 'fractura'::character varying, 'desgaste'::character varying, 'corona'::character varying, 'endodoncia'::character varying, 'implante'::character varying, 'protesis'::character varying, 'ausente'::character varying, 'extraccion_indicada'::character varying, 'movilidad'::character varying, 'otro'::character varying])::text[])))
+);
+
+
+--
+-- Name: cli_odontograma_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cli_odontograma_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'cli_odontograma'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: cli_odontograma_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.cli_odontograma_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: cli_odontograma_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.cli_odontograma_auditoria_id_seq OWNED BY public.cli_odontograma_auditoria.id;
+
+
+--
+-- Name: cli_odontograma_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.cli_odontograma_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: cli_odontograma_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.cli_odontograma_id_seq OWNED BY public.cli_odontograma.id;
+
+
+--
+-- Name: cli_pacientes; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cli_pacientes (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    tipo character varying(10) DEFAULT 'humano'::character varying NOT NULL,
+    nombre character varying(120) NOT NULL,
+    apellidos character varying(120),
+    identificacion character varying(40),
+    fecha_nacimiento date,
+    sexo character varying(10),
+    telefono character varying(40),
+    email character varying(150),
+    direccion text,
+    tipo_sangre character varying(5),
+    alerta character varying(300),
+    cliente_id bigint,
+    funcionario_id bigint,
+    especie character varying(60),
+    raza character varying(80),
+    color character varying(60),
+    microchip character varying(40),
+    esterilizado boolean,
+    notas text,
+    is_active boolean DEFAULT true NOT NULL,
+    deleted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT chk_cli_paciente_animal CHECK ((((tipo)::text = 'animal'::text) OR ((especie IS NULL) AND (raza IS NULL) AND (microchip IS NULL)))),
+    CONSTRAINT cli_pacientes_fecha_nacimiento_check CHECK (((fecha_nacimiento IS NULL) OR (fecha_nacimiento <= CURRENT_DATE))),
+    CONSTRAINT cli_pacientes_sexo_check CHECK (((sexo IS NULL) OR ((sexo)::text = ANY ((ARRAY['masculino'::character varying, 'femenino'::character varying, 'otro'::character varying])::text[])))),
+    CONSTRAINT cli_pacientes_tipo_check CHECK (((tipo)::text = ANY ((ARRAY['humano'::character varying, 'animal'::character varying])::text[])))
+);
+
+
+--
+-- Name: cli_pacientes_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cli_pacientes_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'cli_pacientes'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: cli_pacientes_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.cli_pacientes_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: cli_pacientes_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.cli_pacientes_auditoria_id_seq OWNED BY public.cli_pacientes_auditoria.id;
+
+
+--
+-- Name: cli_pacientes_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.cli_pacientes_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: cli_pacientes_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.cli_pacientes_id_seq OWNED BY public.cli_pacientes.id;
+
+
+--
+-- Name: cli_plan_items; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cli_plan_items (
+    id bigint NOT NULL,
+    plan_id bigint NOT NULL,
+    orden integer NOT NULL,
+    pieza smallint,
+    superficies character varying(5) DEFAULT ''::character varying NOT NULL,
+    procedimiento character varying(200) NOT NULL,
+    precio numeric(14,2) NOT NULL,
+    estado character varying(10) DEFAULT 'pendiente'::character varying NOT NULL,
+    realizado_at timestamp without time zone,
+    realizado_por bigint,
+    consulta_id bigint,
+    CONSTRAINT chk_cli_plan_item_realizado CHECK ((((estado)::text = 'realizado'::text) = (realizado_at IS NOT NULL))),
+    CONSTRAINT cli_plan_items_estado_check CHECK (((estado)::text = ANY ((ARRAY['pendiente'::character varying, 'realizado'::character varying])::text[]))),
+    CONSTRAINT cli_plan_items_pieza_check CHECK (((pieza IS NULL) OR public.fn_cli_pieza_valida(pieza))),
+    CONSTRAINT cli_plan_items_precio_check CHECK ((precio >= (0)::numeric)),
+    CONSTRAINT cli_plan_items_superficies_check CHECK (((superficies)::text ~ '^[MDVLO]{0,5}$'::text))
+);
+
+
+--
+-- Name: cli_plan_items_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cli_plan_items_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'cli_plan_items'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: cli_plan_items_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.cli_plan_items_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: cli_plan_items_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.cli_plan_items_auditoria_id_seq OWNED BY public.cli_plan_items_auditoria.id;
+
+
+--
+-- Name: cli_plan_items_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.cli_plan_items_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: cli_plan_items_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.cli_plan_items_id_seq OWNED BY public.cli_plan_items.id;
+
+
+--
+-- Name: cli_planes_tratamiento; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cli_planes_tratamiento (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    paciente_id bigint NOT NULL,
+    funcionario_id bigint,
+    numero integer NOT NULL,
+    titulo character varying(150) NOT NULL,
+    notas text,
+    moneda character(3) DEFAULT 'CRC'::bpchar NOT NULL,
+    estado character varying(10) DEFAULT 'propuesto'::character varying NOT NULL,
+    aceptado_at timestamp without time zone,
+    aceptado_por bigint,
+    cancelado_at timestamp without time zone,
+    cancelado_motivo character varying(300),
+    user_id bigint NOT NULL,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT cli_planes_tratamiento_estado_check CHECK (((estado)::text = ANY ((ARRAY['propuesto'::character varying, 'aceptado'::character varying, 'completado'::character varying, 'cancelado'::character varying])::text[]))),
+    CONSTRAINT cli_planes_tratamiento_moneda_check CHECK ((moneda = ANY (ARRAY['CRC'::bpchar, 'USD'::bpchar]))),
+    CONSTRAINT cli_planes_tratamiento_numero_check CHECK ((numero > 0))
+);
+
+
+--
+-- Name: cli_planes_tratamiento_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cli_planes_tratamiento_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'cli_planes_tratamiento'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: cli_planes_tratamiento_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.cli_planes_tratamiento_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: cli_planes_tratamiento_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.cli_planes_tratamiento_auditoria_id_seq OWNED BY public.cli_planes_tratamiento_auditoria.id;
+
+
+--
+-- Name: cli_planes_tratamiento_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.cli_planes_tratamiento_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: cli_planes_tratamiento_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.cli_planes_tratamiento_id_seq OWNED BY public.cli_planes_tratamiento.id;
+
+
+--
+-- Name: cli_vet_pesos; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cli_vet_pesos (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    paciente_id bigint NOT NULL,
+    consulta_id bigint,
+    funcionario_id bigint,
+    fecha date DEFAULT CURRENT_DATE NOT NULL,
+    peso_kg numeric(7,3) NOT NULL,
+    condicion_corporal smallint,
+    notas character varying(300),
+    estado character varying(10) DEFAULT 'vigente'::character varying NOT NULL,
+    anulado_at timestamp without time zone,
+    anulado_por bigint,
+    anulado_motivo character varying(300),
+    user_id bigint NOT NULL,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT chk_cli_vet_peso_anulacion CHECK ((((estado)::text = 'anulado'::text) = (anulado_at IS NOT NULL))),
+    CONSTRAINT cli_vet_pesos_condicion_corporal_check CHECK (((condicion_corporal IS NULL) OR ((condicion_corporal >= 1) AND (condicion_corporal <= 9)))),
+    CONSTRAINT cli_vet_pesos_estado_check CHECK (((estado)::text = ANY ((ARRAY['vigente'::character varying, 'anulado'::character varying])::text[]))),
+    CONSTRAINT cli_vet_pesos_peso_kg_check CHECK (((peso_kg > (0)::numeric) AND (peso_kg <= (3000)::numeric)))
+);
+
+
+--
+-- Name: cli_vet_pesos_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cli_vet_pesos_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'cli_vet_pesos'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: cli_vet_pesos_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.cli_vet_pesos_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: cli_vet_pesos_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.cli_vet_pesos_auditoria_id_seq OWNED BY public.cli_vet_pesos_auditoria.id;
+
+
+--
+-- Name: cli_vet_pesos_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.cli_vet_pesos_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: cli_vet_pesos_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.cli_vet_pesos_id_seq OWNED BY public.cli_vet_pesos.id;
+
+
+--
+-- Name: cli_vet_preventivos; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cli_vet_preventivos (
+    id bigint NOT NULL,
+    empresa_id bigint NOT NULL,
+    paciente_id bigint NOT NULL,
+    consulta_id bigint,
+    funcionario_id bigint,
+    tipo character varying(25) NOT NULL,
+    producto character varying(120) NOT NULL,
+    fecha date DEFAULT CURRENT_DATE NOT NULL,
+    lote character varying(40),
+    proxima_fecha date,
+    notas character varying(300),
+    estado character varying(10) DEFAULT 'vigente'::character varying NOT NULL,
+    anulado_at timestamp without time zone,
+    anulado_por bigint,
+    anulado_motivo character varying(300),
+    user_id bigint NOT NULL,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    CONSTRAINT chk_cli_vet_prev_anulacion CHECK ((((estado)::text = 'anulado'::text) = (anulado_at IS NOT NULL))),
+    CONSTRAINT chk_cli_vet_prev_proxima CHECK (((proxima_fecha IS NULL) OR (proxima_fecha > fecha))),
+    CONSTRAINT cli_vet_preventivos_estado_check CHECK (((estado)::text = ANY ((ARRAY['vigente'::character varying, 'anulado'::character varying])::text[]))),
+    CONSTRAINT cli_vet_preventivos_tipo_check CHECK (((tipo)::text = ANY ((ARRAY['vacuna'::character varying, 'desparasitante_interno'::character varying, 'desparasitante_externo'::character varying])::text[])))
+);
+
+
+--
+-- Name: cli_vet_preventivos_auditoria; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cli_vet_preventivos_auditoria (
+    id bigint NOT NULL,
+    tabla character varying(50) DEFAULT 'cli_vet_preventivos'::character varying NOT NULL,
+    operacion character varying(10) NOT NULL,
+    registro_id bigint NOT NULL,
+    datos_antes jsonb,
+    datos_despues jsonb,
+    usuario_bd character varying(100) DEFAULT CURRENT_USER NOT NULL,
+    app_user_id bigint,
+    ip_address character varying(45),
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: cli_vet_preventivos_auditoria_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.cli_vet_preventivos_auditoria_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: cli_vet_preventivos_auditoria_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.cli_vet_preventivos_auditoria_id_seq OWNED BY public.cli_vet_preventivos_auditoria.id;
+
+
+--
+-- Name: cli_vet_preventivos_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.cli_vet_preventivos_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: cli_vet_preventivos_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.cli_vet_preventivos_id_seq OWNED BY public.cli_vet_preventivos.id;
+
+
+--
 -- Name: cliente_exoneraciones; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -22400,6 +24896,188 @@ ALTER TABLE ONLY public.categorias_producto_auditoria ALTER COLUMN id SET DEFAUL
 
 
 --
+-- Name: cli_accesos id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_accesos ALTER COLUMN id SET DEFAULT nextval('public.cli_accesos_id_seq'::regclass);
+
+
+--
+-- Name: cli_adjuntos id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_adjuntos ALTER COLUMN id SET DEFAULT nextval('public.cli_adjuntos_id_seq'::regclass);
+
+
+--
+-- Name: cli_adjuntos_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_adjuntos_auditoria ALTER COLUMN id SET DEFAULT nextval('public.cli_adjuntos_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: cli_antecedentes id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_antecedentes ALTER COLUMN id SET DEFAULT nextval('public.cli_antecedentes_id_seq'::regclass);
+
+
+--
+-- Name: cli_antecedentes_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_antecedentes_auditoria ALTER COLUMN id SET DEFAULT nextval('public.cli_antecedentes_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: cli_consulta_adendums id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_consulta_adendums ALTER COLUMN id SET DEFAULT nextval('public.cli_consulta_adendums_id_seq'::regclass);
+
+
+--
+-- Name: cli_consulta_diagnosticos id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_consulta_diagnosticos ALTER COLUMN id SET DEFAULT nextval('public.cli_consulta_diagnosticos_id_seq'::regclass);
+
+
+--
+-- Name: cli_consulta_diagnosticos_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_consulta_diagnosticos_auditoria ALTER COLUMN id SET DEFAULT nextval('public.cli_consulta_diagnosticos_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: cli_consulta_servicios id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_consulta_servicios ALTER COLUMN id SET DEFAULT nextval('public.cli_consulta_servicios_id_seq'::regclass);
+
+
+--
+-- Name: cli_consulta_servicios_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_consulta_servicios_auditoria ALTER COLUMN id SET DEFAULT nextval('public.cli_consulta_servicios_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: cli_consultas id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_consultas ALTER COLUMN id SET DEFAULT nextval('public.cli_consultas_id_seq'::regclass);
+
+
+--
+-- Name: cli_consultas_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_consultas_auditoria ALTER COLUMN id SET DEFAULT nextval('public.cli_consultas_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: cli_documentos id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_documentos ALTER COLUMN id SET DEFAULT nextval('public.cli_documentos_id_seq'::regclass);
+
+
+--
+-- Name: cli_documentos_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_documentos_auditoria ALTER COLUMN id SET DEFAULT nextval('public.cli_documentos_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: cli_odontograma id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_odontograma ALTER COLUMN id SET DEFAULT nextval('public.cli_odontograma_id_seq'::regclass);
+
+
+--
+-- Name: cli_odontograma_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_odontograma_auditoria ALTER COLUMN id SET DEFAULT nextval('public.cli_odontograma_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: cli_pacientes id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_pacientes ALTER COLUMN id SET DEFAULT nextval('public.cli_pacientes_id_seq'::regclass);
+
+
+--
+-- Name: cli_pacientes_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_pacientes_auditoria ALTER COLUMN id SET DEFAULT nextval('public.cli_pacientes_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: cli_plan_items id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_plan_items ALTER COLUMN id SET DEFAULT nextval('public.cli_plan_items_id_seq'::regclass);
+
+
+--
+-- Name: cli_plan_items_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_plan_items_auditoria ALTER COLUMN id SET DEFAULT nextval('public.cli_plan_items_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: cli_planes_tratamiento id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_planes_tratamiento ALTER COLUMN id SET DEFAULT nextval('public.cli_planes_tratamiento_id_seq'::regclass);
+
+
+--
+-- Name: cli_planes_tratamiento_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_planes_tratamiento_auditoria ALTER COLUMN id SET DEFAULT nextval('public.cli_planes_tratamiento_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: cli_vet_pesos id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_vet_pesos ALTER COLUMN id SET DEFAULT nextval('public.cli_vet_pesos_id_seq'::regclass);
+
+
+--
+-- Name: cli_vet_pesos_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_vet_pesos_auditoria ALTER COLUMN id SET DEFAULT nextval('public.cli_vet_pesos_auditoria_id_seq'::regclass);
+
+
+--
+-- Name: cli_vet_preventivos id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_vet_preventivos ALTER COLUMN id SET DEFAULT nextval('public.cli_vet_preventivos_id_seq'::regclass);
+
+
+--
+-- Name: cli_vet_preventivos_auditoria id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_vet_preventivos_auditoria ALTER COLUMN id SET DEFAULT nextval('public.cli_vet_preventivos_auditoria_id_seq'::regclass);
+
+
+--
 -- Name: cliente_exoneraciones id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -23679,6 +26357,214 @@ ALTER TABLE ONLY public.categorias_producto_auditoria
 
 ALTER TABLE ONLY public.categorias_producto
     ADD CONSTRAINT categorias_producto_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: cli_accesos cli_accesos_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_accesos
+    ADD CONSTRAINT cli_accesos_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: cli_adjuntos_auditoria cli_adjuntos_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_adjuntos_auditoria
+    ADD CONSTRAINT cli_adjuntos_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: cli_adjuntos cli_adjuntos_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_adjuntos
+    ADD CONSTRAINT cli_adjuntos_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: cli_antecedentes_auditoria cli_antecedentes_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_antecedentes_auditoria
+    ADD CONSTRAINT cli_antecedentes_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: cli_antecedentes cli_antecedentes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_antecedentes
+    ADD CONSTRAINT cli_antecedentes_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: cli_consulta_adendums cli_consulta_adendums_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_consulta_adendums
+    ADD CONSTRAINT cli_consulta_adendums_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: cli_consulta_diagnosticos_auditoria cli_consulta_diagnosticos_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_consulta_diagnosticos_auditoria
+    ADD CONSTRAINT cli_consulta_diagnosticos_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: cli_consulta_diagnosticos cli_consulta_diagnosticos_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_consulta_diagnosticos
+    ADD CONSTRAINT cli_consulta_diagnosticos_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: cli_consulta_servicios_auditoria cli_consulta_servicios_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_consulta_servicios_auditoria
+    ADD CONSTRAINT cli_consulta_servicios_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: cli_consulta_servicios cli_consulta_servicios_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_consulta_servicios
+    ADD CONSTRAINT cli_consulta_servicios_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: cli_consultas_auditoria cli_consultas_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_consultas_auditoria
+    ADD CONSTRAINT cli_consultas_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: cli_consultas cli_consultas_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_consultas
+    ADD CONSTRAINT cli_consultas_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: cli_documentos_auditoria cli_documentos_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_documentos_auditoria
+    ADD CONSTRAINT cli_documentos_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: cli_documentos cli_documentos_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_documentos
+    ADD CONSTRAINT cli_documentos_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: cli_odontograma_auditoria cli_odontograma_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_odontograma_auditoria
+    ADD CONSTRAINT cli_odontograma_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: cli_odontograma cli_odontograma_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_odontograma
+    ADD CONSTRAINT cli_odontograma_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: cli_pacientes_auditoria cli_pacientes_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_pacientes_auditoria
+    ADD CONSTRAINT cli_pacientes_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: cli_pacientes cli_pacientes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_pacientes
+    ADD CONSTRAINT cli_pacientes_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: cli_plan_items_auditoria cli_plan_items_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_plan_items_auditoria
+    ADD CONSTRAINT cli_plan_items_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: cli_plan_items cli_plan_items_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_plan_items
+    ADD CONSTRAINT cli_plan_items_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: cli_planes_tratamiento_auditoria cli_planes_tratamiento_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_planes_tratamiento_auditoria
+    ADD CONSTRAINT cli_planes_tratamiento_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: cli_planes_tratamiento cli_planes_tratamiento_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_planes_tratamiento
+    ADD CONSTRAINT cli_planes_tratamiento_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: cli_vet_pesos_auditoria cli_vet_pesos_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_vet_pesos_auditoria
+    ADD CONSTRAINT cli_vet_pesos_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: cli_vet_pesos cli_vet_pesos_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_vet_pesos
+    ADD CONSTRAINT cli_vet_pesos_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: cli_vet_preventivos_auditoria cli_vet_preventivos_auditoria_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_vet_preventivos_auditoria
+    ADD CONSTRAINT cli_vet_preventivos_auditoria_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: cli_vet_preventivos cli_vet_preventivos_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_vet_preventivos
+    ADD CONSTRAINT cli_vet_preventivos_pkey PRIMARY KEY (id);
 
 
 --
@@ -25454,6 +28340,230 @@ CREATE INDEX idx_caja_cierres_empresa ON public.caja_cierres USING btree (empres
 
 
 --
+-- Name: idx_cli_accesos_empresa; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cli_accesos_empresa ON public.cli_accesos USING btree (empresa_id, created_at DESC);
+
+
+--
+-- Name: idx_cli_accesos_paciente; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cli_accesos_paciente ON public.cli_accesos USING btree (paciente_id, created_at DESC);
+
+
+--
+-- Name: idx_cli_adendums_consulta; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cli_adendums_consulta ON public.cli_consulta_adendums USING btree (consulta_id, created_at);
+
+
+--
+-- Name: idx_cli_adjuntos_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cli_adjuntos_auditoria_registro ON public.cli_adjuntos_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_cli_adjuntos_paciente; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cli_adjuntos_paciente ON public.cli_adjuntos USING btree (paciente_id, created_at DESC) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_cli_antecedentes_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cli_antecedentes_auditoria_registro ON public.cli_antecedentes_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_cli_antecedentes_paciente; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cli_antecedentes_paciente ON public.cli_antecedentes USING btree (paciente_id) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_cli_consulta_diagnosticos_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cli_consulta_diagnosticos_auditoria_registro ON public.cli_consulta_diagnosticos_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_cli_consulta_servicios_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cli_consulta_servicios_auditoria_registro ON public.cli_consulta_servicios_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_cli_consultas_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cli_consultas_auditoria_registro ON public.cli_consultas_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_cli_consultas_empresa_fecha; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cli_consultas_empresa_fecha ON public.cli_consultas USING btree (empresa_id, fecha DESC) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_cli_consultas_funcionario; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cli_consultas_funcionario ON public.cli_consultas USING btree (funcionario_id) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_cli_consultas_paciente; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cli_consultas_paciente ON public.cli_consultas USING btree (paciente_id, fecha DESC) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_cli_diagnosticos_consulta; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cli_diagnosticos_consulta ON public.cli_consulta_diagnosticos USING btree (consulta_id);
+
+
+--
+-- Name: idx_cli_documentos_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cli_documentos_auditoria_registro ON public.cli_documentos_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_cli_documentos_consulta; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cli_documentos_consulta ON public.cli_documentos USING btree (consulta_id) WHERE (consulta_id IS NOT NULL);
+
+
+--
+-- Name: idx_cli_documentos_paciente; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cli_documentos_paciente ON public.cli_documentos USING btree (paciente_id, fecha DESC);
+
+
+--
+-- Name: idx_cli_odontograma_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cli_odontograma_auditoria_registro ON public.cli_odontograma_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_cli_odontograma_paciente; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cli_odontograma_paciente ON public.cli_odontograma USING btree (paciente_id, estado, pieza);
+
+
+--
+-- Name: idx_cli_pacientes_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cli_pacientes_auditoria_registro ON public.cli_pacientes_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_cli_pacientes_cliente; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cli_pacientes_cliente ON public.cli_pacientes USING btree (cliente_id) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_cli_pacientes_empresa; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cli_pacientes_empresa ON public.cli_pacientes USING btree (empresa_id, lower((nombre)::text)) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: idx_cli_plan_items_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cli_plan_items_auditoria_registro ON public.cli_plan_items_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_cli_plan_items_plan; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cli_plan_items_plan ON public.cli_plan_items USING btree (plan_id, orden);
+
+
+--
+-- Name: idx_cli_planes_paciente; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cli_planes_paciente ON public.cli_planes_tratamiento USING btree (paciente_id, created_at DESC);
+
+
+--
+-- Name: idx_cli_planes_tratamiento_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cli_planes_tratamiento_auditoria_registro ON public.cli_planes_tratamiento_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_cli_servicios_consulta; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cli_servicios_consulta ON public.cli_consulta_servicios USING btree (consulta_id);
+
+
+--
+-- Name: idx_cli_vet_pesos_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cli_vet_pesos_auditoria_registro ON public.cli_vet_pesos_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
+-- Name: idx_cli_vet_pesos_paciente; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cli_vet_pesos_paciente ON public.cli_vet_pesos USING btree (paciente_id, fecha DESC);
+
+
+--
+-- Name: idx_cli_vet_prev_paciente; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cli_vet_prev_paciente ON public.cli_vet_preventivos USING btree (paciente_id, fecha DESC);
+
+
+--
+-- Name: idx_cli_vet_prev_proxima; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cli_vet_prev_proxima ON public.cli_vet_preventivos USING btree (empresa_id, proxima_fecha) WHERE (((estado)::text = 'vigente'::text) AND (proxima_fecha IS NOT NULL));
+
+
+--
+-- Name: idx_cli_vet_preventivos_auditoria_registro; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cli_vet_preventivos_auditoria_registro ON public.cli_vet_preventivos_auditoria USING btree (registro_id, created_at DESC);
+
+
+--
 -- Name: idx_cotizaciones_empresa_estado; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -26546,6 +29656,48 @@ CREATE UNIQUE INDEX uq_agenda_espacios_nombre ON public.agenda_espacios USING bt
 
 
 --
+-- Name: uq_cli_consultas_documento; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_cli_consultas_documento ON public.cli_consultas USING btree (documento_id) WHERE (documento_id IS NOT NULL);
+
+
+--
+-- Name: uq_cli_consultas_evento; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_cli_consultas_evento ON public.cli_consultas USING btree (agenda_evento_id) WHERE ((deleted_at IS NULL) AND (agenda_evento_id IS NOT NULL));
+
+
+--
+-- Name: uq_cli_documentos_numero; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_cli_documentos_numero ON public.cli_documentos USING btree (empresa_id, tipo, numero);
+
+
+--
+-- Name: uq_cli_pacientes_identificacion; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_cli_pacientes_identificacion ON public.cli_pacientes USING btree (empresa_id, lower((identificacion)::text)) WHERE ((deleted_at IS NULL) AND ((tipo)::text = 'humano'::text) AND (identificacion IS NOT NULL));
+
+
+--
+-- Name: uq_cli_pacientes_microchip; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_cli_pacientes_microchip ON public.cli_pacientes USING btree (empresa_id, lower((microchip)::text)) WHERE ((deleted_at IS NULL) AND (microchip IS NOT NULL));
+
+
+--
+-- Name: uq_cli_planes_numero; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_cli_planes_numero ON public.cli_planes_tratamiento USING btree (empresa_id, numero);
+
+
+--
 -- Name: uq_emp_tarifa_imp_empresa_codigo; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -26795,6 +29947,132 @@ CREATE TRIGGER trg_caja_cierres_auditoria AFTER INSERT OR DELETE OR UPDATE ON pu
 --
 
 CREATE TRIGGER trg_categorias_producto_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.categorias_producto FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: cli_accesos trg_cli_accesos_inmutable; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_cli_accesos_inmutable BEFORE DELETE OR UPDATE ON public.cli_accesos FOR EACH ROW EXECUTE FUNCTION public.fn_cli_inmutable();
+
+
+--
+-- Name: cli_consulta_adendums trg_cli_adendums_inmutable; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_cli_adendums_inmutable BEFORE DELETE OR UPDATE ON public.cli_consulta_adendums FOR EACH ROW EXECUTE FUNCTION public.fn_cli_inmutable();
+
+
+--
+-- Name: cli_adjuntos trg_cli_adjuntos_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_cli_adjuntos_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.cli_adjuntos FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: cli_antecedentes trg_cli_antecedentes_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_cli_antecedentes_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.cli_antecedentes FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: cli_consulta_diagnosticos trg_cli_consulta_diagnosticos_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_cli_consulta_diagnosticos_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.cli_consulta_diagnosticos FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: cli_consulta_servicios trg_cli_consulta_servicios_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_cli_consulta_servicios_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.cli_consulta_servicios FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: cli_consultas trg_cli_consultas_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_cli_consultas_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.cli_consultas FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: cli_documentos trg_cli_documentos_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_cli_documentos_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.cli_documentos FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: cli_documentos trg_cli_documentos_inmutable; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_cli_documentos_inmutable BEFORE DELETE OR UPDATE ON public.cli_documentos FOR EACH ROW EXECUTE FUNCTION public.fn_cli_documento_inmutable();
+
+
+--
+-- Name: cli_odontograma trg_cli_odontograma_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_cli_odontograma_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.cli_odontograma FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: cli_odontograma trg_cli_odontograma_inmutable; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_cli_odontograma_inmutable BEFORE DELETE OR UPDATE ON public.cli_odontograma FOR EACH ROW EXECUTE FUNCTION public.fn_cli_odontograma_inmutable();
+
+
+--
+-- Name: cli_pacientes trg_cli_pacientes_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_cli_pacientes_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.cli_pacientes FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: cli_plan_items trg_cli_plan_items_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_cli_plan_items_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.cli_plan_items FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: cli_planes_tratamiento trg_cli_planes_tratamiento_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_cli_planes_tratamiento_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.cli_planes_tratamiento FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: cli_vet_pesos trg_cli_vet_pesos_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_cli_vet_pesos_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.cli_vet_pesos FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: cli_vet_pesos trg_cli_vet_pesos_inmutable; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_cli_vet_pesos_inmutable BEFORE DELETE OR UPDATE ON public.cli_vet_pesos FOR EACH ROW EXECUTE FUNCTION public.fn_cli_vet_inmutable();
+
+
+--
+-- Name: cli_vet_preventivos trg_cli_vet_preventivos_auditoria; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_cli_vet_preventivos_auditoria AFTER INSERT OR DELETE OR UPDATE ON public.cli_vet_preventivos FOR EACH ROW EXECUTE FUNCTION public.fn_auditoria_generica();
+
+
+--
+-- Name: cli_vet_preventivos trg_cli_vet_preventivos_inmutable; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_cli_vet_preventivos_inmutable BEFORE DELETE OR UPDATE ON public.cli_vet_preventivos FOR EACH ROW EXECUTE FUNCTION public.fn_cli_vet_inmutable();
 
 
 --
@@ -27268,6 +30546,150 @@ ALTER TABLE ONLY public.bodega_productos
 
 ALTER TABLE ONLY public.caja_cierre_medios_pago
     ADD CONSTRAINT caja_cierre_medios_pago_cierre_id_fkey FOREIGN KEY (cierre_id) REFERENCES public.caja_cierres(id) ON DELETE CASCADE;
+
+
+--
+-- Name: cli_adjuntos cli_adjuntos_consulta_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_adjuntos
+    ADD CONSTRAINT cli_adjuntos_consulta_id_fkey FOREIGN KEY (consulta_id) REFERENCES public.cli_consultas(id);
+
+
+--
+-- Name: cli_adjuntos cli_adjuntos_paciente_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_adjuntos
+    ADD CONSTRAINT cli_adjuntos_paciente_id_fkey FOREIGN KEY (paciente_id) REFERENCES public.cli_pacientes(id);
+
+
+--
+-- Name: cli_antecedentes cli_antecedentes_paciente_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_antecedentes
+    ADD CONSTRAINT cli_antecedentes_paciente_id_fkey FOREIGN KEY (paciente_id) REFERENCES public.cli_pacientes(id);
+
+
+--
+-- Name: cli_consulta_adendums cli_consulta_adendums_consulta_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_consulta_adendums
+    ADD CONSTRAINT cli_consulta_adendums_consulta_id_fkey FOREIGN KEY (consulta_id) REFERENCES public.cli_consultas(id);
+
+
+--
+-- Name: cli_consulta_diagnosticos cli_consulta_diagnosticos_consulta_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_consulta_diagnosticos
+    ADD CONSTRAINT cli_consulta_diagnosticos_consulta_id_fkey FOREIGN KEY (consulta_id) REFERENCES public.cli_consultas(id);
+
+
+--
+-- Name: cli_consulta_servicios cli_consulta_servicios_consulta_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_consulta_servicios
+    ADD CONSTRAINT cli_consulta_servicios_consulta_id_fkey FOREIGN KEY (consulta_id) REFERENCES public.cli_consultas(id);
+
+
+--
+-- Name: cli_consultas cli_consultas_paciente_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_consultas
+    ADD CONSTRAINT cli_consultas_paciente_id_fkey FOREIGN KEY (paciente_id) REFERENCES public.cli_pacientes(id);
+
+
+--
+-- Name: cli_documentos cli_documentos_consulta_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_documentos
+    ADD CONSTRAINT cli_documentos_consulta_id_fkey FOREIGN KEY (consulta_id) REFERENCES public.cli_consultas(id);
+
+
+--
+-- Name: cli_documentos cli_documentos_paciente_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_documentos
+    ADD CONSTRAINT cli_documentos_paciente_id_fkey FOREIGN KEY (paciente_id) REFERENCES public.cli_pacientes(id);
+
+
+--
+-- Name: cli_odontograma cli_odontograma_consulta_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_odontograma
+    ADD CONSTRAINT cli_odontograma_consulta_id_fkey FOREIGN KEY (consulta_id) REFERENCES public.cli_consultas(id);
+
+
+--
+-- Name: cli_odontograma cli_odontograma_paciente_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_odontograma
+    ADD CONSTRAINT cli_odontograma_paciente_id_fkey FOREIGN KEY (paciente_id) REFERENCES public.cli_pacientes(id);
+
+
+--
+-- Name: cli_plan_items cli_plan_items_consulta_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_plan_items
+    ADD CONSTRAINT cli_plan_items_consulta_id_fkey FOREIGN KEY (consulta_id) REFERENCES public.cli_consultas(id);
+
+
+--
+-- Name: cli_plan_items cli_plan_items_plan_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_plan_items
+    ADD CONSTRAINT cli_plan_items_plan_id_fkey FOREIGN KEY (plan_id) REFERENCES public.cli_planes_tratamiento(id);
+
+
+--
+-- Name: cli_planes_tratamiento cli_planes_tratamiento_paciente_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_planes_tratamiento
+    ADD CONSTRAINT cli_planes_tratamiento_paciente_id_fkey FOREIGN KEY (paciente_id) REFERENCES public.cli_pacientes(id);
+
+
+--
+-- Name: cli_vet_pesos cli_vet_pesos_consulta_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_vet_pesos
+    ADD CONSTRAINT cli_vet_pesos_consulta_id_fkey FOREIGN KEY (consulta_id) REFERENCES public.cli_consultas(id);
+
+
+--
+-- Name: cli_vet_pesos cli_vet_pesos_paciente_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_vet_pesos
+    ADD CONSTRAINT cli_vet_pesos_paciente_id_fkey FOREIGN KEY (paciente_id) REFERENCES public.cli_pacientes(id);
+
+
+--
+-- Name: cli_vet_preventivos cli_vet_preventivos_consulta_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_vet_preventivos
+    ADD CONSTRAINT cli_vet_preventivos_consulta_id_fkey FOREIGN KEY (consulta_id) REFERENCES public.cli_consultas(id);
+
+
+--
+-- Name: cli_vet_preventivos cli_vet_preventivos_paciente_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cli_vet_preventivos
+    ADD CONSTRAINT cli_vet_preventivos_paciente_id_fkey FOREIGN KEY (paciente_id) REFERENCES public.cli_pacientes(id);
 
 
 --
@@ -27970,5 +31392,5 @@ ALTER TABLE ONLY public.sucursal_bodegas
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 8Y1fQFZ66UDIRZSnKgk96xVS3ULRLurOnjtYfaOAVxgaLSbuyaJlMiP0cVeUmJ5
+\unrestrict eKZskOBtaZjvSVKlAaBmZO9Ue4A7ASOG94EiDbntrkenfdyUB9PoFsorI7WgVTP
 
